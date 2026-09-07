@@ -63,6 +63,14 @@ swift run JingXuChecks
 
 ## 打包
 
+### 未公证测试版 DMG
+
+运行 `zsh Scripts/package-test-app.sh`，生成 `outputs/JingXu-0.2.0-test.2-macOS-arm64.dmg` 和 SHA-256 校验文件。测试版显式使用临时签名，不进行公证，不调用正式发布脚本；其他 Mac 可能被 Gatekeeper 拦截。不要关闭系统安全保护。镜像内附测试版安装和备份说明，应用“关于”中也标明未公证测试版。不会自动替换已安装应用或操作用户图库。
+
+应用图标源文件为 `Packaging/AppIcon.png`，使用内置 imagegen 生成；提示词见 `Packaging/AppIcon.prompt.txt`。`Scripts/build-icon.sh` 用系统 sips/iconutil 生成多尺寸 ICNS，测试与正式打包均包含该图标。
+
+### 正式公证版
+
 ```bash
 Scripts/package-app.sh
 ```

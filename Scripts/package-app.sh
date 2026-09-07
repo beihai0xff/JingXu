@@ -21,6 +21,8 @@ cd "$PROJECT_DIR"
 swift build -c release --product JingXuApp --arch arm64
 cp .build/arm64-apple-macosx/release/JingXuApp "${APP_DIR}/Contents/MacOS/JingXuApp"
 cp Packaging/Info.plist "${APP_DIR}/Contents/Info.plist"
+zsh Scripts/build-icon.sh
+cp Packaging/AppIcon.icns "${APP_DIR}/Contents/Resources/AppIcon.icns"
 cp Packaging/Upgrade-zh-Hans.txt "${STAGING}/升级说明.txt"
 ln -s /Applications "${STAGING}/应用程序"
 chmod 755 "${APP_DIR}/Contents/MacOS/JingXuApp"
