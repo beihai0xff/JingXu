@@ -2,28 +2,7 @@ import SwiftUI
 import AppKit
 import JingXuCore
 
-@MainActor
-final class PreviewWindowController: NSObject, NSWindowDelegate {
-    private var window: NSWindow?
-    private var assetID: String?
-    var activeAssetID: String? { window?.isKeyWindow == true ? assetID : nil }
-    func show(item: AssetListItem, model: AppModel) {
-        close()
-        assetID = item.id
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 760), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = item.fileName
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        window.contentView = NSHostingView(rootView: ZoomPreview(item: item).environmentObject(model))
-        self.window = window
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-    }
-    func close() { window?.close(); window = nil }
-    func windowWillClose(_ notification: Notification) { window?.contentView = nil }
-}
-
-private struct ZoomPreview: View {
+struct ZoomPreview: View {
     @EnvironmentObject var model: AppModel
     let item: AssetListItem
     @State private var image: NSImage?
@@ -34,20 +13,35 @@ private struct ZoomPreview: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
+                Button { model.closePreview() } label: {
+                    Label("返回网格", systemImage: "square.grid.2x2")
+                }.help("返回网格（Esc）")
                 Button("适应窗口") { action = "fit"; command += 1 }
                 Button("100%") { action = "actual"; command += 1 }
                 Button("−") { action = "out"; command += 1 }
                 Button("+") { action = "in"; command += 1 }
                 Spacer()
-                Text(message).font(.caption).lineLimit(2)
                 Button("重试") { retry += 1 }
             }.padding(10)
-            ZoomScroll(image: image, action: action, command: command)
+            HStack {
+                Text(item.fileName).lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Text(message).lineLimit(2)
+            }.font(.caption).padding(.horizontal, 10).padding(.bottom, 8)
+            HStack {
+                Button { model.navigatePreview(-1) } label: {
+                    Label("上一张", systemImage: "chevron.left")
+                }.disabled(!model.canNavigatePreview(-1)).help("上一张（←）")
+                Button { model.navigatePreview(1) } label: {
+                    Label("下一张", systemImage: "chevron.right")
+                }.disabled(!model.canNavigatePreview(1)).help("下一张（→）")
+                Spacer()
+                Text("← / → 切换图片").font(.caption).foregroundStyle(.secondary)
+            }.padding(.horizontal, 10).padding(.bottom, 8)
+            ZoomScroll(image: image, action: action, command: command, onExit: { model.closePreview() })
         }
         .onExitCommand { model.closePreview() }
-        .background(FlagKeyboardHandler(enabled: !model.isDeleting && model.deletionPlan == nil && model.sourceMergePlan == nil && model.errorMessage == nil) { flag in
-            model.updateFlag(flag, assetID: item.id)
-        })
+        .onDisappear { image = nil }
         .task(id: retry) {
             let placeholder = await model.thumbnail(for: item, pixelSize: 1024)
             guard !Task.isCancelled else { return }
@@ -66,10 +60,16 @@ private struct ZoomScroll: NSViewRepresentable {
     let image: NSImage?
     let action: String
     let command: Int
+    let onExit: () -> Void
     func makeNSView(context: Context) -> PhotoScrollView { PhotoScrollView() }
     func updateNSView(_ view: PhotoScrollView, context: Context) {
+        view.onExit = onExit
         if view.photo.image !== image { view.photo.image = image; view.fit() }
         if view.lastCommand != command { view.lastCommand = command; view.perform(action) }
+    }
+    static func dismantleNSView(_ view: PhotoScrollView, coordinator: ()) {
+        view.photo.image = nil
+        view.onExit = nil
     }
 }
 
@@ -77,6 +77,7 @@ private final class PhotoScrollView: NSScrollView {
     let photo = PanImageView()
     var lastCommand = -1
     var fitted = true
+    var onExit: (() -> Void)?
     override init(frame: NSRect) {
         super.init(frame: frame)
         hasVerticalScroller = true; hasHorizontalScroller = true
@@ -104,7 +105,7 @@ private final class PhotoScrollView: NSScrollView {
         magnification = PreviewScale.bounded(target)
     }
     override func magnify(with event: NSEvent) { fitted = false; super.magnify(with: event) }
-    override func keyDown(with event: NSEvent) { if event.keyCode == 53 { window?.close() } else { super.keyDown(with: event) } }
+    override func keyDown(with event: NSEvent) { if event.keyCode == 53 { onExit?() } else { super.keyDown(with: event) } }
 }
 
 private final class PanImageView: NSImageView {
