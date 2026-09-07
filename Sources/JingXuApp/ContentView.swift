@@ -22,8 +22,9 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 420)
         }
         .toolbar { toolbar }
-        .background(FlagKeyboardHandler(enabled: !model.isDeleting && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.sourceMergePlan == nil && model.errorMessage == nil && model.selectedAsset?.kind == .photo) { flag in
-            model.updateFlag(flag)
+        .background(FlagKeyboardHandler(enabled: !model.isDeleting && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.sourceMergePlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
+            if let id = model.previewAsset?.id { model.updateFlag(flag, assetID: id) }
+            else { model.updateFlag(flag) }
         })
         .sheet(item: $model.sourceMergePlan) { plan in
             VStack(alignment: .leading, spacing: 16) {
@@ -84,9 +85,19 @@ struct ContentView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
-        .onChange(of: model.sidebarSelection) { _, _ in Task { await model.reloadAssets() } }
-        .onChange(of: model.minimumRating) { _, _ in Task { await model.reloadAssets() } }
-        .onChange(of: model.flagFilter) { _, _ in Task { await model.reloadAssets() } }
+        .onChange(of: model.sidebarSelection) { _, _ in
+            model.closePreview()
+            Task { await model.reloadAssets() }
+        }
+        .onChange(of: model.searchText) { _, _ in model.closePreview() }
+        .onChange(of: model.minimumRating) { _, _ in
+            model.closePreview()
+            Task { await model.reloadAssets() }
+        }
+        .onChange(of: model.flagFilter) { _, _ in
+            model.closePreview()
+            Task { await model.reloadAssets() }
+        }
     }
 
     private var sidebar: some View {
@@ -139,7 +150,11 @@ struct ContentView: View {
         VStack(spacing: 0) {
             filterBar
             Divider()
-            if model.assets.isEmpty {
+            if let item = model.previewAsset {
+                ZoomPreview(item: item)
+                    .id(item.id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.assets.isEmpty {
                 ContentUnavailableView {
                     Label(model.hasUserFilters ? "当前筛选无匹配结果" : "当前范围暂无照片", systemImage: "photo.on.rectangle.angled")
                 } description: {

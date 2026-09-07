@@ -33,7 +33,8 @@ final class AppModel: ObservableObject {
     @Published var sourceMergePlan: SourceMergePlan?
     private let histogramProvider = HistogramProvider()
     private var deletionCoordinator: DeletionCoordinator?
-    private lazy var previewWindow = PreviewWindowController()
+    @Published var previewAsset: AssetListItem?
+    private var previewNavigation = PreviewNavigation(photoIDs: [])
 
     let volumeMonitor = VolumeMonitor()
 
@@ -161,6 +162,11 @@ final class AppModel: ObservableObject {
         let query = currentQuery()
         do {
             assets = try await store.assets(query)
+            previewNavigation.refresh(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
+            if let id = previewAsset?.id, let refreshed = assets.first(where: { $0.id == id }) {
+                previewAsset = refreshed
+                self.selectedAssetID = id
+            }
             if let selectedAssetID, !assets.contains(where: { $0.id == selectedAssetID }) {
                 self.selectedAssetID = nil
             }
@@ -217,19 +223,40 @@ final class AppModel: ObservableObject {
 
     func openPreview(_ item: AssetListItem) {
         guard item.kind == .photo, !isDeleting else { return }
-        previewWindow.show(item: item, model: self)
+        selectAsset(item)
+        previewNavigation = PreviewNavigation(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
+        previewAsset = item
     }
     func selectAsset(_ item: AssetListItem) {
         selectedAssetID = item.id
         // A non-focusable SwiftUI grid cell otherwise leaves the search field editing.
         NSApp.keyWindow?.makeFirstResponder(nil)
     }
-    func closePreview() { previewWindow.close() }
+    func closePreview() {
+        previewAsset = nil
+        previewNavigation = PreviewNavigation(photoIDs: [])
+    }
+    var previewNavigationEnabled: Bool {
+        previewAsset != nil && !isDeleting && !isShowingImport && !isShowingAlbumCreator &&
+        deletionPlan == nil && sourceMergePlan == nil && errorMessage == nil
+    }
+    func canNavigatePreview(_ direction: Int) -> Bool {
+        guard previewNavigationEnabled, let id = previewAsset?.id else { return false }
+        return previewNavigation.neighbor(of: id, direction: direction) != nil
+    }
+    func navigatePreview(_ direction: Int) {
+        guard previewNavigationEnabled, let current = previewAsset?.id,
+              let id = previewNavigation.neighbor(of: current, direction: direction),
+              let item = assets.first(where: { $0.id == id && $0.kind == .photo }) else { return }
+        selectAsset(item)
+        previewAsset = item
+    }
     func flagFromMenu(_ flag: AssetFlag) {
         guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil,
               !isShowingImport, !isShowingAlbumCreator else { return }
-        if let id = previewWindow.activeAssetID { updateFlag(flag, assetID: id) }
-        else if NSApp.keyWindow?.title == "镜序" { updateFlag(flag) }
+        guard NSApp.keyWindow?.title == "镜序" else { return }
+        if let id = previewAsset?.id { updateFlag(flag, assetID: id) }
+        else { updateFlag(flag) }
     }
     func loadOriginal(_ item: AssetListItem) async throws -> PreviewImage {
         guard let store, let asset = try await store.asset(id: item.id),

@@ -58,6 +58,7 @@ private enum JingXuChecks {
             ("校验导入、重复跳过与不覆盖", checkSafeImport),
             ("删除范围、文件复核与中断恢复", checkDeletion),
             ("原图解码、方向、错误和取消", checkPreview),
+            ("单图切换顺序、边界及筛选隐藏", checkPreviewNavigation),
             ("直方图统计、透明像素与取消", checkHistogram),
             ("来源注册、合并、备份与移除", checkSourceManagement),
             ("图库升级备份、锁、失败保护及恢复", checkCatalogUpgrade),
@@ -75,6 +76,27 @@ private enum JingXuChecks {
             }
         }
         print("全部校验通过")
+    }
+
+    private static func checkPreviewNavigation() async throws {
+        var navigation = PreviewNavigation(photoIDs: ["a", "b", "c", "d", "b"])
+        try require(navigation.neighbor(of: "a", direction: -1) == nil, "首张不循环")
+        try require(navigation.neighbor(of: "d", direction: 1) == nil, "末张不循环")
+        try require(navigation.neighbor(of: "b", direction: 1) == "c", "按网格顺序向后")
+        try require(navigation.neighbor(of: "b", direction: -1) == "a", "按网格顺序向前")
+        navigation.refresh(photoIDs: ["d", "a", "new"])
+        try require(navigation.neighbor(of: "b", direction: 1) == "d", "隐藏当前和相邻照片后保留锚点")
+        try require(navigation.neighbor(of: "b", direction: -1) == "a", "隐藏当前照片仍可向前")
+        try require(navigation.neighbor(of: "d", direction: 1) == nil, "刷新不纳入快照外照片")
+        navigation.refresh(photoIDs: ["a", "b", "c", "d"])
+        try require(navigation.neighbor(of: "a", direction: 1) == "b", "取消旗标恢复匹配候选")
+        var current = "a"
+        for _ in 0..<100 { current = navigation.neighbor(of: current, direction: 1) ?? current }
+        try require(current == "d", "连续切换不越界")
+        let single = PreviewNavigation(photoIDs: ["a"])
+        try require(single.neighbor(of: "a", direction: 1) == nil && single.neighbor(of: "a", direction: -1) == nil, "单张禁用双向切换")
+        try require(PreviewNavigation(photoIDs: []).neighbor(of: "a", direction: 1) == nil, "空列表安全")
+        try require(navigation.neighbor(of: "missing", direction: 1) == nil && navigation.neighbor(of: "a", direction: 0) == nil, "无效目标和方向安全")
     }
 
     private static func checkImportNaming() async throws {
