@@ -65,6 +65,7 @@ public struct SourceRoot: Codable, FetchableRecord, PersistableRecord, Identifia
     public var id: String
     public var name: String
     public var bookmarkData: Data?
+    public var directoryIdentityJSON: String? = nil
     public var pathHint: String
     public var volumeIdentifier: String?
     public var isOnline: Bool

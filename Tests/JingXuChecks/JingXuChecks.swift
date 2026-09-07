@@ -3,6 +3,7 @@ import Foundation
 import ImageIO
 import JingXuCore
 import UniformTypeIdentifiers
+import GRDB
 
 private struct CheckFailure: Error, CustomStringConvertible {
     let description: String
@@ -39,6 +40,13 @@ private struct TestTrash: TrashService {
 @main
 private enum JingXuChecks {
     static func main() async throws {
+        if CommandLine.arguments.contains("--ui-fixtures") {
+            let root = try temporaryWorkspace()
+            try writeSolidJPEG(to: root.appendingPathComponent("light.jpg"), gray: 220)
+            try writeSolidJPEG(to: root.appendingPathComponent("dark.jpg"), gray: 35)
+            print(root.path)
+            return
+        }
         let checks: [(String, () async throws -> Void)] = [
             ("目录命名与清理", checkImportNaming),
             ("文件路径与 SHA-256", checkFileIdentityAndHash),
@@ -50,6 +58,9 @@ private enum JingXuChecks {
             ("校验导入、重复跳过与不覆盖", checkSafeImport),
             ("删除范围、文件复核与中断恢复", checkDeletion),
             ("原图解码、方向、错误和取消", checkPreview),
+            ("直方图统计、透明像素与取消", checkHistogram),
+            ("来源注册、合并、备份与移除", checkSourceManagement),
+            ("图库升级备份、锁、失败保护及恢复", checkCatalogUpgrade),
             ("10 万条目录查询性能", checkLargeCatalog)
         ]
 
@@ -408,6 +419,227 @@ private enum JingXuChecks {
         }
         do { _ = try await task.value; throw CheckFailure(description: "未取消原图加载") }
         catch is CancellationError {}
+    }
+
+    private static func checkHistogram() async throws {
+        let colors: [UInt8] = [0,0,0,255, 255,255,255,255, 128,128,128,255,
+                               255,0,0,255, 0,255,0,255, 0,0,255,255, 0,0,0,0]
+        let data = Data(colors)
+        let image = CGImage(width: 7, height: 1, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 28,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue),
+            provider: CGDataProvider(data: data as CFData)!, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        let histogram = try HistogramProvider.calculate(image)
+        try require(histogram.luminance.reduce(0,+) == 6, "透明像素未排除")
+        try require(histogram.luminance[0] == 1 && histogram.luminance[255] == 1 && histogram.luminance[128] == 1, "黑白灰亮度统计错误")
+        try require(histogram.red[255] == 2 && histogram.green[255] == 2 && histogram.blue[255] == 2, "RGB 通道统计错误")
+        let root = try temporaryWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("image.jpg")
+        try writeSolidJPEG(to: url, gray: 128)
+        let asset = MediaAsset(sourceID: "test", relativePath: "image.jpg", fileIdentifier: nil, fileName: "image.jpg", uniformType: nil, kind: .photo, fileSize: 1, modifiedAt: Date())
+        let provider = HistogramProvider()
+        let decoded = try await provider.histogram(asset: asset, url: url)
+        try require(decoded.luminance.reduce(0,+) == 4096, "JPEG 直方图样本数错误")
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await provider.histogram(asset: asset, url: url)
+        }
+        do { _ = try await cancelled.value; throw CheckFailure(description: "缓存命中未响应取消") } catch is CancellationError {}
+    }
+
+    private static func checkSourceManagement() async throws {
+        let root = try temporaryWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("photos")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let dbURL = root.appendingPathComponent("catalog.sqlite")
+        let store = try CatalogStore(databaseURL: dbURL)
+        let original = try await store.registerSource(at: folder)
+        let same = try await store.registerSource(at: folder)
+        try require(original.id == same.id, "重复添加未复用来源")
+        let link = root.appendingPathComponent("linked")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folder)
+        let linked = try await store.registerSource(at: link)
+        try require(linked.id == original.id, "符号链接未识别为同一目录")
+        let child = folder.appendingPathComponent("photos")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        let childSource = try await store.registerSource(at: child)
+        try require(childSource.id != original.id, "父子目录被误合并")
+        let other = root.appendingPathComponent("elsewhere/photos")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        let otherSource = try await store.registerSource(at: other)
+        try require(otherSource.id != original.id, "同名目录被误合并")
+        let duplicate = SourceRoot(name: "重复", bookmarkData: nil, pathHint: folder.path)
+        try await store.upsertSource(duplicate)
+        let url = folder.appendingPathComponent("one.jpg")
+        try Data("original".utf8).write(to: url)
+        let modified = Date(timeIntervalSince1970: 1000)
+        let first = try await store.upsertAsset(MediaAsset(sourceID: original.id, relativePath: "one.jpg", fileIdentifier: "same-id", fileName: "one.jpg", uniformType: nil, kind: .photo, fileSize: 8, modifiedAt: modified))
+        let second = try await store.upsertAsset(MediaAsset(sourceID: duplicate.id, relativePath: "one.jpg", fileIdentifier: "same-id", fileName: "one.jpg", uniformType: nil, kind: .photo, fileSize: 8, modifiedAt: modified))
+        try await store.saveAnnotation(UserAnnotation(assetID: first.id, rating: 2, flag: .picked, keywords: ["A"]))
+        try await Task.sleep(for: .milliseconds(10))
+        try await store.saveAnnotation(UserAnnotation(assetID: second.id, rating: 5, flag: .rejected, keywords: ["B"]))
+        let album = Album(name: "保留成员")
+        try await store.saveAlbum(album)
+        try await store.add(assetID: second.id, toAlbum: album.id)
+        let plan = try await store.prepareSourceMerge()
+        try require(plan.groups.count == 1 && plan.conflicts == 1, "重复来源或标注冲突统计错误")
+        let backup = root.appendingPathComponent("backup.sqlite")
+        let faultDB = try DatabaseQueue(path: dbURL.path)
+        try await faultDB.write { db in
+            try db.execute(sql: "CREATE TRIGGER fail_source_merge BEFORE DELETE ON sourceRoots BEGIN SELECT RAISE(ABORT, 'injected merge failure'); END")
+        }
+        do {
+            _ = try await store.mergeSources(plan, backupURL: root.appendingPathComponent("rollback-backup.sqlite"))
+            throw CheckFailure(description: "故障注入未触发回滚")
+        } catch is DatabaseError {}
+        let rolledBack = try await store.asset(id: second.id)
+        let oldAnnotation = try await store.annotation(for: first.id)
+        try require(rolledBack != nil && oldAnnotation.keywords == ["A"], "合并失败后发生部分提交")
+        try await faultDB.write { db in try db.execute(sql: "DROP TRIGGER fail_source_merge") }
+        let report = try await store.mergeSources(plan, backupURL: backup)
+        try require(report.mergedGroups == 1 && report.skipped.isEmpty, "来源未合并")
+        let merged = try await store.annotation(for: first.id)
+        try require(merged.rating == 5 && merged.flag == .rejected && merged.keywords == ["A", "B"], "标注合并规则错误")
+        let members = try await store.assets(AssetQuery(albumID: album.id))
+        try require(members.count == 1 && members[0].id == first.id, "相册关系未迁移")
+        let backupStore = try CatalogStore(databaseURL: backup)
+        let backupSource = try await backupStore.source(id: duplicate.id)
+        try require(backupSource != nil, "备份不包含合并前数据")
+        let reopened = try CatalogStore(databaseURL: dbURL)
+        let restored = try await reopened.annotation(for: first.id)
+        try require(restored.keywords == ["A", "B"], "合并结果重启丢失")
+        let conflicting = SourceRoot(name: "冲突来源", bookmarkData: nil, pathHint: folder.path)
+        try await store.upsertSource(conflicting)
+        _ = try await store.upsertAsset(MediaAsset(sourceID: conflicting.id, relativePath: "one.jpg", fileIdentifier: "different-id", fileName: "one.jpg", uniformType: nil, kind: .photo, fileSize: 8, modifiedAt: modified))
+        let offline = SourceRoot(name: "离线", bookmarkData: nil, pathHint: root.appendingPathComponent("unmounted").path)
+        try await store.upsertSource(offline)
+        let conflictingPlan = try await store.prepareSourceMerge()
+        try require(conflictingPlan.warnings.count == 1, "未报告离线来源")
+        let skipped = try await store.mergeSources(conflictingPlan, backupURL: root.appendingPathComponent("conflict-backup.sqlite"))
+        try require(skipped.mergedGroups == 0 && skipped.skipped.count == 1, "文件身份冲突没有跳过整个组")
+        let preserved = try await store.asset(id: first.id)
+        try require(preserved != nil, "冲突组索引被修改")
+        try await store.deleteAlbum(id: album.id)
+        let kept = try await store.asset(id: first.id)
+        try require(kept != nil, "删除相册误删索引")
+        do {
+            _ = try await store.removeSource(id: original.id, backupURL: backup)
+            throw CheckFailure(description: "备份路径冲突仍执行删除")
+        } catch is CocoaError {}
+        let stillPresent = try await store.source(id: original.id)
+        try require(stillPresent != nil, "备份失败后来源丢失")
+        _ = try await store.removeSource(id: original.id, backupURL: root.appendingPathComponent("remove-backup.sqlite"))
+        let removed = try await store.asset(id: first.id)
+        try require(removed == nil && FileManager.default.fileExists(atPath: url.path), "来源移除未清理索引或修改原文件")
+    }
+
+    private static func seedUpgradeFixture(_ url: URL, version: Int) async throws {
+        do {
+            let store = try CatalogStore(databaseURL: url)
+            let source = SourceRoot(id: "upgrade-source", name: "升级测试", bookmarkData: nil, pathHint: url.deletingLastPathComponent().path)
+            try await store.upsertSource(source)
+            let asset = MediaAsset(id: "upgrade-photo", sourceID: source.id, relativePath: "original.jpg", fileIdentifier: "file-1", fileName: "original.jpg", uniformType: "public.jpeg", kind: .photo, fileSize: 8, modifiedAt: Date(timeIntervalSince1970: 1000))
+            _ = try await store.upsertAsset(asset)
+            try await store.saveAnnotation(UserAnnotation(assetID: asset.id, rating: 4, flag: .picked, keywords: ["升级保留"]))
+            let album = Album(id: "upgrade-album", name: "旧相册")
+            try await store.saveAlbum(album)
+            try await store.add(assetID: asset.id, toAlbum: album.id)
+        }
+        let db = try DatabaseQueue(path: url.path)
+        try await db.write { db in
+            if version < 3 {
+                try db.execute(sql: "DROP INDEX sourceRoots_directoryIdentity")
+                try db.execute(sql: "ALTER TABLE sourceRoots DROP COLUMN directoryIdentityJSON")
+                try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'v3-source-directory-identity'")
+            }
+            if version < 2 {
+                try db.execute(sql: "DROP INDEX mediaAssets_fileIdentifier")
+                try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'v2-file-identity-index'")
+            }
+        }
+        try db.close()
+    }
+
+    private static func checkCatalogUpgrade() async throws {
+        let root = try temporaryWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for version in 1...3 {
+            let directory = root.appendingPathComponent("v\(version)")
+            let url = directory.appendingPathComponent("Catalog.sqlite")
+            try await seedUpgradeFixture(url, version: version)
+            try Data("original".utf8).write(to: directory.appendingPathComponent("original.jpg"))
+            try JSONEncoder().encode([DeletionJournalEntry]()).write(to: directory.appendingPathComponent("deletions.json"))
+            let coordinator = CatalogUpgradeCoordinator(databaseURL: url)
+            do {
+                let store = try await coordinator.open()
+                let annotation = try await store.annotation(for: "upgrade-photo")
+                let members = try await store.assets(AssetQuery(albumID: "upgrade-album"))
+                try require(annotation.rating == 4 && annotation.flag == .picked && annotation.keywords == ["升级保留"] && members.count == 1, "升级损坏用户数据")
+                do { _ = try CatalogLease(databaseURL: url); throw CheckFailure(description: "第二个实例获得图库锁") } catch is CatalogUpgradeError {}
+                do { try await coordinator.restore(from: directory); throw CheckFailure(description: "连接尚未关闭就恢复") } catch is CatalogUpgradeError {}
+            }
+            let backups = (try? FileManager.default.contentsOfDirectory(at: CatalogUpgradeCoordinator.backupDirectory(for: url), includingPropertiesForKeys: nil)) ?? []
+            try require(backups.count == (version < 3 ? 1 : 0), "备份创建时机错误")
+            if version < 3 {
+                let backup = backups[0]
+                let manifest = try JSONDecoder().decode(UpgradeManifest.self, from: Data(contentsOf: backup.appendingPathComponent("manifest.json")))
+                try require(manifest.migrations.count == version && manifest.journalHash != nil, "备份缺少版本或日志")
+                // A persisted intent simulates a process stopping before recovery completes.
+                let preserved = directory.appendingPathComponent("Backups/preserved")
+                try FileManager.default.createDirectory(at: preserved, withIntermediateDirectories: true)
+                try JSONEncoder().encode(["backup": backup.path, "preserved": preserved.path]).write(to: directory.appendingPathComponent("restore-state.json"))
+                do { _ = try CatalogStore(databaseURL: url); throw CheckFailure(description: "恢复中断时仍允许打开图库") } catch is CatalogUpgradeError {}
+                try await coordinator.restore(from: backup)
+                var config = Configuration(); config.readonly = true
+                let reader = try DatabaseQueue(path: url.path, configuration: config)
+                let count = try await reader.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM grdb_migrations")! }
+                try require(count == version, "没有恢复升级前版本")
+                try reader.close()
+            }
+            let photo = try Data(contentsOf: directory.appendingPathComponent("original.jpg"))
+            try require(photo == Data("original".utf8), "升级或恢复修改原照片")
+        }
+        let unknownURL = root.appendingPathComponent("unknown/Catalog.sqlite")
+        try await seedUpgradeFixture(unknownURL, version: 3)
+        let unknownDB = try DatabaseQueue(path: unknownURL.path)
+        try await unknownDB.write { try $0.execute(sql: "INSERT INTO grdb_migrations(identifier) VALUES ('v99-future')") }
+        do { _ = try CatalogStore(databaseURL: unknownURL); throw CheckFailure(description: "新版数据库允许降级打开") } catch is CatalogUpgradeError {}
+        try unknownDB.close()
+        let failureURL = root.appendingPathComponent("backup-failure/Catalog.sqlite")
+        try await seedUpgradeFixture(failureURL, version: 1)
+        try Data("not a directory".utf8).write(to: failureURL.deletingLastPathComponent().appendingPathComponent("Backups"))
+        do { _ = try CatalogStore(databaseURL: failureURL); throw CheckFailure(description: "备份失败仍继续迁移") } catch is CocoaError {}
+        let reader = try DatabaseQueue(path: failureURL.path)
+        let applied = try await reader.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM grdb_migrations")! }
+        try require(applied == 1, "备份失败后改变数据库版本")
+        try reader.close()
+        let walURL = root.appendingPathComponent("wal/Catalog.sqlite")
+        try await seedUpgradeFixture(walURL, version: 1)
+        let walWriter = try DatabaseQueue(path: walURL.path)
+        try await walWriter.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA journal_mode = WAL")
+            try db.execute(sql: "PRAGMA wal_autocheckpoint = 0")
+            try db.execute(sql: "UPDATE annotations SET rating = 5 WHERE assetID = 'upgrade-photo'")
+        }
+        do { _ = try CatalogStore(databaseURL: walURL) }
+        let walBackups = try FileManager.default.contentsOfDirectory(at: CatalogUpgradeCoordinator.backupDirectory(for: walURL), includingPropertiesForKeys: nil)
+        let snapshot = try DatabaseQueue(path: walBackups[0].appendingPathComponent("Catalog.sqlite").path)
+        let rating = try await snapshot.read { try Int.fetchOne($0, sql: "SELECT rating FROM annotations WHERE assetID = 'upgrade-photo'") }
+        try require(rating == 5, "在线备份遗漏 WAL 中已提交数据")
+        try snapshot.close(); try walWriter.close()
+
+        let faultURL = root.appendingPathComponent("migration-fault/Catalog.sqlite")
+        try await seedUpgradeFixture(faultURL, version: 1)
+        let faultWriter = try DatabaseQueue(path: faultURL.path)
+        try await faultWriter.write { db in
+            try db.execute(sql: "CREATE TRIGGER fail_upgrade BEFORE INSERT ON grdb_migrations BEGIN SELECT RAISE(ABORT, 'injected migration failure'); END")
+        }
+        do { _ = try CatalogStore(databaseURL: faultURL); throw CheckFailure(description: "迁移故障未阻止启动") } catch is DatabaseError {}
+        let unchanged = try await faultWriter.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM grdb_migrations") }
+        try require(unchanged == 1, "失败的迁移没有回滚")
+        try faultWriter.close()
     }
 
     private static func temporaryWorkspace() throws -> URL {

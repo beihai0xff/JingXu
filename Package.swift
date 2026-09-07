@@ -29,7 +29,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "JingXuChecks",
-            dependencies: ["JingXuCore"],
+            dependencies: ["JingXuCore", .product(name: "GRDB", package: "GRDB.swift")],
             path: "Tests/JingXuChecks"
         )
     ]
