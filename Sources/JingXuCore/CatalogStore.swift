@@ -156,6 +156,9 @@ public actor CatalogStore: CatalogRepository {
                 table.column("updatedAt", .datetime).notNull()
             }
         }
+        migrator.registerMigration("v2-file-identity-index") { db in
+            try db.create(index: "mediaAssets_fileIdentifier", on: "mediaAssets", columns: ["fileIdentifier"])
+        }
         return migrator
     }
 
@@ -219,9 +222,34 @@ public actor CatalogStore: CatalogRepository {
     }
 
     public func assets(_ query: AssetQuery) throws -> [AssetListItem] {
+        try queryAssets(query, rejectedOnly: false)
+    }
+
+    public func deletionCandidates(_ query: AssetQuery) throws -> [MediaAsset] {
+        var unlimited = query
+        unlimited.limit = Int.max
+        unlimited.offset = 0
+        let ids = try queryAssets(unlimited, rejectedOnly: true).map(\.id)
+        return try dbPool.read { db in try ids.compactMap { try MediaAsset.fetchOne(db, key: $0) } }
+    }
+
+    public func removeAssetRecords(_ ids: [String]) throws {
+        try dbPool.write { db in
+            for id in ids { _ = try MediaAsset.deleteOne(db, key: id) }
+        }
+    }
+
+    public func assetsWithFileIdentifier(_ identifier: String) throws -> [MediaAsset] {
+        try dbPool.read { db in
+            try MediaAsset.fetchAll(db, sql: "SELECT * FROM mediaAssets WHERE fileIdentifier = ?", arguments: [identifier])
+        }
+    }
+
+    private func queryAssets(_ query: AssetQuery, rejectedOnly: Bool) throws -> [AssetListItem] {
         var joins = "LEFT JOIN annotations an ON an.assetID = a.id LEFT JOIN analysisResults ar ON ar.assetID = a.id"
         var conditions: [String] = []
         var arguments: StatementArguments = []
+        if rejectedOnly { conditions.append("a.kind = 'photo' AND an.flag = 'rejected'") }
 
         if let albumID = query.albumID {
             joins += " JOIN albumAssets aa ON aa.assetID = a.id"
