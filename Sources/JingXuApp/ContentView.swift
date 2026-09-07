@@ -18,9 +18,30 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 560, ideal: 760)
         } detail: {
             inspector
+                .disabled(model.isDeleting)
                 .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 420)
         }
         .toolbar { toolbar }
+        .sheet(item: $model.deletionPlan) { plan in
+            VStack(alignment: .leading, spacing: 16) {
+                Text("清理淘汰图片").font(.title2)
+                Text("将当前范围内的 \(plan.files.count) 个照片文件（\(ByteCountFormatter.string(fromByteCount: plan.totalBytes, countStyle: .file))）移到废纸篓。不会删除视频、配对文件或 XMP。")
+                Text("可在访达中恢复文件；已清理的评分、标签和相册成员不会自动恢复。")
+                DisclosureGroup("查看固定文件清单") {
+                    ScrollView { LazyVStack(alignment: .leading) {
+                        ForEach(plan.files) { file in
+                            Text((plan.sourcePaths[file.sourceID].map { $0 + "/" } ?? "") + file.relativePath)
+                                .font(.caption).textSelection(.enabled)
+                        }
+                    } }.frame(height: 230)
+                }
+                HStack {
+                    Spacer()
+                    Button("取消") { model.deletionPlan = nil }.keyboardShortcut(.cancelAction)
+                    Button("移到废纸篓", role: .destructive) { model.confirmDeletion(plan) }.disabled(plan.files.isEmpty)
+                }
+            }.padding(24).frame(width: 580)
+        }
         .sheet(isPresented: $model.isShowingImport) {
             ImportSheet()
                 .environmentObject(model)
@@ -102,6 +123,7 @@ struct ContentView: View {
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
                         ForEach(model.assets) { item in
                             AssetCell(item: item, size: model.gridSize, isSelected: model.selectedAssetID == item.id)
+                                .onTapGesture(count: 2) { model.selectedAssetID = item.id; model.openPreview(item) }
                                 .onTapGesture { model.selectedAssetID = item.id }
                                 .contextMenu {
                                     Button("在访达中显示") {
@@ -175,6 +197,8 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     LargePreview(item: item)
+                        .onTapGesture { model.openPreview(item) }
+                        .help("点击放大查看原图")
                     Text(item.fileName).font(.headline).textSelection(.enabled)
                     ratingControl(item)
                     flagControl(item)
@@ -297,6 +321,8 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
+            Button("清理淘汰图片…", systemImage: "trash") { model.prepareDeletion() }
+                .disabled(model.isWorking || model.deletionPlan != nil)
             Button { model.chooseAndAddFolder() } label: { Label("添加文件夹", systemImage: "folder.badge.plus") }
             Button { model.isShowingImport = true } label: { Label("从相机卡导入", systemImage: "externaldrive.badge.plus") }
         }

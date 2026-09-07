@@ -28,6 +28,10 @@ final class AppModel: ObservableObject {
     @Published var importProgress: ImportProgress?
     @Published var scanProgress: ScanProgress?
     @Published var analysisProgress: AnalysisProgress?
+    @Published var deletionPlan: DeletionPlan?
+    @Published var isDeleting = false
+    private var deletionCoordinator: DeletionCoordinator?
+    private lazy var previewWindow = PreviewWindowController()
 
     let volumeMonitor = VolumeMonitor()
 
@@ -48,6 +52,7 @@ final class AppModel: ObservableObject {
             let store = try CatalogStore(databaseURL: JingXuPaths.databaseURL())
             let scanner = DefaultSourceScanner(repository: store)
             self.store = store
+            self.deletionCoordinator = DeletionCoordinator(store: store, journalURL: try JingXuPaths.databaseURL().deletingLastPathComponent().appendingPathComponent("deletions.json"))
             self.scanner = scanner
             self.importer = ImportCoordinator(repository: store, scanner: scanner)
             self.analysisCoordinator = AnalysisCoordinator(repository: store)
@@ -62,7 +67,21 @@ final class AppModel: ObservableObject {
             xmpExporter = nil
             errorMessage = "初始化图库失败：\(error.localizedDescription)"
         }
-        Task { await reloadAll() }
+        isWorking = true
+        Task {
+            do {
+                let journal = try JingXuPaths.databaseURL().deletingLastPathComponent().appendingPathComponent("deletions.json")
+                if FileManager.default.fileExists(atPath: journal.path) {
+                    let entries = try JSONDecoder().decode([DeletionJournalEntry].self, from: Data(contentsOf: journal))
+                    let pendingIDs = Set(entries.filter { $0.state == "moved" || $0.state == "moving" }.flatMap { $0.relatedIDs ?? [$0.asset.id] })
+                    if !pendingIDs.isEmpty { try thumbnailProvider?.invalidate(assetIDs: pendingIDs) }
+                }
+                let warnings = try await deletionCoordinator?.recover() ?? []
+                if !warnings.isEmpty { errorMessage = warnings.joined(separator: "\n") }
+            } catch { errorMessage = "恢复删除记录失败：\(error.localizedDescription)" }
+            await reloadAll()
+            isWorking = false
+        }
     }
 
     deinit {
@@ -84,6 +103,17 @@ final class AppModel: ObservableObject {
 
     func reloadAssets() async {
         guard let store else { return }
+        let query = currentQuery()
+        do {
+            assets = try await store.assets(query)
+            if let selectedAssetID, !assets.contains(where: { $0.id == selectedAssetID }) {
+                self.selectedAssetID = nil
+            }
+            statusText = "显示 \(assets.count) 项"
+        } catch { errorMessage = "载入照片失败：\(error.localizedDescription)" }
+    }
+
+    private func currentQuery() -> AssetQuery {
         var query = AssetQuery(
             searchText: searchText,
             minimumRating: minimumRating,
@@ -96,15 +126,52 @@ final class AppModel: ObservableObject {
         case .album(let id): query.albumID = id
         case nil: break
         }
-        do {
-            assets = try await store.assets(query)
-            if let selectedAssetID, !assets.contains(where: { $0.id == selectedAssetID }) {
-                self.selectedAssetID = nil
-            }
-            statusText = "显示 \(assets.count) 项"
-        } catch {
-            errorMessage = "载入照片失败：\(error.localizedDescription)"
+        return query
+    }
+
+    func prepareDeletion() {
+        guard !isWorking, let deletionCoordinator else { return }
+        let query = currentQuery()
+        startOperation {
+            do { self.deletionPlan = try await deletionCoordinator.prepare(query) }
+            catch { self.errorMessage = error.localizedDescription }
         }
+    }
+
+    func confirmDeletion(_ plan: DeletionPlan) {
+        deletionPlan = nil
+        guard let deletionCoordinator else { return }
+        closePreview()
+        startOperation {
+            self.isDeleting = true
+            defer { self.isDeleting = false }
+            do {
+                let report = try await deletionCoordinator.execute(plan) { done, total in
+                    await MainActor.run { self.statusText = "正在移到废纸篓 \(done)/\(total)" }
+                }
+                try self.thumbnailProvider?.invalidate(assetIDs: Set(plan.files.map(\.id)))
+                await self.reloadAll()
+                self.errorMessage = "成功 \(report.deleted)，跳过 \(report.skipped)，失败 \(report.failures.count)\(report.cancelled ? "；已取消后续项目" : "")\n" + (report.failures + report.skipReasons).prefix(30).joined(separator: "\n")
+            } catch {
+                try? self.thumbnailProvider?.invalidate(assetIDs: Set(plan.files.map(\.id)))
+                await self.reloadAll()
+                self.errorMessage = "清理未完成：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    func openPreview(_ item: AssetListItem) {
+        guard item.kind == .photo, !isDeleting else { return }
+        previewWindow.show(item: item, model: self)
+    }
+    func closePreview() { previewWindow.close() }
+    func loadOriginal(_ item: AssetListItem) async throws -> PreviewImage {
+        guard let store, let asset = try await store.asset(id: item.id),
+              let source = try await store.source(id: asset.sourceID) else { throw CocoaError(.fileNoSuchFile) }
+        let root = try BookmarkStore.resolve(source).url
+        let access = root.startAccessingSecurityScopedResource()
+        defer { if access { root.stopAccessingSecurityScopedResource() } }
+        return try await ImagePreviewLoader().load(url: root.appendingPathComponent(asset.relativePath))
     }
 
     func chooseAndAddFolder() {
@@ -215,6 +282,7 @@ final class AppModel: ObservableObject {
     }
 
     func updateRating(_ rating: Int) {
+        guard !isDeleting else { return }
         guard let selectedAssetID, let store else { return }
         Task {
             do {
@@ -227,6 +295,7 @@ final class AppModel: ObservableObject {
     }
 
     func updateFlag(_ flag: AssetFlag) {
+        guard !isDeleting else { return }
         guard let selectedAssetID, let store else { return }
         Task {
             do {
@@ -239,6 +308,7 @@ final class AppModel: ObservableObject {
     }
 
     func updateKeywords(_ keywords: [String]) {
+        guard !isDeleting else { return }
         guard let selectedAssetID, let store else { return }
         Task {
             do {
@@ -251,6 +321,7 @@ final class AppModel: ObservableObject {
     }
 
     func resolveSuggestion(accepted: Bool) {
+        guard !isDeleting else { return }
         guard let selectedAssetID, let store else { return }
         Task {
             do {
@@ -357,7 +428,7 @@ final class AppModel: ObservableObject {
     }
 
     private func startOperation(_ work: @escaping @MainActor @Sendable () async -> Void) {
-        operationTask?.cancel()
+        guard !isWorking, deletionPlan == nil else { return }
         isWorking = true
         operationTask = Task {
             await work()

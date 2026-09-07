@@ -190,6 +190,7 @@ public actor AnalysisCoordinator {
             ($0.0.capturedAt ?? $0.0.modifiedAt) < ($1.0.capturedAt ?? $1.0.modifiedAt)
         }
         var currentGroup: String?
+        guard sorted.count > 1 else { return }
         for index in 1..<sorted.count {
             let previous = sorted[index - 1]
             let current = sorted[index]

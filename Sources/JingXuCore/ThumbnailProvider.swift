@@ -49,4 +49,13 @@ public final class DefaultThumbnailProvider: ThumbnailProvider, @unchecked Senda
         let urls = try FileManager.default.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil)
         for url in urls { try FileManager.default.removeItem(at: url) }
     }
+
+    public func invalidate(assetIDs: Set<String>) throws {
+        memoryCache.removeAllObjects()
+        for url in try FileManager.default.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil) {
+            if assetIDs.contains(where: { url.lastPathComponent.hasPrefix($0 + "-") }) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+    }
 }

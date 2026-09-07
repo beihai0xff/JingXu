@@ -26,6 +26,16 @@ private struct StubMetadataExtractor: MetadataExtractor {
     }
 }
 
+private struct TestTrash: TrashService {
+    let directory: URL
+    func trash(_ url: URL) throws -> URL? {
+        if url.lastPathComponent == "fail.jpg" { throw CocoaError(.fileWriteNoPermission) }
+        let target = directory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.moveItem(at: url, to: target)
+        return target
+    }
+}
+
 @main
 private enum JingXuChecks {
     static func main() async throws {
@@ -38,6 +48,8 @@ private enum JingXuChecks {
             ("图像元数据与质量建议", checkMetadataAndQuality),
             ("增量扫描与 RAW/JPEG 配对", checkIncrementalScan),
             ("校验导入、重复跳过与不覆盖", checkSafeImport),
+            ("删除范围、文件复核与中断恢复", checkDeletion),
+            ("原图解码、方向、错误和取消", checkPreview),
             ("10 万条目录查询性能", checkLargeCatalog)
         ]
 
@@ -280,6 +292,122 @@ private enum JingXuChecks {
         let elapsed = start.duration(to: .now)
         try require(firstPage.count == 2_000, "10 万条目录未返回完整首批结果")
         try require(elapsed < .milliseconds(500), "10 万条目录筛选超过 500ms：\(elapsed)")
+    }
+
+    private static func checkDeletion() async throws {
+        let root = try temporaryWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CatalogStore(databaseURL: root.appendingPathComponent("db.sqlite"))
+        let source = SourceRoot(name: "测试来源", bookmarkData: nil, pathHint: root.path)
+        try await store.upsertSource(source)
+        var many: [MediaAsset] = []
+        for i in 0..<2_005 {
+            many.append(MediaAsset(sourceID: source.id, relativePath: "many\(i).jpg", fileIdentifier: nil, fileName: "many\(i).jpg", uniformType: nil, kind: .photo, fileSize: 1, modifiedAt: Date()))
+        }
+        let saved = try await store.upsertAssets(many)
+        for asset in saved { try await store.saveAnnotation(UserAnnotation(assetID: asset.id, flag: .rejected)) }
+        let journal = root.appendingPathComponent("journal.json")
+        let trashDir = root.appendingPathComponent("trash")
+        try FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+        let coordinator = DeletionCoordinator(store: store, journalURL: journal, trash: TestTrash(directory: trashDir))
+        let all = try await coordinator.prepare(AssetQuery(limit: 2_000))
+        try require(all.files.count == 2_005, "删除候选被显示上限截断")
+        let excluded = try await coordinator.prepare(AssetQuery(searchText: "absent"))
+        try require(excluded.files.isEmpty, "搜索范围泄漏")
+        let picked = try await coordinator.prepare(AssetQuery(flag: .picked))
+        try require(picked.files.isEmpty, "旗标范围泄漏")
+        let album = Album(name: "隔离")
+        try await store.saveAlbum(album)
+        try await store.add(assetID: saved[0].id, toAlbum: album.id)
+        let albumPlan = try await coordinator.prepare(AssetQuery(albumID: album.id))
+        try require(albumPlan.files.count == 1, "相册范围泄漏")
+        try await store.removeAssetRecords(saved.map(\.id))
+
+        var files: [MediaAsset] = []
+        for name in ["ok.jpg", "fail.jpg", "changed.jpg", "unflag.jpg", "video.mov", "pair.raw", "missing.jpg"] {
+            let url = root.appendingPathComponent(name)
+            try Data("original".utf8).write(to: url)
+            let date = try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate!
+            let asset = try await store.upsertAsset(MediaAsset(sourceID: source.id, relativePath: name, fileIdentifier: FileIdentity.resourceIdentifier(for: url), fileName: name, uniformType: nil, kind: name == "video.mov" ? .video : .photo, fileSize: 8, modifiedAt: date))
+            try await store.saveAnnotation(UserAnnotation(assetID: asset.id, flag: name == "pair.raw" ? .none : .rejected))
+            files.append(asset)
+        }
+        let plan = try await coordinator.prepare(AssetQuery())
+        try require(plan.files.count == 5, "视频或未标记配对文件被列入删除")
+        try Data("replacement contents".utf8).write(to: root.appendingPathComponent("changed.jpg"), options: .atomic)
+        try await store.saveAnnotation(UserAnnotation(assetID: files[3].id))
+        try FileManager.default.moveItem(at: root.appendingPathComponent("missing.jpg"), to: root.appendingPathComponent("offline.jpg"))
+        let report = try await coordinator.execute(plan)
+        try require(report.deleted == 1 && report.skipped == 3 && report.failures.count == 1, "部分失败统计错误：\(report)")
+        let deleted = try await store.asset(id: files[0].id)
+        try require(deleted == nil, "成功删除后目录记录仍在")
+        try require(FileManager.default.fileExists(atPath: root.appendingPathComponent("pair.raw").path), "误删配对文件")
+        let recovery = try await coordinator.recover()
+        try require(recovery.isEmpty, "已知权限失败不应阻塞重试")
+
+        // Simulate a crash after a successful move, before database cleanup.
+        let moved = files[1]
+        try FileManager.default.moveItem(at: root.appendingPathComponent(moved.relativePath), to: trashDir.appendingPathComponent("recovered"))
+        try JSONEncoder().encode([DeletionJournalEntry(asset: moved, state: "moved")]).write(to: journal)
+        _ = try await coordinator.recover()
+        let remaining = try await store.asset(id: moved.id)
+        try require(remaining == nil, "中断恢复未清理目录")
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await coordinator.execute(DeletionPlan(files: [files[2]]))
+        }
+        let cancelled = try await task.value
+        try require(cancelled.cancelled && cancelled.deleted == 0, "取消后仍删除文件")
+
+        let duplicateURL = root.appendingPathComponent("duplicate.jpg")
+        try Data("duplicate".utf8).write(to: duplicateURL)
+        let stamp = try duplicateURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate!
+        let duplicate = try await store.upsertAsset(MediaAsset(sourceID: source.id, relativePath: "duplicate.jpg", fileIdentifier: FileIdentity.resourceIdentifier(for: duplicateURL), fileName: "duplicate.jpg", uniformType: nil, kind: .photo, fileSize: 9, modifiedAt: stamp))
+        try await store.saveAnnotation(UserAnnotation(assetID: duplicate.id, rating: 4, flag: .rejected, keywords: ["删除测试"]))
+        try await store.add(assetID: duplicate.id, toAlbum: album.id)
+        let stableDuplicate = try await store.asset(id: duplicate.id)!
+        let duplicateReport = try await coordinator.execute(DeletionPlan(files: [stableDuplicate, stableDuplicate]))
+        try require(duplicateReport.deleted == 1 && duplicateReport.skipped == 1, "重复路径被多次处理")
+        let cleanedAnnotation = try await store.annotation(for: duplicate.id)
+        let cleanedAlbum = try await store.assets(AssetQuery(albumID: album.id))
+        try require(cleanedAnnotation.rating == 0 && cleanedAnnotation.keywords.isEmpty && cleanedAlbum.isEmpty, "关联数据未级联清理")
+    }
+
+    private static func checkPreview() async throws {
+        try require(PreviewScale.actualPixels(backingScale: 2) == 0.5 && PreviewScale.actualPixels(backingScale: 1) == 1, "100% 屏幕像素换算错误")
+        try require(PreviewScale.bounded(0) == 0.01 && PreviewScale.bounded(99) == 16, "缩放边界错误")
+        let root = try temporaryWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("preview.jpg")
+        try writeSolidJPEG(to: url, gray: 128)
+        let loaded = try await ImagePreviewLoader().load(url: url)
+        try require(loaded.image.width == 64 && !loaded.isEmbedded, "原图尺寸错误")
+        let oriented = root.appendingPathComponent("oriented.jpg")
+        let cropped = loaded.image.cropping(to: CGRect(x: 0, y: 0, width: 32, height: 64))!
+        let target = CGImageDestinationCreateWithURL(oriented as CFURL, UTType.jpeg.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(target, cropped, [kCGImagePropertyOrientation: 6] as CFDictionary)
+        try require(CGImageDestinationFinalize(target), "写入方向样本失败")
+        let rotated = try await ImagePreviewLoader().load(url: oriented)
+        try require(rotated.image.width == 64 && rotated.image.height == 32, "未应用 EXIF 方向")
+        let heic = root.appendingPathComponent("preview.heic")
+        if let destination = CGImageDestinationCreateWithURL(heic as CFURL, UTType.heic.identifier as CFString, 1, nil) {
+            CGImageDestinationAddImage(destination, loaded.image, nil)
+            try require(CGImageDestinationFinalize(destination), "HEIC 测试样本写入失败")
+            let decodedHEIC = try await ImagePreviewLoader().load(url: heic)
+            try require(decodedHEIC.image.width == 64, "HEIC 解码失败")
+        } else { print("  HEIC 编码器不可用，跳过成功路径") }
+        for name in ["bad.jpg", "bad.heic", "bad.arw"] {
+            let bad = root.appendingPathComponent(name)
+            try Data("bad".utf8).write(to: bad)
+            do { _ = try await ImagePreviewLoader().load(url: bad); throw CheckFailure(description: "损坏图像未报错") }
+            catch is CocoaError {}
+        }
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await ImagePreviewLoader().load(url: url)
+        }
+        do { _ = try await task.value; throw CheckFailure(description: "未取消原图加载") }
+        catch is CancellationError {}
     }
 
     private static func temporaryWorkspace() throws -> URL {
