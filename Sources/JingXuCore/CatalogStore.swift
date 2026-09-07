@@ -2,6 +2,7 @@ import Foundation
 import GRDB
 
 public protocol CatalogRepository: Sendable {
+    func registerSource(at url: URL) async throws -> SourceRoot
     func upsertSource(_ source: SourceRoot) async throws
     func sources() async throws -> [SourceRoot]
     func source(id: String) async throws -> SourceRoot?
@@ -32,6 +33,7 @@ public actor CatalogStore: CatalogRepository {
             withIntermediateDirectories: true
         )
         databasePath = databaseURL.path
+        try CatalogUpgradeCoordinator.prepare(databaseURL)
 
         var configuration = Configuration()
         configuration.prepareDatabase { db in
@@ -41,6 +43,8 @@ public actor CatalogStore: CatalogRepository {
         }
         dbPool = try DatabasePool(path: databaseURL.path, configuration: configuration)
         try Self.makeMigrator().migrate(dbPool)
+        try CatalogUpgradeCoordinator.validate(dbPool)
+        try Data().write(to: databaseURL.appendingPathExtension("initialized"), options: .atomic)
     }
 
     public static func inMemory() throws -> CatalogStore {
@@ -159,11 +163,132 @@ public actor CatalogStore: CatalogRepository {
         migrator.registerMigration("v2-file-identity-index") { db in
             try db.create(index: "mediaAssets_fileIdentifier", on: "mediaAssets", columns: ["fileIdentifier"])
         }
+        migrator.registerMigration("v3-source-directory-identity") { db in
+            try db.alter(table: "sourceRoots") { $0.add(column: "directoryIdentityJSON", .text) }
+            try db.create(index: "sourceRoots_directoryIdentity", on: "sourceRoots", columns: ["directoryIdentityJSON"])
+        }
         return migrator
     }
 
     public func upsertSource(_ source: SourceRoot) throws {
         try dbPool.write { db in try source.save(db) }
+    }
+
+    public func backup(to url: URL) throws {
+        guard !FileManager.default.fileExists(atPath: url.path) else { throw CocoaError(.fileWriteFileExists) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let destination = try DatabaseQueue(path: url.path)
+        try dbPool.backup(to: destination)
+        try destination.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA journal_mode = DELETE")
+        }
+        try destination.close()
+    }
+
+    public func removeSource(id: String, backupURL: URL) throws -> Set<String> {
+        try backup(to: backupURL)
+        return try dbPool.write { db in
+            let ids = try String.fetchAll(db, sql: "SELECT id FROM mediaAssets WHERE sourceID = ?", arguments: [id])
+            _ = try SourceRoot.deleteOne(db, key: id)
+            return Set(ids)
+        }
+    }
+
+    public func deleteAlbum(id: String) throws {
+        try dbPool.write { db in _ = try Album.deleteOne(db, key: id) }
+    }
+
+    public func prepareSourceMerge() throws -> SourceMergePlan {
+        var groups: [[SourceRoot]] = []
+        var identities: [SourceIdentity] = []
+        var warnings: [String] = []
+        for source in try sources().sorted(by: { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }) {
+            guard let url = try? BookmarkStore.resolve(source).url,
+                  let identity = try? SourceIdentity.resolve(url) else {
+                warnings.append("\(source.pathHint)：来源离线或未授权，未参与合并")
+                continue
+            }
+            if let index = identities.firstIndex(where: { $0.matches(identity) }) { groups[index].append(source) }
+            else { identities.append(identity); groups.append([source]) }
+        }
+        groups = groups.filter { $0.count > 1 }
+        var conflicts = 0
+        for group in groups {
+            var annotations: [String: UserAnnotation] = [:]
+            for source in group {
+                for asset in try assets(sourceID: source.id) {
+                    let value = try annotation(for: asset.id)
+                    if let previous = annotations[asset.relativePath], previous.rating != value.rating || previous.flag != value.flag { conflicts += 1 }
+                    annotations[asset.relativePath] = value
+                }
+            }
+        }
+        return SourceMergePlan(groups: groups, conflicts: conflicts, warnings: warnings)
+    }
+
+    public func mergeSources(_ plan: SourceMergePlan, backupURL: URL) throws -> SourceMergeReport {
+        try backup(to: backupURL)
+        var verified: [[SourceRoot]] = []
+        var report = SourceMergeReport()
+        for group in plan.groups {
+            guard let first = group.first,
+                  let root = try? BookmarkStore.resolve(first).url,
+                  let identity = try? SourceIdentity.resolve(root) else {
+                report.skipped.append("来源无法访问，已跳过"); continue
+            }
+            let valid = try group.allSatisfy { snapshot in
+                guard let current = try source(id: snapshot.id), current == snapshot,
+                      let url = try? BookmarkStore.resolve(current).url,
+                      let other = try? SourceIdentity.resolve(url) else { return false }
+                return identity.matches(other)
+            }
+            if valid { verified.append(group) }
+            else { report.skipped.append("\(first.pathHint)：来源已改变或离线") }
+        }
+        // All eligible groups commit atomically. File conflicts skip a whole group before writes.
+        return try dbPool.write { db in
+            for group in verified {
+                let keeper = group[0]
+                var byPath: [String: [MediaAsset]] = [:]
+                for source in group {
+                    for asset in try MediaAsset.filter(Column("sourceID") == source.id).fetchAll(db) {
+                        byPath[asset.relativePath, default: []].append(asset)
+                    }
+                }
+                let conflict = byPath.values.contains { records in
+                    guard records.count > 1, let first = records.first else { return false }
+                    return records.dropFirst().contains {
+                        guard let left = first.fileIdentifier, let right = $0.fileIdentifier else { return true }
+                        return left != right || first.fileSize != $0.fileSize || first.modifiedAt != $0.modifiedAt
+                    }
+                }
+                if conflict { report.skipped.append("\(keeper.pathHint)：文件身份冲突或未知"); continue }
+                for records in byPath.values {
+                    var target = records[0]
+                    if records.count > 1 {
+                        var merged = try UserAnnotation.fetchOne(db, key: target.id) ?? UserAnnotation(assetID: target.id, updatedAt: .distantPast)
+                        var keywords = merged.keywords
+                        for record in records.dropFirst() {
+                            let value = try UserAnnotation.fetchOne(db, key: record.id) ?? UserAnnotation(assetID: record.id, updatedAt: .distantPast)
+                            keywords += value.keywords
+                            if value.updatedAt > merged.updatedAt { merged = value }
+                            try db.execute(sql: "INSERT OR IGNORE INTO albumAssets(albumID, assetID, addedAt) SELECT albumID, ?, addedAt FROM albumAssets WHERE assetID = ?", arguments: [target.id, record.id])
+                            _ = try MediaAsset.deleteOne(db, key: record.id)
+                            report.invalidatedIDs.insert(record.id)
+                        }
+                        merged.assetID = target.id; merged.keywords = keywords
+                        try merged.save(db)
+                    }
+                    target.sourceID = keeper.id
+                    try target.update(db)
+                    _ = try AnalysisResult.deleteOne(db, key: target.id)
+                    report.invalidatedIDs.insert(target.id)
+                }
+                for source in group.dropFirst() { _ = try SourceRoot.deleteOne(db, key: source.id) }
+                report.mergedGroups += 1
+            }
+            return report
+        }
     }
 
     public func sources() throws -> [SourceRoot] {
