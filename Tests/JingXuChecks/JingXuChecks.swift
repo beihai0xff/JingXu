@@ -438,6 +438,25 @@ private enum JingXuChecks {
         try require(CGImageDestinationFinalize(target), "写入方向样本失败")
         let rotated = try await ImagePreviewLoader().load(url: oriented)
         try require(rotated.image.width == 64 && rotated.image.height == 32, "未应用 EXIF 方向")
+        let baseline = try SRGBPixels(rotated.image).rgba
+        for _ in 0..<8 {
+            _ = try await ImagePreviewLoader().load(url: url)
+            let returned = try await ImagePreviewLoader().load(url: oriented)
+            let returnedPixels = try SRGBPixels(returned.image).rgba
+            try require(returnedPixels == baseline, "A → B → A 返回后像素变化")
+        }
+        var lease: PreviewAccessLease? = PreviewAccessLease(url: root)
+        weak var weakLease = lease
+        var retained: PreviewImage? = try await ImagePreviewLoader().load(url: oriented, access: lease)
+        lease = nil
+        try require(weakLease != nil, "加载返回后提前释放访问授权")
+        try FileManager.default.removeItem(at: oriented)
+        let detachedPixels = try SRGBPixels(retained!.image).rgba
+        try require(detachedPixels == baseline, "原文件移走后显示仍依赖文件读取")
+        try require(retained!.image.bitsPerComponent == 8 && retained!.image.bitsPerPixel == 32, "显示像素格式不固定")
+        retained = nil
+        try require(weakLease == nil, "释放预览后访问授权未释放")
+        weakLease = nil
         let heic = root.appendingPathComponent("preview.heic")
         if let destination = CGImageDestinationCreateWithURL(heic as CFURL, UTType.heic.identifier as CFString, 1, nil) {
             CGImageDestinationAddImage(destination, loaded.image, nil)

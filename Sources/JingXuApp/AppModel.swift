@@ -285,9 +285,8 @@ final class AppModel: ObservableObject {
         guard let store, let asset = try await store.asset(id: item.id),
               let source = try await store.source(id: asset.sourceID) else { throw CocoaError(.fileNoSuchFile) }
         let root = try BookmarkStore.resolve(source).url
-        let access = root.startAccessingSecurityScopedResource()
-        defer { if access { root.stopAccessingSecurityScopedResource() } }
-        return try await ImagePreviewLoader().load(url: root.appendingPathComponent(asset.relativePath))
+        let access = PreviewAccessLease(url: root)
+        return try await ImagePreviewLoader().load(url: root.appendingPathComponent(asset.relativePath), access: access)
     }
 
     func histogram(for item: AssetListItem) async throws -> HistogramResult {
