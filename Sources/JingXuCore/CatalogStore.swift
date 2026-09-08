@@ -15,6 +15,9 @@ public protocol CatalogRepository: Sendable {
     func annotation(for assetID: String) async throws -> UserAnnotation
     func saveAnnotation(_ annotation: UserAnnotation) async throws
     func saveAnalysis(_ analysis: AnalysisResult) async throws
+    func saveComputedAnalysis(_ analysis: AnalysisResult, expectedAsset: MediaAsset, fileURL: URL) async throws
+    func recordAnalysisFailure(assetID: String, reason: String, fingerprint: AnalysisFingerprint) async throws
+    func saveSimilarGroup(_ groupID: String, assetIDs: [String]) async throws
     func analysis(for assetID: String) async throws -> AnalysisResult?
     func assetIDsNeedingAnalysis(sourceID: String, algorithmVersion: Int) async throws -> [String]
     func saveImportSession(_ session: ImportSession) async throws
@@ -166,6 +169,27 @@ public actor CatalogStore: CatalogRepository {
         migrator.registerMigration("v3-source-directory-identity") { db in
             try db.alter(table: "sourceRoots") { $0.add(column: "directoryIdentityJSON", .text) }
             try db.create(index: "sourceRoots_directoryIdentity", on: "sourceRoots", columns: ["directoryIdentityJSON"])
+        }
+        migrator.registerMigration("v4-quality-assessment") { db in
+            try db.alter(table: "analysisResults") { table in
+                table.add(column: "assessmentStatus", .text)
+                table.add(column: "diagnosticJSON", .text)
+                table.add(column: "fingerprintJSON", .text)
+                table.add(column: "analysisError", .text)
+            }
+            try db.execute(sql: "UPDATE analysisResults SET assessmentStatus = 'legacy' WHERE algorithmVersion < 2")
+            try db.create(index: "analysisResults_qualityStatus", on: "analysisResults", columns: ["algorithmVersion", "assessmentStatus", "suggestionState"])
+            try db.create(table: "qualityJobItems") { table in
+                table.column("jobID", .text).notNull().references("backgroundJobs", onDelete: .cascade)
+                table.column("ordinal", .integer).notNull()
+                // Keep the confirmation snapshot even when the asset is subsequently removed.
+                table.column("assetID", .text).notNull()
+                table.column("state", .text).notNull().defaults(to: "queued")
+                table.column("errorMessage", .text)
+                table.primaryKey(["jobID", "ordinal"])
+                table.uniqueKey(["jobID", "assetID"])
+            }
+            try db.create(index: "qualityJobItems_pending", on: "qualityJobItems", columns: ["jobID", "state", "ordinal"])
         }
         return migrator
     }
@@ -319,6 +343,9 @@ public actor CatalogStore: CatalogRepository {
                     .fetchOne(db) {
                     record.id = existing.id
                     record.importedAt = existing.importedAt
+                    if !AnalysisFingerprint(asset: existing).matches(AnalysisFingerprint(asset: record)) {
+                        try db.execute(sql: "UPDATE analysisResults SET assessmentStatus = 'stale', analysisError = NULL WHERE assetID = ?", arguments: [existing.id])
+                    }
                 }
                 try record.save(db)
                 if try UserAnnotation.fetchOne(db, key: record.id) == nil {
@@ -350,6 +377,18 @@ public actor CatalogStore: CatalogRepository {
         try queryAssets(query, rejectedOnly: false)
     }
 
+    public func analysisCandidates(_ query: AssetQuery = AssetQuery(), legacyOnly: Bool = false) throws -> [String] {
+        var unlimited = query; unlimited.limit = Int.max; unlimited.offset = 0
+        let (sql, arguments) = Self.assetQuerySQL(unlimited, rejectedOnly: false, photosOnly: true,
+            legacyOnly: legacyOnly, projection: "a.id")
+        return try dbPool.read { try String.fetchAll($0, sql: sql, arguments: arguments) }
+    }
+
+    public func assetListItem(id: String) throws -> AssetListItem? {
+        let (sql, arguments) = Self.assetQuerySQL(AssetQuery(limit: 1), rejectedOnly: false, assetID: id)
+        return try dbPool.read { try AssetListItem.fetchOne($0, sql: sql, arguments: arguments) }
+    }
+
     public func deletionCandidates(_ query: AssetQuery) throws -> [MediaAsset] {
         var unlimited = query
         unlimited.limit = Int.max
@@ -371,10 +410,19 @@ public actor CatalogStore: CatalogRepository {
     }
 
     private func queryAssets(_ query: AssetQuery, rejectedOnly: Bool) throws -> [AssetListItem] {
+        let (sql, arguments) = Self.assetQuerySQL(query, rejectedOnly: rejectedOnly)
+        return try dbPool.read { try AssetListItem.fetchAll($0, sql: sql, arguments: arguments) }
+    }
+
+    private static func assetQuerySQL(_ query: AssetQuery, rejectedOnly: Bool, photosOnly: Bool = false,
+                                     legacyOnly: Bool = false, projection: String? = nil, assetID: String? = nil) -> (String, StatementArguments) {
         var joins = "LEFT JOIN annotations an ON an.assetID = a.id LEFT JOIN analysisResults ar ON ar.assetID = a.id"
         var conditions: [String] = []
         var arguments: StatementArguments = []
         if rejectedOnly { conditions.append("a.kind = 'photo' AND an.flag = 'rejected'") }
+        if photosOnly { conditions.append("a.kind = 'photo'") }
+        if legacyOnly { conditions.append("ar.algorithmVersion < 2") }
+        if let assetID { conditions.append("a.id = ?"); arguments += [assetID] }
 
         if let albumID = query.albumID {
             joins += " JOIN albumAssets aa ON aa.assetID = a.id"
@@ -400,7 +448,7 @@ public actor CatalogStore: CatalogRepository {
             conditions.append("(" + extensions.map { _ in "lower(a.fileName) LIKE ?" }.joined(separator: " OR ") + ")")
             for ext in extensions { arguments += ["%.\(ext)"] }
         case .review:
-            conditions.append("ar.suggestionState = 'pending' AND ar.issuesJSON <> '[]'")
+            conditions.append("ar.algorithmVersion = 2 AND ar.assessmentStatus = 'suspectedBlur' AND ar.suggestionState = 'pending' AND EXISTS (SELECT 1 FROM json_each(ar.issuesJSON) WHERE value = 'blurry')")
         case .rejected:
             conditions.append("an.flag = 'rejected'")
         }
@@ -421,21 +469,25 @@ public actor CatalogStore: CatalogRepository {
 
         let whereClause = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
         arguments += [query.limit, query.offset]
-        let sql = """
-            SELECT a.id, a.sourceID, a.relativePath, a.fileName, a.kind,
+        let columns = projection ?? """
+                   a.id, a.sourceID, a.relativePath, a.fileName, a.kind,
                    a.capturedAt, a.importedAt, a.width, a.height,
                    a.cameraModel, a.lens, a.metadataError,
                    COALESCE(an.rating, 0) AS rating,
                    COALESCE(an.flag, 'none') AS flag,
                    COALESCE(an.keywordsJSON, '[]') AS keywordsJSON,
-                   ar.issuesJSON, ar.suggestionState
+                   ar.issuesJSON, ar.suggestionState, ar.algorithmVersion, ar.assessmentStatus,
+                   ar.diagnosticJSON, ar.analysisError, ar.similarGroupID
+            """
+        let sql = """
+            SELECT \(columns)
             FROM mediaAssets a
             \(joins)
             \(whereClause)
             ORDER BY COALESCE(a.capturedAt, a.modifiedAt) DESC, a.fileName ASC
             LIMIT ? OFFSET ?
             """
-        return try dbPool.read { db in try AssetListItem.fetchAll(db, sql: sql, arguments: arguments) }
+        return (sql, arguments)
     }
 
     public func annotation(for assetID: String) throws -> UserAnnotation {
@@ -455,8 +507,128 @@ public actor CatalogStore: CatalogRepository {
         try dbPool.write { db in try analysis.save(db) }
     }
 
+    /// Computation never writes annotations and preserves the latest review, not the worker's stale copy.
+    public func saveComputedAnalysis(_ analysis: AnalysisResult, expectedAsset: MediaAsset, fileURL: URL) throws {
+        try dbPool.write { db in
+            guard let current = try MediaAsset.fetchOne(db, key: analysis.assetID),
+                  current.sourceID == expectedAsset.sourceID, current.relativePath == expectedAsset.relativePath,
+                  AnalysisFingerprint(asset: current).matches(AnalysisFingerprint(asset: expectedAsset)),
+                  let fingerprint = analysis.fingerprint,
+                  fingerprint.matches(AnalysisFingerprint(asset: current)),
+                  fingerprint.matches(try AnalysisFingerprint(url: fileURL)) else { throw QualityAnalysisError.changedFile }
+            var value = analysis
+            if let existing = try AnalysisResult.fetchOne(db, key: analysis.assetID) {
+                value.suggestionState = existing.suggestionState
+                value.similarGroupID = existing.similarGroupID
+                // A failed Vision request must not reuse a print produced for different bytes.
+                if value.featurePrint == nil, let previous = existing.fingerprint, let current = value.fingerprint,
+                   previous.matches(current) { value.featurePrint = existing.featurePrint }
+            }
+            try value.save(db)
+        }
+    }
+
+    public func recordAnalysisFailure(assetID: String, reason: String, fingerprint: AnalysisFingerprint) throws {
+        try dbPool.write { db in
+            guard let asset = try MediaAsset.fetchOne(db, key: assetID), fingerprint.matches(AnalysisFingerprint(asset: asset)) else { return }
+            var value = try AnalysisResult.fetchOne(db, key: assetID) ?? AnalysisResult(assetID: assetID,
+                algorithmVersion: 2, sharpnessScore: 0, shadowClipping: 0, highlightClipping: 0)
+            // Existing metrics/review remain available, but a failed attempt never appears normal.
+            value.assessmentStatus = .failed; value.analysisError = reason
+            if value.fingerprint == nil { value.fingerprint = fingerprint }
+            try value.save(db)
+        }
+    }
+
+    @discardableResult public func saveQualityReview(assetID: String, state: SuggestionState) throws -> Bool {
+        try dbPool.write { db in
+            guard var result = try AnalysisResult.fetchOne(db, key: assetID), result.hasPendingQualityWarning,
+                  state != .pending else { return false }
+            result.suggestionState = state
+            try result.update(db, columns: ["suggestionState"])
+            if state == .accepted {
+                var annotation = try UserAnnotation.fetchOne(db, key: assetID) ?? UserAnnotation(assetID: assetID)
+                annotation.flag = .rejected; annotation.updatedAt = Date()
+                try annotation.save(db)
+            }
+            return true
+        }
+    }
+
+    public func saveSimilarGroup(_ groupID: String, assetIDs: [String]) throws {
+        try dbPool.write { db in
+            for id in assetIDs {
+                try db.execute(sql: "UPDATE analysisResults SET similarGroupID = ? WHERE assetID = ?", arguments: [groupID, id])
+            }
+        }
+    }
+
     public func analysis(for assetID: String) throws -> AnalysisResult? {
         try dbPool.read { db in try AnalysisResult.fetchOne(db, key: assetID) }
+    }
+
+    public func createQualityJob(_ plan: QualityReanalysisPlan, backupURL: URL) throws -> String {
+        guard try qualityJobs().allSatisfy({ [.completed, .cancelled].contains($0.job.state) }) else {
+            throw CatalogUpgradeError.blocked("请先继续或取消已有重算任务")
+        }
+        try backup(to: backupURL)
+        var configuration = Configuration(); configuration.readonly = true
+        let check = try DatabaseQueue(path: backupURL.path, configuration: configuration)
+        try CatalogUpgradeCoordinator.validate(check)
+        try check.close()
+        let payload = QualityJobPayload(title: plan.title, backupPath: backupURL.path, backupSHA256: try FileHasher.sha256(of: backupURL), total: plan.assetIDs.count)
+        let job = BackgroundJob(kind: "quality-v2", payloadJSON: String(decoding: try JSONEncoder().encode(payload), as: UTF8.self))
+        try dbPool.write { db in
+            try job.insert(db)
+            for (index, id) in plan.assetIDs.enumerated() {
+                try db.execute(sql: "INSERT INTO qualityJobItems(jobID, ordinal, assetID) VALUES (?, ?, ?)", arguments: [job.id, index, id])
+            }
+        }
+        return job.id
+    }
+
+    public func qualityJobs() throws -> [QualityJobSnapshot] {
+        try dbPool.read { db in
+            try BackgroundJob.filter(Column("kind") == "quality-v2").order(Column("createdAt").desc).fetchAll(db).map { job in
+                let total = try Int.fetchOne(db, sql: "SELECT count(*) FROM qualityJobItems WHERE jobID = ?", arguments: [job.id]) ?? 0
+                let completed = try Int.fetchOne(db, sql: "SELECT count(*) FROM qualityJobItems WHERE jobID = ? AND state <> 'queued'", arguments: [job.id]) ?? 0
+                let failed = try Int.fetchOne(db, sql: "SELECT count(*) FROM qualityJobItems WHERE jobID = ? AND state = 'failed'", arguments: [job.id]) ?? 0
+                return QualityJobSnapshot(job: job, total: total, completed: completed, failed: failed)
+            }
+        }
+    }
+
+    public func recoverQualityJobs() throws {
+        try dbPool.write { db in
+            try db.execute(sql: "UPDATE backgroundJobs SET state = 'paused', errorMessage = '上次运行中断，可继续未完成项目' WHERE kind = 'quality-v2' AND state = 'running'")
+        }
+    }
+
+    public func nextQualityJobItem(_ jobID: String) throws -> (ordinal: Int, assetID: String)? {
+        try dbPool.read { db in
+            guard let row = try Row.fetchOne(db, sql: "SELECT ordinal, assetID FROM qualityJobItems WHERE jobID = ? AND state = 'queued' ORDER BY ordinal LIMIT 1", arguments: [jobID]) else { return nil }
+            return (row["ordinal"], row["assetID"])
+        }
+    }
+
+    public func finishQualityJobItem(_ jobID: String, ordinal: Int, error: String?) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "UPDATE qualityJobItems SET state = ?, errorMessage = ? WHERE jobID = ? AND ordinal = ? AND state = 'queued'",
+                arguments: [error == nil ? "completed" : "failed", error, jobID, ordinal])
+            if db.changesCount == 1 {
+                try db.execute(sql: "UPDATE backgroundJobs SET progress = min(1, progress + 1.0 / max(1, json_extract(payloadJSON, '$.total'))), updatedAt = ? WHERE id = ?", arguments: [Date(), jobID])
+            }
+        }
+    }
+
+    public func setQualityJobState(_ id: String, state: JobState, error: String? = nil) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "UPDATE backgroundJobs SET state = ?, errorMessage = ?, updatedAt = ? WHERE id = ? AND kind = 'quality-v2'", arguments: [state.rawValue, error, Date(), id])
+        }
+    }
+
+    public func qualityJobAssetIDs(_ jobID: String) throws -> [String] {
+        try dbPool.read { try String.fetchAll($0, sql: "SELECT assetID FROM qualityJobItems WHERE jobID = ? AND state = 'completed' ORDER BY ordinal", arguments: [jobID]) }
     }
 
     public func assetIDsNeedingAnalysis(sourceID: String, algorithmVersion: Int) throws -> [String] {
@@ -468,10 +640,10 @@ public actor CatalogStore: CatalogRepository {
                     FROM mediaAssets a
                     LEFT JOIN analysisResults ar ON ar.assetID = a.id
                     WHERE a.sourceID = ? AND a.kind = 'photo'
-                      AND (ar.assetID IS NULL OR ar.algorithmVersion < ?)
+                      AND ar.assetID IS NULL
                     ORDER BY COALESCE(a.capturedAt, a.modifiedAt) ASC
                     """,
-                arguments: [sourceID, algorithmVersion]
+                arguments: [sourceID]
             )
         }
     }

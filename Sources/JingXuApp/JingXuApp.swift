@@ -41,6 +41,11 @@ struct JingXuApp: App {
                 Button("取消旗标（U）") { model.flagFromMenu(.none) }
                     .disabled(model.isDeleting)
                 Divider()
+                Button("重新分析当前范围…") { model.prepareQualityReanalysis() }.disabled(model.isWorking)
+                Button("重新分析全部旧结果…") { model.prepareQualityReanalysis(legacyOnly: true) }.disabled(model.isWorking)
+                Button("暂停质量重算") { model.pauseQualityReanalysis() }.disabled(!model.isReanalyzing)
+                Button("继续质量重算") { model.resumeQualityReanalysis() }.disabled(model.isWorking || model.resumableQualityJob == nil)
+                Divider()
                 Button("整理重复来源…") { model.prepareSourceMerge() }.disabled(model.isWorking)
                 Button("重新扫描当前来源") { model.rescanSelectedSource() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])

@@ -6,6 +6,12 @@ PROJECT_DIR="${SCRIPT_DIR:h}"
 VERSION=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "${PROJECT_DIR}/Packaging/Info.plist")
 BUILD=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "${PROJECT_DIR}/Packaging/Info.plist")
 OUTPUT_DMG="${PROJECT_DIR}/outputs/JingXu-${VERSION}-test.${BUILD}-macOS-arm64.dmg"
+# A clean public filename does not change the ad-hoc signature or notarization status.
+if [[ "${1:-}" == "--versioned-name" ]]; then
+  OUTPUT_DMG="${PROJECT_DIR}/outputs/JingXu-${VERSION}-macOS-arm64.dmg"
+elif [[ -n "${1:-}" ]]; then
+  print -u2 "未知参数：$1"; exit 1
+fi
 [[ ! -e "$OUTPUT_DMG" && ! -e "${OUTPUT_DMG}.sha256" ]] || { print -u2 "测试产物已存在；请先归档或增加构建号。"; exit 1; }
 [[ "$(uname -m)" == arm64 ]] || { print -u2 "只支持 Apple Silicon 构建。"; exit 1; }
 PACKAGE_TEMP=$(mktemp -d "${TMPDIR:-/tmp}/jingxu-test.XXXXXX")

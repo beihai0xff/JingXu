@@ -40,6 +40,11 @@ private struct TestTrash: TrashService {
 @main
 private enum JingXuChecks {
     static func main() async throws {
+        if let index = CommandLine.arguments.firstIndex(of: "--preview-file"), CommandLine.arguments.count > index + 2 {
+            try await PreviewCanvasChecks.verifyFile(URL(fileURLWithPath: CommandLine.arguments[index+1]),
+                output: URL(fileURLWithPath: CommandLine.arguments[index+2]))
+            return
+        }
         if CommandLine.arguments.contains("--ui-fixtures") {
             let root = try temporaryWorkspace()
             try writeSolidJPEG(to: root.appendingPathComponent("light.jpg"), gray: 220)
@@ -54,11 +59,14 @@ private enum JingXuChecks {
             ("稳定资源身份与相册", checkStableIdentityAndAlbum),
             ("XMP 编码", checkXMP),
             ("图像元数据与质量建议", checkMetadataAndQuality),
+            ("质量 v2 双尺度、噪声、透明与校准门禁", QualityV2Checks.synthetic),
+            ("质量 v2 兼容、审核隔离、指纹与断点队列", QualityV2Checks.persistence),
             ("增量扫描与 RAW/JPEG 配对", checkIncrementalScan),
             ("校验导入、重复跳过与不覆盖", checkSafeImport),
             ("删除范围、文件复核与中断恢复", checkDeletion),
             ("原图解码、方向、错误和取消", checkPreview),
             ("单图切换顺序、边界及筛选隐藏", checkPreviewNavigation),
+            ("大图可见区域绘制、100% 比例、缩放及清帧", PreviewCanvasChecks.run),
             ("直方图统计、透明像素与取消", checkHistogram),
             ("来源注册、合并、备份与移除", checkSourceManagement),
             ("图库升级备份、锁、失败保护及恢复", checkCatalogUpgrade),
@@ -80,11 +88,14 @@ private enum JingXuChecks {
 
     private static func checkPreviewNavigation() async throws {
         var navigation = PreviewNavigation(photoIDs: ["a", "b", "c", "d", "b"])
+        try require(navigation.filmstripIDs(currentID: "b") == ["a", "b", "c", "d"], "胶片栏保持照片顺序且去重")
         try require(navigation.neighbor(of: "a", direction: -1) == nil, "首张不循环")
         try require(navigation.neighbor(of: "d", direction: 1) == nil, "末张不循环")
         try require(navigation.neighbor(of: "b", direction: 1) == "c", "按网格顺序向后")
         try require(navigation.neighbor(of: "b", direction: -1) == "a", "按网格顺序向前")
         navigation.refresh(photoIDs: ["d", "a", "new"])
+        try require(navigation.filmstripIDs(currentID: "b") == ["a", "b", "d"], "胶片栏保留隐藏当前锚点，不纳入范围外照片")
+        try require(navigation.filmstripIDs(currentID: "d") == ["a", "d"], "离开隐藏照片后从胶片栏移除")
         try require(navigation.neighbor(of: "b", direction: 1) == "d", "隐藏当前和相邻照片后保留锚点")
         try require(navigation.neighbor(of: "b", direction: -1) == "a", "隐藏当前照片仍可向前")
         try require(navigation.neighbor(of: "d", direction: 1) == nil, "刷新不纳入快照外照片")
@@ -94,6 +105,11 @@ private enum JingXuChecks {
         for _ in 0..<100 { current = navigation.neighbor(of: current, direction: 1) ?? current }
         try require(current == "d", "连续切换不越界")
         let single = PreviewNavigation(photoIDs: ["a"])
+        try require(single.filmstripIDs(currentID: "a") == ["a"], "单张胶片栏")
+        try require(PreviewNavigation(photoIDs: []).filmstripIDs(currentID: "missing").isEmpty, "空胶片栏不注入未知照片")
+        let largeIDs = (0..<2_000).map { "photo-\($0)" }
+        let largeStrip = PreviewNavigation(photoIDs: largeIDs)
+        try require(largeStrip.filmstripIDs(currentID: "photo-1999") == largeIDs, "胶片栏完整保留 2000 项范围")
         try require(single.neighbor(of: "a", direction: 1) == nil && single.neighbor(of: "a", direction: -1) == nil, "单张禁用双向切换")
         try require(PreviewNavigation(photoIDs: []).neighbor(of: "a", direction: 1) == nil, "空列表安全")
         try require(navigation.neighbor(of: "missing", direction: 1) == nil && navigation.neighbor(of: "a", direction: 0) == nil, "无效目标和方向安全")
@@ -197,7 +213,7 @@ private enum JingXuChecks {
         let albumAssets = try await store.assets(AssetQuery(albumID: album.id))
         let reviewAssets = try await store.assets(AssetQuery(collection: .review))
         try require(albumAssets.count == 1, "相册成员关系失败")
-        try require(reviewAssets.first?.issues == [.blurry], "待审核建议筛选失败")
+        try require(reviewAssets.isEmpty && albumAssets.first?.qualityStatus == .legacy, "旧版建议不应进入新版待审核")
     }
 
     private static func checkXMP() async throws {
@@ -227,8 +243,8 @@ private enum JingXuChecks {
         try require(metadata.width == 64 && metadata.height == 64, "图像尺寸元数据不正确")
         try require(metadata.errorMessage == nil, "合法 JPEG 被标为错误")
         let result = try await DefaultQualityAnalyzer().analyze(assetID: "asset", at: imageURL)
-        try require(result.issues.contains(.clippedHighlights), "未识别高光溢出")
-        try require(result.issues.contains(.blurry), "未识别无细节图像")
+        try require(result.issues.isEmpty && result.highlightClipping > 0.99, "曝光仅为客观统计，不应报警")
+        try require(result.status == .insufficientEvidence, "小图无细节必须保留无法判断")
         try require(result.featurePrint != nil, "未生成相似度特征")
     }
 
@@ -568,9 +584,19 @@ private enum JingXuChecks {
             let album = Album(id: "upgrade-album", name: "旧相册")
             try await store.saveAlbum(album)
             try await store.add(assetID: asset.id, toAlbum: album.id)
+            try await store.saveAnalysis(AnalysisResult(assetID: asset.id, sharpnessScore: 0.015, shadowClipping: 0.4,
+                highlightClipping: 0.2, issues: [.blurry, .similarBurst], suggestionState: .ignored, similarGroupID: "old-burst"))
         }
         let db = try DatabaseQueue(path: url.path)
         try await db.write { db in
+            if version < 4 {
+                try db.execute(sql: "DROP INDEX analysisResults_qualityStatus")
+                try db.execute(sql: "DROP TABLE qualityJobItems")
+                for column in ["assessmentStatus", "diagnosticJSON", "fingerprintJSON", "analysisError"] {
+                    try db.execute(sql: "ALTER TABLE analysisResults DROP COLUMN \(column)")
+                }
+                try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'v4-quality-assessment'")
+            }
             if version < 3 {
                 try db.execute(sql: "DROP INDEX sourceRoots_directoryIdentity")
                 try db.execute(sql: "ALTER TABLE sourceRoots DROP COLUMN directoryIdentityJSON")
@@ -587,7 +613,7 @@ private enum JingXuChecks {
     private static func checkCatalogUpgrade() async throws {
         let root = try temporaryWorkspace()
         defer { try? FileManager.default.removeItem(at: root) }
-        for version in 1...3 {
+        for version in 1...4 {
             let directory = root.appendingPathComponent("v\(version)")
             let url = directory.appendingPathComponent("Catalog.sqlite")
             try await seedUpgradeFixture(url, version: version)
@@ -599,12 +625,14 @@ private enum JingXuChecks {
                 let annotation = try await store.annotation(for: "upgrade-photo")
                 let members = try await store.assets(AssetQuery(albumID: "upgrade-album"))
                 try require(annotation.rating == 4 && annotation.flag == .picked && annotation.keywords == ["升级保留"] && members.count == 1, "升级损坏用户数据")
+                let legacy = try await store.analysis(for: "upgrade-photo")
+                try require(legacy?.algorithmVersion == 1 && legacy?.suggestionState == .ignored && legacy?.similarGroupID == "old-burst" && legacy?.sharpnessScore == 0.015, "迁移改变旧分析或人工审核")
                 do { _ = try CatalogLease(databaseURL: url); throw CheckFailure(description: "第二个实例获得图库锁") } catch is CatalogUpgradeError {}
                 do { try await coordinator.restore(from: directory); throw CheckFailure(description: "连接尚未关闭就恢复") } catch is CatalogUpgradeError {}
             }
             let backups = (try? FileManager.default.contentsOfDirectory(at: CatalogUpgradeCoordinator.backupDirectory(for: url), includingPropertiesForKeys: nil)) ?? []
-            try require(backups.count == (version < 3 ? 1 : 0), "备份创建时机错误")
-            if version < 3 {
+            try require(backups.count == (version < 4 ? 1 : 0), "备份创建时机错误")
+            if version < 4 {
                 let backup = backups[0]
                 let manifest = try JSONDecoder().decode(UpgradeManifest.self, from: Data(contentsOf: backup.appendingPathComponent("manifest.json")))
                 try require(manifest.migrations.count == version && manifest.journalHash != nil, "备份缺少版本或日志")
@@ -662,6 +690,21 @@ private enum JingXuChecks {
         let unchanged = try await faultWriter.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM grdb_migrations") }
         try require(unchanged == 1, "失败的迁移没有回滚")
         try faultWriter.close()
+
+        let v4FaultURL = root.appendingPathComponent("v4-fault/Catalog.sqlite")
+        try await seedUpgradeFixture(v4FaultURL, version: 3)
+        let v4Writer = try DatabaseQueue(path: v4FaultURL.path)
+        try await v4Writer.write { db in
+            try db.execute(sql: "CREATE TRIGGER fail_quality_upgrade BEFORE INSERT ON grdb_migrations WHEN NEW.identifier = 'v4-quality-assessment' BEGIN SELECT RAISE(ABORT, 'injected v4 failure'); END")
+        }
+        do { _ = try CatalogStore(databaseURL: v4FaultURL); throw CheckFailure(description: "v4 迁移失败仍允许打开") } catch is DatabaseError {}
+        let v4Unchanged = try await v4Writer.read { db in
+            let hasItems = try db.tableExists("qualityJobItems")
+            let hasStatus = try db.columns(in: "analysisResults").contains { $0.name == "assessmentStatus" }
+            return !hasItems && !hasStatus
+        }
+        try require(v4Unchanged, "v4 事务失败未回滚新增表和字段")
+        try v4Writer.close()
     }
 
     private static func temporaryWorkspace() throws -> URL {

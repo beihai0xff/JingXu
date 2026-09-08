@@ -35,7 +35,7 @@ public final class CatalogLease: @unchecked Sendable {
 }
 
 public actor CatalogUpgradeCoordinator {
-    public static let migrations = ["v1-create-catalog", "v2-file-identity-index", "v3-source-directory-identity"]
+    public static let migrations = ["v1-create-catalog", "v2-file-identity-index", "v3-source-directory-identity", "v4-quality-assessment"]
     private let databaseURL: URL
     private var lease: CatalogLease?
     private weak var openedStore: CatalogStore?

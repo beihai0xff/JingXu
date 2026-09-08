@@ -11,7 +11,8 @@ let package = Package(
     products: [
         .library(name: "JingXuCore", targets: ["JingXuCore"]),
         .executable(name: "JingXuApp", targets: ["JingXuApp"]),
-        .executable(name: "JingXuChecks", targets: ["JingXuChecks"])
+        .executable(name: "JingXuChecks", targets: ["JingXuChecks"]),
+        .executable(name: "JingXuCalibration", targets: ["JingXuCalibration"])
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.10.0")
@@ -26,6 +27,10 @@ let package = Package(
         .executableTarget(
             name: "JingXuApp",
             dependencies: ["JingXuCore"]
+        ),
+        .executableTarget(
+            name: "JingXuCalibration",
+            dependencies: ["JingXuCore", .product(name: "GRDB", package: "GRDB.swift")]
         ),
         .executableTarget(
             name: "JingXuChecks",
