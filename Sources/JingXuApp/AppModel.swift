@@ -28,10 +28,16 @@ final class AppModel: ObservableObject {
     @Published var importProgress: ImportProgress?
     @Published var scanProgress: ScanProgress?
     @Published var analysisProgress: AnalysisProgress?
+    @Published var qualityReanalysisPlan: QualityReanalysisPlan?
+    @Published var qualityJobs: [QualityJobSnapshot] = []
+    @Published var isReanalyzing = false
     @Published var deletionPlan: DeletionPlan?
     @Published var isDeleting = false
+    @Published var sourceMergePlan: SourceMergePlan?
+    private let histogramProvider = HistogramProvider()
     private var deletionCoordinator: DeletionCoordinator?
-    private lazy var previewWindow = PreviewWindowController()
+    @Published var previewAsset: AssetListItem?
+    private var previewNavigation = PreviewNavigation(photoIDs: [])
 
     let volumeMonitor = VolumeMonitor()
 
@@ -39,23 +45,48 @@ final class AppModel: ObservableObject {
     private var scanner: DefaultSourceScanner?
     private var importer: ImportCoordinator?
     private var analysisCoordinator: AnalysisCoordinator?
+    private var reanalysisCoordinator: QualityReanalysisCoordinator?
     private var thumbnailProvider: DefaultThumbnailProvider?
     private var xmpExporter: DefaultXMPExporter?
     private var operationTask: Task<Void, Never>?
+    @Published var startupFailure: String?
+    @Published var isStarting = true
+    private var upgradeCoordinator: CatalogUpgradeCoordinator?
+
+    var catalogLocation: String { (try? JingXuPaths.databaseURL().path) ?? "无法访问 Application Support" }
+    var upgradeBackupLocation: String {
+        (try? JingXuPaths.databaseURL()).map { CatalogUpgradeCoordinator.backupDirectory(for: $0).path } ?? "无法访问备份目录"
+    }
 
     var selectedAsset: AssetListItem? {
         assets.first { $0.id == selectedAssetID }
     }
 
     init() {
+        Task { await initializeCatalog() }
+    }
+
+    func initializeCatalog() async {
+        guard store == nil else { return }
+        isStarting = true; isWorking = true; startupFailure = nil
         do {
-            let store = try CatalogStore(databaseURL: JingXuPaths.databaseURL())
+            let peers = NSRunningApplication.runningApplications(withBundleIdentifier: "app.jingxu.desktop")
+                .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated }
+            guard peers.isEmpty else { throw CatalogUpgradeError.blocked("检测到另一个镜序实例，请先退出旧版再重试。") }
+            let coordinator: CatalogUpgradeCoordinator
+            if let existing = upgradeCoordinator { coordinator = existing }
+            else {
+                coordinator = CatalogUpgradeCoordinator(databaseURL: try JingXuPaths.databaseURL())
+                upgradeCoordinator = coordinator
+            }
+            let store = try await coordinator.open()
             let scanner = DefaultSourceScanner(repository: store)
             self.store = store
             self.deletionCoordinator = DeletionCoordinator(store: store, journalURL: try JingXuPaths.databaseURL().deletingLastPathComponent().appendingPathComponent("deletions.json"))
             self.scanner = scanner
             self.importer = ImportCoordinator(repository: store, scanner: scanner)
             self.analysisCoordinator = AnalysisCoordinator(repository: store)
+            self.reanalysisCoordinator = QualityReanalysisCoordinator(store: store, analyzer: self.analysisCoordinator)
             self.thumbnailProvider = try DefaultThumbnailProvider(cacheDirectory: JingXuPaths.thumbnailCache())
             self.xmpExporter = DefaultXMPExporter(repository: store)
         } catch {
@@ -63,12 +94,15 @@ final class AppModel: ObservableObject {
             scanner = nil
             importer = nil
             analysisCoordinator = nil
+            reanalysisCoordinator = nil
             thumbnailProvider = nil
             xmpExporter = nil
-            errorMessage = "初始化图库失败：\(error.localizedDescription)"
+            deletionCoordinator = nil
+            startupFailure = "初始化图库失败：\(error.localizedDescription)"
+            isStarting = false; isWorking = false
+            return
         }
-        isWorking = true
-        Task {
+        do {
             do {
                 let journal = try JingXuPaths.databaseURL().deletingLastPathComponent().appendingPathComponent("deletions.json")
                 if FileManager.default.fileExists(atPath: journal.path) {
@@ -79,8 +113,40 @@ final class AppModel: ObservableObject {
                 let warnings = try await deletionCoordinator?.recover() ?? []
                 if !warnings.isEmpty { errorMessage = warnings.joined(separator: "\n") }
             } catch { errorMessage = "恢复删除记录失败：\(error.localizedDescription)" }
+            do {
+                try await store?.recoverQualityJobs()
+                qualityJobs = try await store?.qualityJobs() ?? []
+            } catch { errorMessage = "读取重算进度失败：\(error.localizedDescription)" }
             await reloadAll()
             isWorking = false
+            isStarting = false
+        }
+    }
+
+    func restoreUpgradeBackup() {
+        guard store == nil, !isStarting, let upgradeCoordinator else { return }
+        let panel = NSOpenPanel()
+        panel.title = "选择包含 manifest.json 的升级备份文件夹"
+        panel.canChooseDirectories = true; panel.canChooseFiles = false
+        panel.directoryURL = URL(fileURLWithPath: upgradeBackupLocation)
+        guard panel.runModal() == .OK, let backup = panel.url else { return }
+        let alert = NSAlert()
+        alert.messageText = "恢复升级前图库？"
+        alert.informativeText = "\(backup.path)\n备份之后的图库变更会回退。当前数据库及日志会先保全，原照片不会修改。恢复完成后本版本将重新检查并迁移图库；如需回退程序版本，请退出后使用匹配版本。"
+        alert.addButton(withTitle: "取消"); alert.addButton(withTitle: "保全当前数据并恢复")
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        isStarting = true
+        Task {
+            do {
+                let peers = NSRunningApplication.runningApplications(withBundleIdentifier: "app.jingxu.desktop")
+                    .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated }
+                guard peers.isEmpty else { throw CatalogUpgradeError.blocked("请先退出其他镜序实例。") }
+                let access = backup.startAccessingSecurityScopedResource()
+                defer { if access { backup.stopAccessingSecurityScopedResource() } }
+                try await upgradeCoordinator.restore(from: backup)
+                startupFailure = "备份已恢复。可重试启动，或退出并使用匹配版本。"
+            } catch { startupFailure = "恢复未完成：\(error.localizedDescription)" }
+            isStarting = false
         }
     }
 
@@ -106,6 +172,13 @@ final class AppModel: ObservableObject {
         let query = currentQuery()
         do {
             assets = try await store.assets(query)
+            previewNavigation.refresh(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
+            if let id = previewAsset?.id, let refreshed = assets.first(where: { $0.id == id }) {
+                previewAsset = refreshed
+                self.selectedAssetID = id
+            } else if let id = previewAsset?.id {
+                previewAsset = try await store.assetListItem(id: id)
+            }
             if let selectedAssetID, !assets.contains(where: { $0.id == selectedAssetID }) {
                 self.selectedAssetID = nil
             }
@@ -162,9 +235,52 @@ final class AppModel: ObservableObject {
 
     func openPreview(_ item: AssetListItem) {
         guard item.kind == .photo, !isDeleting else { return }
-        previewWindow.show(item: item, model: self)
+        selectAsset(item)
+        previewNavigation = PreviewNavigation(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
+        previewAsset = item
     }
-    func closePreview() { previewWindow.close() }
+    func selectAsset(_ item: AssetListItem) {
+        selectedAssetID = item.id
+        // A non-focusable SwiftUI grid cell otherwise leaves the search field editing.
+        NSApp.keyWindow?.makeFirstResponder(nil)
+    }
+    func closePreview() {
+        previewAsset = nil
+        previewNavigation = PreviewNavigation(photoIDs: [])
+    }
+    var previewNavigationEnabled: Bool {
+        previewAsset != nil && !isDeleting && !isShowingImport && !isShowingAlbumCreator &&
+        deletionPlan == nil && sourceMergePlan == nil && qualityReanalysisPlan == nil && errorMessage == nil
+    }
+    func canNavigatePreview(_ direction: Int) -> Bool {
+        guard previewNavigationEnabled, let id = previewAsset?.id else { return false }
+        return previewNavigation.neighbor(of: id, direction: direction) != nil
+    }
+    func navigatePreview(_ direction: Int) {
+        guard previewNavigationEnabled, let current = previewAsset?.id,
+              let id = previewNavigation.neighbor(of: current, direction: direction) else { return }
+        selectPreview(id: id)
+    }
+    var previewFilmstrip: [AssetListItem] {
+        guard let current = previewAsset else { return [] }
+        var available = Dictionary(assets.filter { $0.kind == .photo }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        available[current.id] = current
+        return previewNavigation.filmstripIDs(currentID: current.id).compactMap { available[$0] }
+    }
+    func selectPreview(id: String) {
+        guard previewNavigationEnabled, let current = previewAsset,
+              previewNavigation.filmstripIDs(currentID: current.id).contains(id),
+              let item = assets.first(where: { $0.id == id && $0.kind == .photo }) else { return }
+        selectAsset(item)
+        previewAsset = item
+    }
+    func flagFromMenu(_ flag: AssetFlag) {
+        guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil,
+              !isShowingImport, !isShowingAlbumCreator else { return }
+        guard NSApp.keyWindow?.title == "镜序" else { return }
+        if let id = previewAsset?.id { updateFlag(flag, assetID: id) }
+        else { updateFlag(flag) }
+    }
     func loadOriginal(_ item: AssetListItem) async throws -> PreviewImage {
         guard let store, let asset = try await store.asset(id: item.id),
               let source = try await store.source(id: asset.sourceID) else { throw CocoaError(.fileNoSuchFile) }
@@ -172,6 +288,95 @@ final class AppModel: ObservableObject {
         let access = root.startAccessingSecurityScopedResource()
         defer { if access { root.stopAccessingSecurityScopedResource() } }
         return try await ImagePreviewLoader().load(url: root.appendingPathComponent(asset.relativePath))
+    }
+
+    func histogram(for item: AssetListItem) async throws -> HistogramResult {
+        guard let store, let asset = try await store.asset(id: item.id),
+              let source = try await store.source(id: asset.sourceID) else { throw CocoaError(.fileReadNoSuchFile) }
+        let root = try BookmarkStore.resolve(source).url
+        let access = root.startAccessingSecurityScopedResource()
+        defer { if access { root.stopAccessingSecurityScopedResource() } }
+        return try await histogramProvider.histogram(asset: asset, url: root.appendingPathComponent(asset.relativePath))
+    }
+
+    var hasUserFilters: Bool { !searchText.isEmpty || minimumRating > 0 || flagFilter != nil }
+    func clearFilters() {
+        searchText = ""; minimumRating = 0; flagFilter = nil
+        Task { await reloadAssets() }
+    }
+
+    private func checkDeletionRecovery() async throws {
+        let warnings = try await deletionCoordinator?.recover() ?? []
+        if !warnings.isEmpty { throw NSError(domain: "JingXu", code: 3, userInfo: [NSLocalizedDescriptionKey: warnings.joined(separator: "\n")]) }
+    }
+    private func backupURL() throws -> URL {
+        try JingXuPaths.applicationSupport().appendingPathComponent("Backups/\(UUID().uuidString).sqlite")
+    }
+    func removeSource(_ source: SourceRoot) {
+        guard let store else { return }
+        startOperation {
+            self.isDeleting = true
+            defer { self.isDeleting = false }
+            do {
+                let count = try await store.assets(sourceID: source.id).count
+                let alert = NSAlert()
+                alert.messageText = "移除来源“\(source.name)”？"
+                alert.informativeText = "\(source.pathHint)\n共 \(count) 项索引。将清理该来源的索引、评分、标签及相册成员关系，不删除硬盘照片。执行前会备份图库。"
+                alert.addButton(withTitle: "取消"); alert.addButton(withTitle: "移除来源")
+                guard alert.runModal() == .alertSecondButtonReturn else { return }
+                try await self.checkDeletionRecovery()
+                self.closePreview()
+                let ids = try await store.removeSource(id: source.id, backupURL: self.backupURL())
+                try self.thumbnailProvider?.invalidate(assetIDs: ids)
+                if self.sidebarSelection == .source(source.id) { self.sidebarSelection = .smart(.all) }
+                await self.reloadAll()
+                self.statusText = "来源已移除，原照片未改动；图库备份保存在 Backups"
+            } catch { self.errorMessage = "移除失败：\(error.localizedDescription)"; await self.reloadAll() }
+        }
+    }
+    func deleteAlbum(_ album: Album) {
+        guard let store else { return }
+        startOperation {
+            self.isDeleting = true
+            defer { self.isDeleting = false }
+            let alert = NSAlert()
+            alert.messageText = "删除相册“\(album.name)”？"
+            alert.informativeText = "只删除相册及成员关系，不删除照片索引、评分、标签或原文件。"
+            alert.addButton(withTitle: "取消"); alert.addButton(withTitle: "删除相册")
+            guard alert.runModal() == .alertSecondButtonReturn else { return }
+            do {
+                try await self.checkDeletionRecovery()
+                try await store.deleteAlbum(id: album.id)
+                if self.sidebarSelection == .album(album.id) { self.sidebarSelection = .smart(.all) }
+                await self.reloadAll()
+            } catch { self.errorMessage = error.localizedDescription }
+        }
+    }
+    func prepareSourceMerge() {
+        guard let store else { return }
+        startOperation {
+            do {
+                try await self.checkDeletionRecovery()
+                self.sourceMergePlan = try await store.prepareSourceMerge()
+            } catch { self.errorMessage = error.localizedDescription }
+        }
+    }
+    func confirmSourceMerge(_ plan: SourceMergePlan) {
+        sourceMergePlan = nil
+        guard let store else { return }
+        startOperation {
+            self.isDeleting = true
+            defer { self.isDeleting = false }
+            do {
+                try await self.checkDeletionRecovery()
+                self.closePreview()
+                let report = try await store.mergeSources(plan, backupURL: self.backupURL())
+                try self.thumbnailProvider?.invalidate(assetIDs: report.invalidatedIDs)
+                self.sidebarSelection = .smart(.all)
+                await self.reloadAll()
+                self.errorMessage = "已合并 \(report.mergedGroups) 组来源。原文件未改动。\n" + report.skipped.joined(separator: "\n")
+            } catch { self.errorMessage = "合并失败：\(error.localizedDescription)"; await self.reloadAll() }
+        }
     }
 
     func chooseAndAddFolder() {
@@ -189,13 +394,7 @@ final class AppModel: ObservableObject {
         guard let store, let scanner, let analysisCoordinator else { return }
         startOperation {
             do {
-                let source = SourceRoot(
-                    name: url.lastPathComponent,
-                    bookmarkData: try? BookmarkStore.makeBookmark(for: url),
-                    pathHint: url.path,
-                    volumeIdentifier: FileIdentity.volumeIdentifier(for: url)
-                )
-                try await store.upsertSource(source)
+                let source = try await store.registerSource(at: url)
                 let report = try await scanner.scan(source: source) { [weak self] progress in
                     await MainActor.run {
                         self?.scanProgress = progress
@@ -278,12 +477,92 @@ final class AppModel: ObservableObject {
     }
 
     func cancelCurrentOperation() {
-        operationTask?.cancel()
+        if isReanalyzing {
+            Task { await reanalysisCoordinator?.requestCancel(); operationTask?.cancel() }
+        } else { operationTask?.cancel() }
+    }
+
+    var resumableQualityJob: QualityJobSnapshot? { qualityJobs.first { $0.isResumable } }
+
+    func prepareQualityReanalysis(legacyOnly: Bool = false, assetID: String? = nil) {
+        guard let store else { return }
+        let query = legacyOnly ? AssetQuery() : currentQuery()
+        startOperation {
+            do {
+                if try await store.qualityJobs().contains(where: { $0.isResumable }) {
+                    self.errorMessage = "请先继续或取消已有质量重算任务"
+                    return
+                }
+                let ids: [String]
+                if let assetID { ids = [assetID] }
+                else { ids = try await store.analysisCandidates(query, legacyOnly: legacyOnly) }
+                self.qualityReanalysisPlan = QualityReanalysisPlan(
+                    title: assetID != nil ? "重新分析这张照片" : (legacyOnly ? "重新分析全部旧结果" : "重新分析当前范围"), assetIDs: ids)
+            } catch { self.errorMessage = "无法准备重算：\(error.localizedDescription)" }
+        }
+    }
+
+    func confirmQualityReanalysis(_ plan: QualityReanalysisPlan) {
+        guard let reanalysisCoordinator else { return }
+        qualityReanalysisPlan = nil
+        startOperation {
+            self.isReanalyzing = true
+            defer { self.isReanalyzing = false }
+            do {
+                self.statusText = "正在创建重算前在线备份…"
+                let directory = try JingXuPaths.databaseURL().deletingLastPathComponent().appendingPathComponent("Backups/Analysis", isDirectory: true)
+                let id = try await reanalysisCoordinator.prepare(plan, backupDirectory: directory)
+                try await self.runQualityJob(id)
+            } catch { self.errorMessage = "重算未完成：\(error.localizedDescription)" }
+            await self.refreshQualityJobs()
+        }
+    }
+
+    func resumeQualityReanalysis() {
+        guard let job = resumableQualityJob else { return }
+        startOperation {
+            self.isReanalyzing = true
+            defer { self.isReanalyzing = false }
+            do { try await self.runQualityJob(job.id) }
+            catch { self.errorMessage = "继续重算失败：\(error.localizedDescription)" }
+            await self.refreshQualityJobs()
+        }
+    }
+
+    func pauseQualityReanalysis() { if isReanalyzing { operationTask?.cancel() } }
+
+    func cancelPausedQualityJob() {
+        guard let job = resumableQualityJob, let store else { return }
+        startOperation {
+            do { try await store.setQualityJobState(job.id, state: .cancelled) }
+            catch { self.errorMessage = "取消任务失败：\(error.localizedDescription)" }
+            await self.refreshQualityJobs()
+        }
+    }
+
+    private func runQualityJob(_ id: String) async throws {
+        try await reanalysisCoordinator?.run(jobID: id) { [weak self] progress in
+            await MainActor.run {
+                self?.analysisProgress = progress
+                self?.statusText = "质量重算 \(progress.completed)/\(progress.total) · \(progress.currentFile)"
+            }
+        }
+    }
+
+    private func refreshQualityJobs() async {
+        do {
+            qualityJobs = try await store?.qualityJobs() ?? []
+            if let job = qualityJobs.first {
+                let state = job.job.state == .completed ? "完成" : (job.job.state == .cancelled ? "已取消" : "已暂停／待继续")
+                statusText = "重算\(state)：\(job.completed)/\(job.total)，失败 \(job.failed) 项"
+            }
+        } catch { errorMessage = "读取重算进度失败：\(error.localizedDescription)" }
+        await reloadAssets()
     }
 
     func updateRating(_ rating: Int) {
         guard !isDeleting else { return }
-        guard let selectedAssetID, let store else { return }
+        guard let selectedAssetID = previewAsset?.id ?? selectedAssetID, let store else { return }
         Task {
             do {
                 var annotation = try await store.annotation(for: selectedAssetID)
@@ -295,21 +574,26 @@ final class AppModel: ObservableObject {
     }
 
     func updateFlag(_ flag: AssetFlag) {
-        guard !isDeleting else { return }
-        guard let selectedAssetID, let store else { return }
+        guard let selectedAssetID = previewAsset?.id ?? selectedAssetID else { return }
+        updateFlag(flag, assetID: selectedAssetID)
+    }
+    func updateFlag(_ flag: AssetFlag, assetID: String) {
+        guard !isDeleting, sourceMergePlan == nil, deletionPlan == nil, qualityReanalysisPlan == nil, let store else { return }
         Task {
             do {
-                var annotation = try await store.annotation(for: selectedAssetID)
+                guard let asset = try await store.asset(id: assetID), asset.kind == .photo, !isDeleting else { return }
+                var annotation = try await store.annotation(for: assetID)
                 annotation.flag = flag
                 try await store.saveAnnotation(annotation)
                 await reloadAssets()
+                statusText = "\(asset.fileName)：\(flag.displayName)"
             } catch { errorMessage = "保存旗标失败：\(error.localizedDescription)" }
         }
     }
 
     func updateKeywords(_ keywords: [String]) {
         guard !isDeleting else { return }
-        guard let selectedAssetID, let store else { return }
+        guard let selectedAssetID = previewAsset?.id ?? selectedAssetID, let store else { return }
         Task {
             do {
                 var annotation = try await store.annotation(for: selectedAssetID)
@@ -320,20 +604,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func resolveSuggestion(accepted: Bool) {
+    func resolveSuggestion(accepted: Bool, assetID: String) {
         guard !isDeleting else { return }
-        guard let selectedAssetID, let store else { return }
+        guard let store else { return }
         Task {
             do {
-                if var analysis = try await store.analysis(for: selectedAssetID) {
-                    analysis.suggestionState = accepted ? .accepted : .ignored
-                    try await store.saveAnalysis(analysis)
-                }
-                if accepted {
-                    var annotation = try await store.annotation(for: selectedAssetID)
-                    annotation.flag = .rejected
-                    try await store.saveAnnotation(annotation)
-                }
+                _ = try await store.saveQualityReview(assetID: assetID, state: accepted ? .accepted : .ignored)
                 await reloadAssets()
             } catch { errorMessage = "审核结果保存失败：\(error.localizedDescription)" }
         }
@@ -428,10 +704,14 @@ final class AppModel: ObservableObject {
     }
 
     private func startOperation(_ work: @escaping @MainActor @Sendable () async -> Void) {
-        guard !isWorking, deletionPlan == nil else { return }
+        guard !isWorking, deletionPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
         isWorking = true
         operationTask = Task {
-            await work()
+            do {
+                try await checkDeletionRecovery()
+                try Task.checkCancellation()
+                await work()
+            } catch { errorMessage = "后台操作未开始：\(error.localizedDescription)" }
             isWorking = false
             importProgress = nil
             scanProgress = nil

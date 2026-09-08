@@ -107,13 +107,7 @@ public actor ImportCoordinator: Importing {
                 try await repository.saveImportSession(session)
             }
 
-            let source = try await repository.sources().first(where: { $0.pathHint == destination.path }) ?? SourceRoot(
-                name: destination.lastPathComponent,
-                bookmarkData: try? BookmarkStore.makeBookmark(for: destination),
-                pathHint: destination.path,
-                volumeIdentifier: FileIdentity.volumeIdentifier(for: destination)
-            )
-            try await repository.upsertSource(source)
+            let source = try await repository.registerSource(at: destination)
             let scanReport = try await scanner.scan(source: source, progress: nil)
             session.status = session.failedFiles == 0 ? .completed : .failed
             session.updatedAt = Date()

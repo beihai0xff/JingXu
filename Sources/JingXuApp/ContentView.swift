@@ -22,6 +22,36 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 420)
         }
         .toolbar { toolbar }
+        .background(FlagKeyboardHandler(enabled: !model.isDeleting && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
+            if let id = model.previewAsset?.id { model.updateFlag(flag, assetID: id) }
+            else { model.updateFlag(flag) }
+        })
+        .sheet(item: $model.qualityReanalysisPlan) { plan in
+            QualityReanalysisSheet(plan: plan).environmentObject(model)
+        }
+        .sheet(item: $model.sourceMergePlan) { plan in
+            VStack(alignment: .leading, spacing: 16) {
+                Text("整理重复来源").font(.title2)
+                Text("发现 \(plan.groups.count) 组；评分或旗标冲突 \(plan.conflicts) 项。保留最早来源，标签及相册关系合并；评分和旗标采用最近修改记录。执行前备份图库，不修改原文件。")
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(plan.groups.indices, id: \.self) { index in
+                            Text("保留：\(plan.groups[index][0].name) · \(plan.groups[index][0].id)\n\(plan.groups[index][0].pathHint)\n合并 \(plan.groups[index].count) 个来源").font(.caption).textSelection(.enabled)
+                            ForEach(Array(plan.groups[index].dropFirst())) { source in
+                                Text("并入：\(source.name) · \(source.id)\n\(source.pathHint)")
+                                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                            }
+                        }
+                        ForEach(plan.warnings, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
+                    }
+                }.frame(height: 230)
+                HStack {
+                    Spacer()
+                    Button("取消") { model.sourceMergePlan = nil }.keyboardShortcut(.cancelAction)
+                    Button("备份并合并") { model.confirmSourceMerge(plan) }.disabled(plan.groups.isEmpty)
+                }
+            }.padding(24).frame(width: 600)
+        }
         .sheet(item: $model.deletionPlan) { plan in
             VStack(alignment: .leading, spacing: 16) {
                 Text("清理淘汰图片").font(.title2)
@@ -58,9 +88,19 @@ struct ContentView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
-        .onChange(of: model.sidebarSelection) { _, _ in Task { await model.reloadAssets() } }
-        .onChange(of: model.minimumRating) { _, _ in Task { await model.reloadAssets() } }
-        .onChange(of: model.flagFilter) { _, _ in Task { await model.reloadAssets() } }
+        .onChange(of: model.sidebarSelection) { _, _ in
+            model.closePreview()
+            Task { await model.reloadAssets() }
+        }
+        .onChange(of: model.searchText) { _, _ in model.closePreview() }
+        .onChange(of: model.minimumRating) { _, _ in
+            model.closePreview()
+            Task { await model.reloadAssets() }
+        }
+        .onChange(of: model.flagFilter) { _, _ in
+            model.closePreview()
+            Task { await model.reloadAssets() }
+        }
     }
 
     private var sidebar: some View {
@@ -83,6 +123,9 @@ struct ContentView: View {
                         Image(systemName: source.isOnline ? "folder" : "externaldrive.badge.xmark")
                     }
                     .tag(SidebarDestination.source(source.id))
+                    .contextMenu {
+                        Button("移除来源…", role: .destructive) { model.removeSource(source) }.disabled(model.isWorking)
+                    }
                 }
                 Button("添加文件夹…") { model.chooseAndAddFolder() }
                     .buttonStyle(.plain)
@@ -93,6 +136,9 @@ struct ContentView: View {
                 ForEach(model.albums) { album in
                     Label(album.name, systemImage: "rectangle.stack")
                         .tag(SidebarDestination.album(album.id))
+                        .contextMenu {
+                            Button("删除相册…", role: .destructive) { model.deleteAlbum(album) }.disabled(model.isWorking)
+                        }
                 }
                 Button("新建相册…") { model.isShowingAlbumCreator = true }
                     .buttonStyle(.plain)
@@ -107,12 +153,18 @@ struct ContentView: View {
         VStack(spacing: 0) {
             filterBar
             Divider()
-            if model.assets.isEmpty {
+            if let item = model.previewAsset {
+                ZoomPreview(item: item)
+                    .id(item.id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                PreviewFilmstrip(items: model.previewFilmstrip, currentID: item.id)
+            } else if model.assets.isEmpty {
                 ContentUnavailableView {
-                    Label("图库为空", systemImage: "photo.on.rectangle.angled")
+                    Label(model.hasUserFilters ? "当前筛选无匹配结果" : "当前范围暂无照片", systemImage: "photo.on.rectangle.angled")
                 } description: {
-                    Text("添加本地照片文件夹，或从相机卡安全导入。")
+                    Text(model.hasUserFilters ? "照片可能被搜索、评分或旗标条件隐藏。" : "可添加照片文件夹、导入照片，或等待当前扫描完成。")
                 } actions: {
+                    if model.hasUserFilters { Button("清除筛选") { model.clearFilters() } }
                     HStack {
                         Button("添加文件夹") { model.chooseAndAddFolder() }
                         Button("从相机卡导入") { model.isShowingImport = true }
@@ -123,8 +175,8 @@ struct ContentView: View {
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
                         ForEach(model.assets) { item in
                             AssetCell(item: item, size: model.gridSize, isSelected: model.selectedAssetID == item.id)
-                                .onTapGesture(count: 2) { model.selectedAssetID = item.id; model.openPreview(item) }
-                                .onTapGesture { model.selectedAssetID = item.id }
+                                .onTapGesture(count: 2) { model.selectAsset(item); model.openPreview(item) }
+                                .onTapGesture { model.selectAsset(item) }
                                 .contextMenu {
                                     Button("在访达中显示") {
                                         model.selectedAssetID = item.id
@@ -181,7 +233,14 @@ struct ContentView: View {
             Text(model.statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
             if model.isWorking {
+                if model.isReanalyzing {
+                    Button("暂停") { model.pauseQualityReanalysis() }.buttonStyle(.borderless)
+                }
                 Button("取消") { model.cancelCurrentOperation() }.buttonStyle(.borderless)
+            } else if let job = model.resumableQualityJob {
+                Text("重算 \(job.completed)/\(job.total)").font(.caption)
+                Button("继续") { model.resumeQualityReanalysis() }.buttonStyle(.borderless)
+                Button("取消重算") { model.cancelPausedQualityJob() }.buttonStyle(.borderless)
             }
             Image(systemName: "photo")
             Slider(value: $model.gridSize, in: 100...260)
@@ -193,12 +252,13 @@ struct ContentView: View {
 
     @ViewBuilder
     private var inspector: some View {
-        if let item = model.selectedAsset {
+        if let item = model.previewAsset ?? model.selectedAsset {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     LargePreview(item: item)
                         .onTapGesture { model.openPreview(item) }
                         .help("点击放大查看原图")
+                    HistogramView(item: item).id(item.id)
                     Text(item.fileName).font(.headline).textSelection(.enabled)
                     ratingControl(item)
                     flagControl(item)
@@ -242,7 +302,7 @@ struct ContentView: View {
 
     private func flagControl(_ item: AssetListItem) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("旗标").font(.caption).foregroundStyle(.secondary)
+            Text("旗标 · X 淘汰 / U 未标记").font(.caption).foregroundStyle(.secondary)
             Picker("旗标", selection: Binding(
                 get: { item.flag },
                 set: { model.updateFlag($0) }
@@ -277,31 +337,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private func qualitySection(_ item: AssetListItem) -> some View {
-        if !item.issues.isEmpty {
-            GroupBox("质量建议") {
-                VStack(alignment: .leading, spacing: 10) {
-                    FlowLayout(spacing: 6) {
-                        ForEach(item.issues, id: \.self) { issue in
-                            Label(issue.displayName, systemImage: issue == .similarBurst ? "square.stack.3d.up" : "exclamationmark.triangle")
-                                .font(.caption)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(.orange.opacity(0.14), in: Capsule())
-                        }
-                    }
-                    if item.suggestionState == .pending {
-                        HStack {
-                            Button("标记淘汰") { model.resolveSuggestion(accepted: true) }
-                            Button("忽略") { model.resolveSuggestion(accepted: false) }
-                        }
-                    } else {
-                        Text(item.suggestionState == .accepted ? "已接受建议" : "已忽略建议")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
+        QualityInspector(item: item)
     }
 
     private func keywordSection(_ item: AssetListItem) -> some View {
@@ -321,6 +357,8 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
+            Button("整理重复来源…", systemImage: "folder.badge.gearshape") { model.prepareSourceMerge() }
+                .disabled(model.isWorking || model.sourceMergePlan != nil || model.deletionPlan != nil)
             Button("清理淘汰图片…", systemImage: "trash") { model.prepareDeletion() }
                 .disabled(model.isWorking || model.deletionPlan != nil)
             Button { model.chooseAndAddFolder() } label: { Label("添加文件夹", systemImage: "folder.badge.plus") }
@@ -352,7 +390,8 @@ private struct AssetCell: View {
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                 HStack(spacing: 4) {
                     if item.kind == .video { badge("video.fill", color: .blue) }
-                    if !item.issues.isEmpty { badge("exclamationmark.triangle.fill", color: .orange) }
+                    if item.hasPendingQualityWarning { badge("exclamationmark.triangle.fill", color: .orange) }
+                    if item.similarGroupID != nil || item.issues.contains(.similarBurst) { badge("square.stack.3d.up", color: .blue) }
                     if item.flag == .picked { badge("checkmark", color: .green) }
                     if item.flag == .rejected { badge("xmark", color: .red) }
                 }
