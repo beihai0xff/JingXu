@@ -125,6 +125,9 @@ public struct DefaultSourceScanner: SourceScanner {
 
         mutableSource.isOnline = true
         mutableSource.lastScanAt = Date()
+        if let identity = try? SourceIdentity.resolve(root), let data = try? JSONEncoder().encode(identity) {
+            mutableSource.directoryIdentityJSON = String(decoding: data, as: UTF8.self)
+        }
         if resolved.isStale {
             mutableSource.bookmarkData = try? BookmarkStore.makeBookmark(for: root)
         }

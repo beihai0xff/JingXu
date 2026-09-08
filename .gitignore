@@ -5,5 +5,7 @@
 /work/
 /outputs/*.app
 /outputs/*.zip
+/outputs/*.dmg
+/outputs/*.sha256
 *.xcuserstate
 xcuserdata/

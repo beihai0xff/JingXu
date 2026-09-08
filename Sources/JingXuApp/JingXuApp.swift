@@ -6,9 +6,24 @@ struct JingXuApp: App {
 
     var body: some Scene {
         WindowGroup("镜序") {
-            ContentView()
-                .environmentObject(model)
-                .frame(minWidth: 1_080, minHeight: 680)
+            Group {
+                if model.isStarting {
+                    ProgressView("正在检查图库与升级备份…")
+                } else if let failure = model.startupFailure {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("图库未打开").font(.title)
+                        Text(failure).textSelection(.enabled)
+                        Text("原数据库：\(model.catalogLocation)\n升级备份：\(model.upgradeBackupLocation)")
+                            .font(.caption).textSelection(.enabled)
+                        Text("未创建替代图库，也未启动扫描、分析或删除恢复。")
+                        HStack {
+                            Button("重试") { Task { await model.initializeCatalog() } }
+                            Button("从升级备份恢复…") { model.restoreUpgradeBackup() }
+                            Button("退出") { NSApplication.shared.terminate(nil) }
+                        }
+                    }.padding(32)
+                } else { ContentView().environmentObject(model) }
+            }.frame(minWidth: 1_080, minHeight: 680)
         }
         .commands {
             CommandGroup(after: .importExport) {
@@ -21,6 +36,17 @@ struct JingXuApp: App {
                     .disabled(model.selectedAssetID == nil)
             }
             CommandGroup(after: .sidebar) {
+                Button("标记淘汰（X）") { model.flagFromMenu(.rejected) }
+                    .disabled(model.isDeleting)
+                Button("取消旗标（U）") { model.flagFromMenu(.none) }
+                    .disabled(model.isDeleting)
+                Divider()
+                Button("重新分析当前范围…") { model.prepareQualityReanalysis() }.disabled(model.isWorking)
+                Button("重新分析全部旧结果…") { model.prepareQualityReanalysis(legacyOnly: true) }.disabled(model.isWorking)
+                Button("暂停质量重算") { model.pauseQualityReanalysis() }.disabled(!model.isReanalyzing)
+                Button("继续质量重算") { model.resumeQualityReanalysis() }.disabled(model.isWorking || model.resumableQualityJob == nil)
+                Divider()
+                Button("整理重复来源…") { model.prepareSourceMerge() }.disabled(model.isWorking)
                 Button("重新扫描当前来源") { model.rescanSelectedSource() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
             }
