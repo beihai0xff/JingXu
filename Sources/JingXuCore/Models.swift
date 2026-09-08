@@ -217,6 +217,23 @@ public struct AnalysisResult: Codable, FetchableRecord, PersistableRecord, Senda
     public var suggestionState: SuggestionState
     public var similarGroupID: String?
     public var analyzedAt: Date
+    public var assessmentStatus: QualityAssessmentStatus?
+    public var diagnosticJSON: String?
+    public var fingerprintJSON: String?
+    public var analysisError: String?
+
+    public var status: QualityAssessmentStatus { assessmentStatus ?? (algorithmVersion < 2 ? .legacy : .insufficientEvidence) }
+    public var diagnostic: QualityDiagnosticSummary? {
+        get { diagnosticJSON.flatMap { try? JSONDecoder().decode(QualityDiagnosticSummary.self, from: Data($0.utf8)) } }
+        set { diagnosticJSON = newValue.flatMap { try? JSONEncoder().encode($0) }.map { String(decoding: $0, as: UTF8.self) } }
+    }
+    public var fingerprint: AnalysisFingerprint? {
+        get { fingerprintJSON.flatMap { try? JSONDecoder().decode(AnalysisFingerprint.self, from: Data($0.utf8)) } }
+        set { fingerprintJSON = newValue.flatMap { try? JSONEncoder().encode($0) }.map { String(decoding: $0, as: UTF8.self) } }
+    }
+    public var hasPendingQualityWarning: Bool {
+        algorithmVersion == 2 && status == .suspectedBlur && suggestionState == .pending && issues.contains(.blurry)
+    }
 
     public var issues: [QualityIssue] {
         get {
@@ -367,6 +384,22 @@ public struct AssetListItem: Identifiable, Sendable, Equatable, FetchableRecord,
     public var keywordsJSON: String
     public var issuesJSON: String?
     public var suggestionState: SuggestionState?
+    public var algorithmVersion: Int?
+    public var assessmentStatus: QualityAssessmentStatus?
+    public var diagnosticJSON: String?
+    public var analysisError: String?
+    public var similarGroupID: String?
+
+    public var qualityStatus: QualityAssessmentStatus? {
+        guard let algorithmVersion else { return nil }
+        return assessmentStatus ?? (algorithmVersion < 2 ? .legacy : .insufficientEvidence)
+    }
+    public var diagnostic: QualityDiagnosticSummary? {
+        diagnosticJSON.flatMap { try? JSONDecoder().decode(QualityDiagnosticSummary.self, from: Data($0.utf8)) }
+    }
+    public var hasPendingQualityWarning: Bool {
+        algorithmVersion == 2 && qualityStatus == .suspectedBlur && suggestionState == .pending && issues.contains(.blurry)
+    }
 
     public var keywords: [String] {
         guard let data = keywordsJSON.data(using: .utf8) else { return [] }

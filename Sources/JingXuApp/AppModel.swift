@@ -28,6 +28,9 @@ final class AppModel: ObservableObject {
     @Published var importProgress: ImportProgress?
     @Published var scanProgress: ScanProgress?
     @Published var analysisProgress: AnalysisProgress?
+    @Published var qualityReanalysisPlan: QualityReanalysisPlan?
+    @Published var qualityJobs: [QualityJobSnapshot] = []
+    @Published var isReanalyzing = false
     @Published var deletionPlan: DeletionPlan?
     @Published var isDeleting = false
     @Published var sourceMergePlan: SourceMergePlan?
@@ -42,6 +45,7 @@ final class AppModel: ObservableObject {
     private var scanner: DefaultSourceScanner?
     private var importer: ImportCoordinator?
     private var analysisCoordinator: AnalysisCoordinator?
+    private var reanalysisCoordinator: QualityReanalysisCoordinator?
     private var thumbnailProvider: DefaultThumbnailProvider?
     private var xmpExporter: DefaultXMPExporter?
     private var operationTask: Task<Void, Never>?
@@ -82,6 +86,7 @@ final class AppModel: ObservableObject {
             self.scanner = scanner
             self.importer = ImportCoordinator(repository: store, scanner: scanner)
             self.analysisCoordinator = AnalysisCoordinator(repository: store)
+            self.reanalysisCoordinator = QualityReanalysisCoordinator(store: store, analyzer: self.analysisCoordinator)
             self.thumbnailProvider = try DefaultThumbnailProvider(cacheDirectory: JingXuPaths.thumbnailCache())
             self.xmpExporter = DefaultXMPExporter(repository: store)
         } catch {
@@ -89,6 +94,7 @@ final class AppModel: ObservableObject {
             scanner = nil
             importer = nil
             analysisCoordinator = nil
+            reanalysisCoordinator = nil
             thumbnailProvider = nil
             xmpExporter = nil
             deletionCoordinator = nil
@@ -107,6 +113,10 @@ final class AppModel: ObservableObject {
                 let warnings = try await deletionCoordinator?.recover() ?? []
                 if !warnings.isEmpty { errorMessage = warnings.joined(separator: "\n") }
             } catch { errorMessage = "恢复删除记录失败：\(error.localizedDescription)" }
+            do {
+                try await store?.recoverQualityJobs()
+                qualityJobs = try await store?.qualityJobs() ?? []
+            } catch { errorMessage = "读取重算进度失败：\(error.localizedDescription)" }
             await reloadAll()
             isWorking = false
             isStarting = false
@@ -166,6 +176,8 @@ final class AppModel: ObservableObject {
             if let id = previewAsset?.id, let refreshed = assets.first(where: { $0.id == id }) {
                 previewAsset = refreshed
                 self.selectedAssetID = id
+            } else if let id = previewAsset?.id {
+                previewAsset = try await store.assetListItem(id: id)
             }
             if let selectedAssetID, !assets.contains(where: { $0.id == selectedAssetID }) {
                 self.selectedAssetID = nil
@@ -238,7 +250,7 @@ final class AppModel: ObservableObject {
     }
     var previewNavigationEnabled: Bool {
         previewAsset != nil && !isDeleting && !isShowingImport && !isShowingAlbumCreator &&
-        deletionPlan == nil && sourceMergePlan == nil && errorMessage == nil
+        deletionPlan == nil && sourceMergePlan == nil && qualityReanalysisPlan == nil && errorMessage == nil
     }
     func canNavigatePreview(_ direction: Int) -> Bool {
         guard previewNavigationEnabled, let id = previewAsset?.id else { return false }
@@ -246,7 +258,18 @@ final class AppModel: ObservableObject {
     }
     func navigatePreview(_ direction: Int) {
         guard previewNavigationEnabled, let current = previewAsset?.id,
-              let id = previewNavigation.neighbor(of: current, direction: direction),
+              let id = previewNavigation.neighbor(of: current, direction: direction) else { return }
+        selectPreview(id: id)
+    }
+    var previewFilmstrip: [AssetListItem] {
+        guard let current = previewAsset else { return [] }
+        var available = Dictionary(assets.filter { $0.kind == .photo }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        available[current.id] = current
+        return previewNavigation.filmstripIDs(currentID: current.id).compactMap { available[$0] }
+    }
+    func selectPreview(id: String) {
+        guard previewNavigationEnabled, let current = previewAsset,
+              previewNavigation.filmstripIDs(currentID: current.id).contains(id),
               let item = assets.first(where: { $0.id == id && $0.kind == .photo }) else { return }
         selectAsset(item)
         previewAsset = item
@@ -454,12 +477,92 @@ final class AppModel: ObservableObject {
     }
 
     func cancelCurrentOperation() {
-        operationTask?.cancel()
+        if isReanalyzing {
+            Task { await reanalysisCoordinator?.requestCancel(); operationTask?.cancel() }
+        } else { operationTask?.cancel() }
+    }
+
+    var resumableQualityJob: QualityJobSnapshot? { qualityJobs.first { $0.isResumable } }
+
+    func prepareQualityReanalysis(legacyOnly: Bool = false, assetID: String? = nil) {
+        guard let store else { return }
+        let query = legacyOnly ? AssetQuery() : currentQuery()
+        startOperation {
+            do {
+                if try await store.qualityJobs().contains(where: { $0.isResumable }) {
+                    self.errorMessage = "请先继续或取消已有质量重算任务"
+                    return
+                }
+                let ids: [String]
+                if let assetID { ids = [assetID] }
+                else { ids = try await store.analysisCandidates(query, legacyOnly: legacyOnly) }
+                self.qualityReanalysisPlan = QualityReanalysisPlan(
+                    title: assetID != nil ? "重新分析这张照片" : (legacyOnly ? "重新分析全部旧结果" : "重新分析当前范围"), assetIDs: ids)
+            } catch { self.errorMessage = "无法准备重算：\(error.localizedDescription)" }
+        }
+    }
+
+    func confirmQualityReanalysis(_ plan: QualityReanalysisPlan) {
+        guard let reanalysisCoordinator else { return }
+        qualityReanalysisPlan = nil
+        startOperation {
+            self.isReanalyzing = true
+            defer { self.isReanalyzing = false }
+            do {
+                self.statusText = "正在创建重算前在线备份…"
+                let directory = try JingXuPaths.databaseURL().deletingLastPathComponent().appendingPathComponent("Backups/Analysis", isDirectory: true)
+                let id = try await reanalysisCoordinator.prepare(plan, backupDirectory: directory)
+                try await self.runQualityJob(id)
+            } catch { self.errorMessage = "重算未完成：\(error.localizedDescription)" }
+            await self.refreshQualityJobs()
+        }
+    }
+
+    func resumeQualityReanalysis() {
+        guard let job = resumableQualityJob else { return }
+        startOperation {
+            self.isReanalyzing = true
+            defer { self.isReanalyzing = false }
+            do { try await self.runQualityJob(job.id) }
+            catch { self.errorMessage = "继续重算失败：\(error.localizedDescription)" }
+            await self.refreshQualityJobs()
+        }
+    }
+
+    func pauseQualityReanalysis() { if isReanalyzing { operationTask?.cancel() } }
+
+    func cancelPausedQualityJob() {
+        guard let job = resumableQualityJob, let store else { return }
+        startOperation {
+            do { try await store.setQualityJobState(job.id, state: .cancelled) }
+            catch { self.errorMessage = "取消任务失败：\(error.localizedDescription)" }
+            await self.refreshQualityJobs()
+        }
+    }
+
+    private func runQualityJob(_ id: String) async throws {
+        try await reanalysisCoordinator?.run(jobID: id) { [weak self] progress in
+            await MainActor.run {
+                self?.analysisProgress = progress
+                self?.statusText = "质量重算 \(progress.completed)/\(progress.total) · \(progress.currentFile)"
+            }
+        }
+    }
+
+    private func refreshQualityJobs() async {
+        do {
+            qualityJobs = try await store?.qualityJobs() ?? []
+            if let job = qualityJobs.first {
+                let state = job.job.state == .completed ? "完成" : (job.job.state == .cancelled ? "已取消" : "已暂停／待继续")
+                statusText = "重算\(state)：\(job.completed)/\(job.total)，失败 \(job.failed) 项"
+            }
+        } catch { errorMessage = "读取重算进度失败：\(error.localizedDescription)" }
+        await reloadAssets()
     }
 
     func updateRating(_ rating: Int) {
         guard !isDeleting else { return }
-        guard let selectedAssetID, let store else { return }
+        guard let selectedAssetID = previewAsset?.id ?? selectedAssetID, let store else { return }
         Task {
             do {
                 var annotation = try await store.annotation(for: selectedAssetID)
@@ -471,11 +574,11 @@ final class AppModel: ObservableObject {
     }
 
     func updateFlag(_ flag: AssetFlag) {
-        guard let selectedAssetID else { return }
+        guard let selectedAssetID = previewAsset?.id ?? selectedAssetID else { return }
         updateFlag(flag, assetID: selectedAssetID)
     }
     func updateFlag(_ flag: AssetFlag, assetID: String) {
-        guard !isDeleting, sourceMergePlan == nil, deletionPlan == nil, let store else { return }
+        guard !isDeleting, sourceMergePlan == nil, deletionPlan == nil, qualityReanalysisPlan == nil, let store else { return }
         Task {
             do {
                 guard let asset = try await store.asset(id: assetID), asset.kind == .photo, !isDeleting else { return }
@@ -490,7 +593,7 @@ final class AppModel: ObservableObject {
 
     func updateKeywords(_ keywords: [String]) {
         guard !isDeleting else { return }
-        guard let selectedAssetID, let store else { return }
+        guard let selectedAssetID = previewAsset?.id ?? selectedAssetID, let store else { return }
         Task {
             do {
                 var annotation = try await store.annotation(for: selectedAssetID)
@@ -501,20 +604,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func resolveSuggestion(accepted: Bool) {
+    func resolveSuggestion(accepted: Bool, assetID: String) {
         guard !isDeleting else { return }
-        guard let selectedAssetID, let store else { return }
+        guard let store else { return }
         Task {
             do {
-                if var analysis = try await store.analysis(for: selectedAssetID) {
-                    analysis.suggestionState = accepted ? .accepted : .ignored
-                    try await store.saveAnalysis(analysis)
-                }
-                if accepted {
-                    var annotation = try await store.annotation(for: selectedAssetID)
-                    annotation.flag = .rejected
-                    try await store.saveAnnotation(annotation)
-                }
+                _ = try await store.saveQualityReview(assetID: assetID, state: accepted ? .accepted : .ignored)
                 await reloadAssets()
             } catch { errorMessage = "审核结果保存失败：\(error.localizedDescription)" }
         }
@@ -609,7 +704,7 @@ final class AppModel: ObservableObject {
     }
 
     private func startOperation(_ work: @escaping @MainActor @Sendable () async -> Void) {
-        guard !isWorking, deletionPlan == nil, sourceMergePlan == nil else { return }
+        guard !isWorking, deletionPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
         isWorking = true
         operationTask = Task {
             do {

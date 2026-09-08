@@ -15,6 +15,11 @@ public struct PreviewNavigation: Sendable {
         eligible = Set(photoIDs)
     }
 
+    /// The current filtered-out photo remains an anchor until the user leaves it.
+    public func filmstripIDs(currentID: String) -> [String] {
+        order.filter { eligible.contains($0) || $0 == currentID }
+    }
+
     public func neighbor(of id: String, direction: Int) -> String? {
         guard direction == -1 || direction == 1,
               let position = order.firstIndex(of: id) else { return nil }

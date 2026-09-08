@@ -22,10 +22,13 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 420)
         }
         .toolbar { toolbar }
-        .background(FlagKeyboardHandler(enabled: !model.isDeleting && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.sourceMergePlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
+        .background(FlagKeyboardHandler(enabled: !model.isDeleting && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
             if let id = model.previewAsset?.id { model.updateFlag(flag, assetID: id) }
             else { model.updateFlag(flag) }
         })
+        .sheet(item: $model.qualityReanalysisPlan) { plan in
+            QualityReanalysisSheet(plan: plan).environmentObject(model)
+        }
         .sheet(item: $model.sourceMergePlan) { plan in
             VStack(alignment: .leading, spacing: 16) {
                 Text("整理重复来源").font(.title2)
@@ -154,6 +157,7 @@ struct ContentView: View {
                 ZoomPreview(item: item)
                     .id(item.id)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                PreviewFilmstrip(items: model.previewFilmstrip, currentID: item.id)
             } else if model.assets.isEmpty {
                 ContentUnavailableView {
                     Label(model.hasUserFilters ? "当前筛选无匹配结果" : "当前范围暂无照片", systemImage: "photo.on.rectangle.angled")
@@ -229,7 +233,14 @@ struct ContentView: View {
             Text(model.statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
             if model.isWorking {
+                if model.isReanalyzing {
+                    Button("暂停") { model.pauseQualityReanalysis() }.buttonStyle(.borderless)
+                }
                 Button("取消") { model.cancelCurrentOperation() }.buttonStyle(.borderless)
+            } else if let job = model.resumableQualityJob {
+                Text("重算 \(job.completed)/\(job.total)").font(.caption)
+                Button("继续") { model.resumeQualityReanalysis() }.buttonStyle(.borderless)
+                Button("取消重算") { model.cancelPausedQualityJob() }.buttonStyle(.borderless)
             }
             Image(systemName: "photo")
             Slider(value: $model.gridSize, in: 100...260)
@@ -241,7 +252,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var inspector: some View {
-        if let item = model.selectedAsset {
+        if let item = model.previewAsset ?? model.selectedAsset {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     LargePreview(item: item)
@@ -326,31 +337,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private func qualitySection(_ item: AssetListItem) -> some View {
-        if !item.issues.isEmpty {
-            GroupBox("质量建议") {
-                VStack(alignment: .leading, spacing: 10) {
-                    FlowLayout(spacing: 6) {
-                        ForEach(item.issues, id: \.self) { issue in
-                            Label(issue.displayName, systemImage: issue == .similarBurst ? "square.stack.3d.up" : "exclamationmark.triangle")
-                                .font(.caption)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(.orange.opacity(0.14), in: Capsule())
-                        }
-                    }
-                    if item.suggestionState == .pending {
-                        HStack {
-                            Button("标记淘汰") { model.resolveSuggestion(accepted: true) }
-                            Button("忽略") { model.resolveSuggestion(accepted: false) }
-                        }
-                    } else {
-                        Text(item.suggestionState == .accepted ? "已接受建议" : "已忽略建议")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
+        QualityInspector(item: item)
     }
 
     private func keywordSection(_ item: AssetListItem) -> some View {
@@ -403,7 +390,8 @@ private struct AssetCell: View {
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                 HStack(spacing: 4) {
                     if item.kind == .video { badge("video.fill", color: .blue) }
-                    if !item.issues.isEmpty { badge("exclamationmark.triangle.fill", color: .orange) }
+                    if item.hasPendingQualityWarning { badge("exclamationmark.triangle.fill", color: .orange) }
+                    if item.similarGroupID != nil || item.issues.contains(.similarBurst) { badge("square.stack.3d.up", color: .blue) }
                     if item.flag == .picked { badge("checkmark", color: .green) }
                     if item.flag == .rejected { badge("xmark", color: .red) }
                 }
