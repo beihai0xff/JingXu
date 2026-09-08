@@ -6,6 +6,7 @@ struct ZoomPreview: View {
     @EnvironmentObject var model: AppModel
     let item: AssetListItem
     @State private var image: CGImage?
+    @State private var originalPreview: PreviewImage?
     @State private var message = "正在载入原图…"
     @State private var retry = 0
     @State private var command = 0
@@ -42,17 +43,18 @@ struct ZoomPreview: View {
             ZoomScroll(image: image, action: action, command: command, onExit: { model.closePreview() })
         }
         .onExitCommand { model.closePreview() }
-        .onDisappear { loadGeneration = UUID(); image = nil }
+        .onDisappear { loadGeneration = UUID(); image = nil; originalPreview = nil }
         .task(id: "\(item.id)-\(retry)") {
             let generation = UUID()
             loadGeneration = generation
-            image = nil; message = "正在载入原图…"
+            image = nil; originalPreview = nil; message = "正在载入原图…"
             let placeholder = await model.thumbnail(for: item, pixelSize: 1024)
             guard !Task.isCancelled, loadGeneration == generation else { return }
             image = placeholder?.cgImage(forProposedRect: nil, context: nil, hints: nil)
             do {
                 let result = try await model.loadOriginal(item)
                 guard !Task.isCancelled, loadGeneration == generation else { return }
+                originalPreview = result
                 image = result.image
                 message = "\(result.isEmbedded ? "嵌入预览 · " : "")\(result.image.width) × \(result.image.height)"
             } catch is CancellationError {} catch {
