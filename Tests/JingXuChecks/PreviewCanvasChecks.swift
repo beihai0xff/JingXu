@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import ImageIO
 import JingXuCore
+import SwiftUI
 
 @MainActor
 enum PreviewCanvasChecks {
@@ -22,6 +23,33 @@ enum PreviewCanvasChecks {
     }
 
     static func run() async throws {
+        // Exercise the actual SwiftUI thumbnail view, not only geometry formulas.
+        for ratio in [CGSize(width: 90, height: 60), CGSize(width: 60, height: 90),
+                      CGSize(width: 60, height: 60), CGSize(width: 120, height: 20),
+                      CGSize(width: 20, height: 120)] {
+            let source = CGContext(data: nil, width: Int(ratio.width), height: Int(ratio.height),
+                bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            source.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+            source.fill(CGRect(origin: .zero, size: ratio))
+            let view = FittedThumbnail(image: NSImage(cgImage: source.makeImage()!, size: ratio))
+                .frame(width: 96, height: 64).background(Color.black)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 1
+            guard let rendered = renderer.cgImage else { throw Failure(message: "缩略图渲染失败") }
+            let bytes = try SRGBPixels(rendered).rgba
+            var xs: [Int] = [], ys: [Int] = []
+            for y in 0..<64 { for x in 0..<96 {
+                if bytes[(y * 96 + x) * 4] > 200 { xs.append(x); ys.append(y) }
+            } }
+            guard let left = xs.min(), let right = xs.max(), let top = ys.min(), let bottom = ys.max() else {
+                throw Failure(message: "缩略图未显示")
+            }
+            try check(abs(left + right - 95) <= 2 && abs(top + bottom - 63) <= 2, "不同比例的缩略图未居中")
+            let scale = min(96 / ratio.width, 64 / ratio.height)
+            try check(abs(Double(right - left + 1) - ratio.width * scale) <= 2 &&
+                      abs(Double(bottom - top + 1) - ratio.height * scale) <= 2, "缩略图被裁切或拉伸")
+        }
         let size = CGSize(width: 4672, height: 7008), viewport = CGSize(width: 800, height: 700)
         let scale = PreviewGeometry.fit(image: size, viewport: viewport)
         let rect = PreviewGeometry.imageRect(image: size, viewport: viewport, scale: scale, pan: .zero)
