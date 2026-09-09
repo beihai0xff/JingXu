@@ -16,6 +16,19 @@ final class AppModel: ObservableObject {
     @Published var assets: [AssetListItem] = []
     @Published var sidebarSelection: SidebarDestination? = .smart(.all)
     @Published var selectedAssetID: String?
+    @Published var batchSelection = Set<String>()
+    @Published var isBatchSelecting = false
+
+    func toggleBatchSelection(_ item: AssetListItem) {
+        guard item.kind == .photo, !isWorking else { return }
+        if !batchSelection.insert(item.id).inserted { batchSelection.remove(item.id) }
+        selectAsset(item)
+    }
+
+    func selectVisiblePhotos() {
+        guard !isWorking else { return }
+        batchSelection = Set(assets.filter { $0.kind == .photo }.map(\.id))
+    }
     @Published var searchText = ""
     @Published var minimumRating = 0
     @Published var flagFilter: AssetFlag?
@@ -179,6 +192,7 @@ final class AppModel: ObservableObject {
         let query = currentQuery()
         do {
             assets = try await store.assets(query)
+            batchSelection.formIntersection(assets.filter { $0.kind == .photo }.map(\.id))
             previewNavigation.refresh(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
             if let id = previewAsset?.id, let refreshed = assets.first(where: { $0.id == id }) {
                 previewAsset = refreshed
@@ -770,11 +784,31 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func prepareBatchMove() {
+        guard !isWorking, !batchSelection.isEmpty, let archiveCoordinator, let store else { return }
+        let panel = NSOpenPanel()
+        panel.title = "选择移动目标目录（同一磁盘）"
+        panel.message = "移动已选照片及明确关联的 XMP。RAW/JPEG 配对须全部选中。不会覆盖已有文件。"
+        panel.canChooseDirectories = true; panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        let selected = batchSelection
+        startOperation {
+            do {
+                guard !(try await store.qualityJobs()).contains(where: { $0.job.state != .completed && $0.job.state != .cancelled }) else {
+                    throw NSError(domain: "JingXu", code: 5, userInfo: [NSLocalizedDescriptionKey: "请先完成或取消待处理的质量重算任务。"])
+                }
+                self.statusText = "正在校验批量移动清单…"
+                self.archivePlan = try await archiveCoordinator.prepare(selectedIDs: selected, destination: destination)
+            } catch { self.errorMessage = "无法准备移动：\(error.localizedDescription)" }
+        }
+    }
+
     func confirmArchive() {
         guard let plan = archivePlan, let store, let archiveCoordinator else { return }
         // The picker grants write access; never silently replace an existing root with a different folder.
         do {
-            for source in Dictionary(grouping: plan.groups, by: { $0.source.id }).values.compactMap({ $0.first?.source }) {
+            for source in Dictionary(grouping: plan.groups.flatMap { [$0.source] + ($0.destination.map { [$0] } ?? []) }, by: \.id).values.compactMap(\.first) {
                 let panel = NSOpenPanel()
                 panel.title = "授权移动来源中的照片：\(source.name)"
                 panel.message = "请选择原来源目录：\(source.pathHint)"
@@ -782,12 +816,16 @@ final class AppModel: ObservableObject {
                 panel.directoryURL = URL(fileURLWithPath: source.pathHint)
                 guard panel.runModal() == .OK, let url = panel.url else { return }
                 let identity = try SourceIdentity.resolve(url)
-                guard let expected = plan.groups.first(where: { $0.source.id == source.id })?.identity, identity.matches(expected) else {
+                let expected = plan.groups.first(where: { $0.source.id == source.id })?.identity ?? plan.groups.first(where: { $0.destination?.id == source.id })?.destinationIdentity
+                guard let expected, identity.matches(expected) else {
                     throw CocoaError(.fileReadNoPermission)
                 }
                 let bookmark = try BookmarkStore.makeBookmark(for: url)
                 for i in archivePlan!.groups.indices where archivePlan!.groups[i].source.id == source.id {
                     archivePlan!.groups[i].source.bookmarkData = bookmark
+                }
+                for i in archivePlan!.groups.indices where archivePlan!.groups[i].destination?.id == source.id {
+                    archivePlan!.groups[i].destination?.bookmarkData = bookmark
                 }
             }
         } catch { errorMessage = "授权失败：\(error.localizedDescription)"; return }

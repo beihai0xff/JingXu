@@ -361,13 +361,13 @@ public actor CatalogStore: CatalogRepository {
         try dbPool.read { db in try MediaAsset.fetchOne(db, key: id) }
     }
 
-    public func validateArchive(_ files: [ArchiveFile], reversed: Bool) throws {
+    public func validateArchive(_ files: [ArchiveFile], reversed: Bool, destination: SourceRoot? = nil) throws {
         try dbPool.read { db in
             for file in files {
                 guard let expected = file.asset else { continue }
                 guard let current = try MediaAsset.fetchOne(db, key: expected.id),
-                      current.sourceID == expected.sourceID,
-                      current.relativePath == file.from || current.relativePath == file.to,
+                      (current.sourceID == expected.sourceID && current.relativePath == file.from) ||
+                        (current.sourceID == (destination?.id ?? expected.sourceID) && current.relativePath == file.to),
                       AnalysisFingerprint(asset: current).matches(file.fingerprint) else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
@@ -375,17 +375,25 @@ public actor CatalogStore: CatalogRepository {
         }
     }
 
-    public func commitArchive(_ files: [ArchiveFile], reversed: Bool) throws {
+    public func commitArchive(_ files: [ArchiveFile], reversed: Bool, destination: SourceRoot? = nil) throws {
         try dbPool.write { db in
+            if let destination, !reversed {
+                if var existing = try SourceRoot.fetchOne(db, key: destination.id) {
+                    guard existing.pathHint == destination.pathHint else { throw CocoaError(.fileReadNoPermission) }
+                    existing.bookmarkData = destination.bookmarkData
+                    try existing.update(db)
+                } else { try destination.insert(db) }
+            }
             for file in files {
                 guard let expected = file.asset else { continue }
                 guard var current = try MediaAsset.fetchOne(db, key: expected.id),
-                      current.sourceID == expected.sourceID,
-                      current.relativePath == file.from || current.relativePath == file.to,
+                      (current.sourceID == expected.sourceID && current.relativePath == file.from) ||
+                        (current.sourceID == (destination?.id ?? expected.sourceID) && current.relativePath == file.to),
                       AnalysisFingerprint(asset: current).matches(file.fingerprint) else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
                 current.relativePath = reversed ? file.from : file.to
+                current.sourceID = reversed ? expected.sourceID : (destination?.id ?? expected.sourceID)
                 current.fileName = (current.relativePath as NSString).lastPathComponent
                 current.rawPairKey = expected.rawPairKey == nil ? nil :
                     (current.fileName as NSString).deletingPathExtension.lowercased()
