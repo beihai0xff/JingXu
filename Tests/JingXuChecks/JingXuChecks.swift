@@ -53,6 +53,8 @@ private enum JingXuChecks {
             return
         }
         let checks: [(String, () async throws -> Void)] = [
+            ("直接归档、标注保留、备份失败、回退与重启恢复", ArchiveChecks.run),
+            ("归档超过 2000 项、取消、提交前中断与撤销冲突", ArchiveChecks.scaleAndRecovery),
             ("目录命名与清理", checkImportNaming),
             ("文件路径与 SHA-256", checkFileIdentityAndHash),
             ("目录持久化、筛选与标注", checkCatalog),
