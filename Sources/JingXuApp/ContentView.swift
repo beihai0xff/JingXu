@@ -24,13 +24,16 @@ struct ContentView: View {
         .toolbar { toolbar }
         .sheet(item: $model.archivePlan) { plan in
             VStack(alignment: .leading, spacing: 12) {
-                Text("按日期重新归档").font(.title2)
+                Text(plan.isBatchMove == true ? "移动所选照片" : "按日期重新归档").font(.title2)
                 Text("\(plan.count) 个文件 · \(ByteCountFormatter.string(fromByteCount: plan.bytes, countStyle: .file))")
-                Text("在各来源内直接移动，不复制、不覆盖。原路径将失效，其他软件不会自动更新。视频保留原位。执行前备份图库。")
+                Text("同一磁盘直接移动，不复制、不覆盖。原路径将失效，其他软件不会自动更新。视频保留原位。执行前备份图库；评分、标签和相册关系保留。")
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
                         ForEach(plan.groups.indices, id: \.self) { i in
                             Text(plan.groups[i].source.pathHint).font(.headline)
+                            if let destination = plan.groups[i].destination {
+                                Text("目标来源：\(destination.pathHint)").font(.headline)
+                            }
                             ForEach(plan.groups[i].files.indices, id: \.self) { j in
                                 Text("\(plan.groups[i].files[j].from) → \(plan.groups[i].files[j].to)").font(.caption)
                             }
@@ -178,6 +181,25 @@ struct ContentView: View {
     private var libraryGrid: some View {
         VStack(spacing: 0) {
             filterBar
+            if model.previewAsset == nil {
+                HStack {
+                    Toggle("批量选择", isOn: $model.isBatchSelecting)
+                        .toggleStyle(.button)
+                        .onChange(of: model.isBatchSelecting) { _, enabled in
+                            if !enabled { model.batchSelection.removeAll() }
+                        }
+                    if model.isBatchSelecting {
+                        Text("已选 \(model.batchSelection.count) 张")
+                        Button("全选当前照片") { model.selectVisiblePhotos() }
+                        Button("清空选择") { model.batchSelection.removeAll() }
+                        Button("移动到目录…") { model.prepareBatchMove() }
+                            .disabled(model.batchSelection.isEmpty || model.archivePending)
+                    }
+                    Spacer()
+                }
+                .disabled(model.isWorking)
+                .padding(8)
+            }
             Divider()
             if let item = model.previewAsset {
                 ZoomPreview(item: item)
@@ -200,9 +222,22 @@ struct ContentView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
                         ForEach(model.assets) { item in
-                            AssetCell(item: item, size: model.gridSize, isSelected: model.selectedAssetID == item.id)
-                                .onTapGesture(count: 2) { model.selectAsset(item); model.openPreview(item) }
-                                .onTapGesture { model.selectAsset(item) }
+                            AssetCell(item: item, size: model.gridSize, isSelected: model.isBatchSelecting ? model.batchSelection.contains(item.id) : model.selectedAssetID == item.id)
+                                .overlay(alignment: .topLeading) {
+                                    if model.isBatchSelecting && item.kind == .photo {
+                                        Image(systemName: model.batchSelection.contains(item.id) ? "checkmark.circle.fill" : "circle")
+                                            .foregroundStyle(.white).padding(8)
+                                            .allowsHitTesting(false)
+                                    }
+                                }
+                                .onTapGesture(count: 2) {
+                                    if model.isBatchSelecting { model.toggleBatchSelection(item) }
+                                    else { model.selectAsset(item); model.openPreview(item) }
+                                }
+                                .onTapGesture {
+                                    if model.isBatchSelecting { model.toggleBatchSelection(item) }
+                                    else { model.selectAsset(item) }
+                                }
                                 .contextMenu {
                                     Button("在访达中显示") {
                                         model.selectedAssetID = item.id

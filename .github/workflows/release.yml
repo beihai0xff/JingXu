@@ -128,3 +128,32 @@ jobs:
           PY
           gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
           gh release view "$RELEASE_TAG" --json url,isDraft,isPrerelease
+
+  update-cask:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: jingxu-cask-main
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Update tap only after verified Release publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release.json"
+          gh api "repos/$GH_REPO/contents/Casks/jingxu.rb?ref=main" > "$RUNNER_TEMP/cask.json"
+          python3 Scripts/update-cask.py "$RUNNER_TEMP/release.json" "$RUNNER_TEMP/cask.json" > "$RUNNER_TEMP/cask-update.json"
+          if test -s "$RUNNER_TEMP/cask-update.json"; then
+            # Contents API SHA is a compare-and-swap guard: never force-push main.
+            gh api --method PUT "repos/$GH_REPO/contents/Casks/jingxu.rb" --input "$RUNNER_TEMP/cask-update.json" --jq .commit.sha
+          fi
