@@ -53,23 +53,25 @@ private struct FilmstripCell: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            ZStack(alignment: .topTrailing) {
+            ZStack(alignment: .center) {
                 Color.black
                 if let thumbnail {
-                    Image(nsImage: thumbnail).resizable().scaledToFit()
+                    FittedThumbnail(image: thumbnail)
                 } else if loading {
                     ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     Image(systemName: "photo.badge.exclamationmark")
                         .foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+            }.frame(width: 96, height: 64).clipped()
+            .overlay(alignment: .topTrailing) {
                 if item.flag == .rejected || item.flag == .picked {
                     Image(systemName: item.flag == .rejected ? "xmark" : "checkmark")
                         .font(.caption2.bold()).padding(3)
                         .background(item.flag == .rejected ? Color.red : Color.green, in: RoundedRectangle(cornerRadius: 3))
                         .foregroundStyle(.white).padding(3)
                 }
-            }.frame(width: 96, height: 64).clipped()
+            }
             Text(item.fileName).font(.system(size: 10)).lineLimit(1).truncationMode(.middle)
             Text(item.rating > 0 ? String(repeating: "★", count: min(5, item.rating)) : " ")
                 .font(.system(size: 9)).foregroundStyle(.yellow)
@@ -79,6 +81,7 @@ private struct FilmstripCell: View {
         .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: selected ? 2 : 1))
         .contentShape(Rectangle())
         .task(id: item.id) {
+            thumbnail = nil
             loading = true
             let result = await model.thumbnail(for: item, pixelSize: 192)
             guard !Task.isCancelled else { return }
