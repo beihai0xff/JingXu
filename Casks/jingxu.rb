@@ -1,6 +1,6 @@
 cask "jingxu" do
-  version "0.2.5"
-  sha256 "4be505e9efa23e0fec61fccf7b96d157929a325c04799eeba669c38f342af73a"
+  version "0.2.6"
+  sha256 "17fc9cd648428e29553436266603754c87a0614efcdabee054ea29b61fa99f9f"
 
   url "https://github.com/beihai0xff/JingXu/releases/download/v#{version}/JingXu-#{version}-macOS-arm64.dmg"
   name "镜序"
