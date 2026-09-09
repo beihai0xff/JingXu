@@ -80,6 +80,16 @@ enum PreviewCanvasChecks {
         let decoded = try await ImagePreviewLoader().load(url: url)
         let canvas = PreviewCanvasView(frame: CGRect(x: 0, y: 0, width: 800, height: 700))
         canvas.setImage(decoded.image)
+        let baseline = try SRGBPixels(capture(canvas)).rgba
+        for _ in 0..<3 {
+            canvas.setImage(nil)
+            let repeated = try await ImagePreviewLoader().load(url: url)
+            try check(repeated.image.width == decoded.image.width && repeated.image.height == decoded.image.height,
+                      "真实图片重复读取尺寸改变")
+            canvas.setImage(repeated.image)
+            canvas.perform("fit")
+            try check(try SRGBPixels(capture(canvas)).rgba == baseline, "真实图片重复加载后显示像素改变")
+        }
         for action in ["fit", "actual", "in", "fit"] .enumerated() {
             canvas.perform(action.element, backingScale: 2)
             let target = output.appendingPathComponent("\(action.offset)-\(action.element).png")

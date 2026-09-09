@@ -32,6 +32,7 @@ final class AppModel: ObservableObject {
     @Published var qualityJobs: [QualityJobSnapshot] = []
     @Published var isReanalyzing = false
     @Published var deletionPlan: DeletionPlan?
+    @Published var missingAssetPlan: MissingAssetPlan?
     @Published var isDeleting = false
     @Published var sourceMergePlan: SourceMergePlan?
     private let histogramProvider = HistogramProvider()
@@ -200,6 +201,35 @@ final class AppModel: ObservableObject {
         case nil: break
         }
         return query
+    }
+
+    func prepareMissingAssetCleanup() {
+        guard let store else { return }
+        let query = currentQuery()
+        startOperation {
+            self.statusText = "正在检查当前范围的失效索引…"
+            do { self.missingAssetPlan = try await store.prepareMissingAssetCleanup(query) }
+            catch { self.errorMessage = "检查未完成：\(error.localizedDescription)" }
+        }
+    }
+
+    func confirmMissingAssetCleanup(_ plan: MissingAssetPlan) {
+        missingAssetPlan = nil
+        guard let store else { return }
+        startOperation {
+            self.isDeleting = true
+            defer { self.isDeleting = false }
+            do {
+                let report = try await store.cleanupMissingAssets(plan, backupURL: self.backupURL())
+                if let id = self.previewAsset?.id, report.removedIDs.contains(id) { self.closePreview() }
+                if let id = self.selectedAssetID, report.removedIDs.contains(id) { self.selectedAssetID = nil }
+                do { try self.thumbnailProvider?.invalidate(assetIDs: report.removedIDs) }
+                catch { self.errorMessage = "索引已清理，但缩略图缓存清理失败：\(error.localizedDescription)" }
+                await self.reloadAll()
+                self.statusText = "已移除 \(report.removedIDs.count) 项失效索引，跳过 \(report.skipped.count) 项；原文件未改动，图库已备份"
+                if !report.skipped.isEmpty { self.errorMessage = self.statusText + "\n" + report.skipped.prefix(30).joined(separator: "\n") }
+            } catch { self.errorMessage = "清理未执行或已回滚：\(error.localizedDescription)" }
+        }
     }
 
     func prepareDeletion() {
@@ -703,7 +733,7 @@ final class AppModel: ObservableObject {
     }
 
     private func startOperation(_ work: @escaping @MainActor @Sendable () async -> Void) {
-        guard !isWorking, deletionPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
+        guard !isWorking, deletionPlan == nil, missingAssetPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
         isWorking = true
         operationTask = Task {
             do {

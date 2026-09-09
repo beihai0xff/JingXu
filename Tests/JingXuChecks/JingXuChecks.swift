@@ -64,6 +64,7 @@ private enum JingXuChecks {
             ("增量扫描与 RAW/JPEG 配对", checkIncrementalScan),
             ("校验导入、重复跳过与不覆盖", checkSafeImport),
             ("删除范围、文件复核与中断恢复", checkDeletion),
+            ("失效索引、来源安全、备份与事务回滚", checkMissingAssetCleanup),
             ("原图解码、方向、错误和取消", checkPreview),
             ("单图切换顺序、边界及筛选隐藏", checkPreviewNavigation),
             ("大图可见区域绘制、100% 比例、缩放及清帧", PreviewCanvasChecks.run),
@@ -341,6 +342,101 @@ private enum JingXuChecks {
         let elapsed = start.duration(to: .now)
         try require(firstPage.count == 2_000, "10 万条目录未返回完整首批结果")
         try require(elapsed < .milliseconds(500), "10 万条目录筛选超过 500ms：\(elapsed)")
+    }
+
+    private static func checkMissingAssetCleanup() async throws {
+        let root = try temporaryWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("photos")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let database = root.appendingPathComponent("db.sqlite")
+        let store = try CatalogStore(databaseURL: database)
+        let source = SourceRoot(name: "photos", bookmarkData: nil, pathHint: folder.path)
+        try await store.upsertSource(source)
+        var files: [MediaAsset] = []
+        for i in 0..<2_005 {
+            files.append(MediaAsset(sourceID: source.id, relativePath: "missing\(i).jpg", fileIdentifier: nil, fileName: "missing\(i).jpg", uniformType: nil, kind: .photo, fileSize: 1, modifiedAt: Date()))
+        }
+        let saved = try await store.upsertAssets(files)
+        let restored = saved[0]
+        let removed = saved[1]
+        let album = Album(name: "test")
+        try await store.saveAlbum(album)
+        try await store.add(assetID: removed.id, toAlbum: album.id)
+        try await store.saveAnnotation(UserAnnotation(assetID: removed.id, rating: 5, keywords: ["keep backup"]))
+        let plan = try await store.prepareMissingAssetCleanup(AssetQuery(limit: 2_000))
+        try require(plan.files.count == 2_005, "失效索引范围受显示上限影响或未识别 ENOENT")
+        let albumPlan = try await store.prepareMissingAssetCleanup(AssetQuery(albumID: album.id))
+        try require(albumPlan.files.map(\.id) == [removed.id], "失效索引相册筛选泄漏")
+        let empty = try await store.prepareMissingAssetCleanup(AssetQuery(searchText: "not-matching"))
+        try require(empty.files.isEmpty, "失效索引搜索隔离失败")
+        let backup = root.appendingPathComponent("backup.sqlite")
+        try Data([1, 2, 3]).write(to: folder.appendingPathComponent(restored.relativePath))
+        let faultDB = try DatabaseQueue(path: database.path)
+        try await faultDB.write { db in
+            try db.execute(sql: "CREATE TRIGGER fail_cleanup BEFORE DELETE ON mediaAssets WHEN OLD.relativePath = 'missing999.jpg' BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END")
+        }
+        do {
+            _ = try await store.cleanupMissingAssets(plan, backupURL: backup)
+            throw CheckFailure(description: "清理故障未触发")
+        } catch is DatabaseError {}
+        let afterFailure = try await store.assets(sourceID: source.id)
+        try require(afterFailure.count == 2_005, "清理失败未完整回滚")
+        try await faultDB.write { try $0.execute(sql: "DROP TRIGGER fail_cleanup") }
+        do {
+            _ = try await store.cleanupMissingAssets(plan, backupURL: backup)
+            throw CheckFailure(description: "备份失败仍执行清理")
+        } catch is CocoaError {}
+        let afterBackupFailure = try await store.assets(sourceID: source.id)
+        try require(afterBackupFailure.count == 2_005, "备份失败修改了图库")
+        var offline = source; offline.isOnline = false
+        try await store.upsertSource(offline)
+        let offlinePlan = try await store.prepareMissingAssetCleanup(AssetQuery())
+        try require(offlinePlan.files.isEmpty && !offlinePlan.warnings.isEmpty, "离线来源被当作缺失")
+        let offlineReport = try await store.cleanupMissingAssets(albumPlan, backupURL: root.appendingPathComponent("offline.sqlite"))
+        try require(offlineReport.removedIDs.isEmpty, "确认后离线仍清理了索引")
+        try await store.upsertSource(source)
+        let movedFolder = root.appendingPathComponent("disconnected")
+        try FileManager.default.moveItem(at: folder, to: movedFolder)
+        let disconnected = try await store.prepareMissingAssetCleanup(AssetQuery())
+        try require(disconnected.files.isEmpty && !disconnected.warnings.isEmpty, "来源目录消失被视为文件删除")
+        try FileManager.default.moveItem(at: movedFolder, to: folder)
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await store.cleanupMissingAssets(plan, backupURL: root.appendingPathComponent("cancelled.sqlite"))
+        }
+        do {
+            _ = try await cancelled.value
+            throw CheckFailure(description: "取消后仍执行清理")
+        } catch is CancellationError {}
+        let symlink = folder.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: root)
+        var throughLink = removed; throughLink.relativePath = "link/missing.jpg"
+        do {
+            _ = try MissingAssetProbe.isMissing(throughLink, source: source, expected: SourceIdentity.resolve(folder))
+            throw CheckFailure(description: "不应穿过符号链接确认缺失")
+        } catch is CocoaError {}
+        let blocked = folder.appendingPathComponent("blocked")
+        try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: blocked.path)
+        var inaccessible = removed; inaccessible.relativePath = "blocked/test.jpg"
+        do {
+            _ = try MissingAssetProbe.isMissing(inaccessible, source: source, expected: SourceIdentity.resolve(folder))
+            throw CheckFailure(description: "权限异常未保守跳过")
+        } catch is CheckFailure { throw CheckFailure(description: "权限异常未保守跳过") }
+        catch {}
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: blocked.path)
+        let report = try await store.cleanupMissingAssets(plan, backupURL: root.appendingPathComponent("success.sqlite"))
+        try require(report.removedIDs.count == 2_004 && report.skipped.count == 1, "确认后恢复的文件未保留")
+        let remaining = try await store.assets(sourceID: source.id)
+        try require(remaining.map(\.id) == [restored.id], "清理范围错误")
+        let bytes = try Data(contentsOf: folder.appendingPathComponent(restored.relativePath))
+        try require(bytes == Data([1, 2, 3]), "原文件内容改变")
+        let counts = try await faultDB.read { db in
+            try ["annotations", "albumAssets"].map { try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \($0) WHERE assetID = ?", arguments: [removed.id])! }
+        }
+        try require(counts == [0, 0], "标注或相册成员未级联清理")
+        try faultDB.close()
     }
 
     private static func checkDeletion() async throws {

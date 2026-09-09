@@ -14,3 +14,11 @@
 这些测试不能替代真实沙盒的 security-scoped bookmark 验证。实机验收需在签有沙盒权限的应用中，使用系统选择器授权真实 RAW 来源，连续执行 A → B → A、快速切图、100% 与退出重进，核对图像并确认没有新的 ImageIO 文件读取权限错误。
 
 本次不迁移数据库、不修改来源文件、不替换已安装应用、不发布现有 GitHub 草稿。真实 RAW 样本在先前位置不可用，实机验收待重新取得有效来源后执行。
+
+## v0.2.2 RAW 格式识别回归
+
+从 URL 改为内存数据后丢失文件扩展名信息，本机 Sony ARW 被 ImageIO 识别为 `public.tiff`，全图和嵌入预览解码均失败。对同一真实样本的只读对比：不带提示时解码失败，提供 `com.sony.arw-raw-image` 提示或从 URL 创建源时均解码为 7008 × 4672。
+
+现依据文件扩展名解析 UTType，并传入 [ImageIO 类型提示](https://developer.apple.com/documentation/imageio/kcgimagesourcetypeidentifierhint)。未知类型仍由 ImageIO 自动识别；保留内存源、独立像素与授权生命周期保护，不回退到延迟读取文件的实现。
+
+`JingXuChecks --preview-file <本机照片> <仓库外目录>` 额外检查真实文件重复解码、画布像素一致性和原文件 SHA-256；样本和输出不提交仓库。该命令不能替代打包应用的沙盒 UI 验收。

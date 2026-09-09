@@ -397,6 +397,61 @@ public actor CatalogStore: CatalogRepository {
         return try dbPool.read { db in try ids.compactMap { try MediaAsset.fetchOne(db, key: $0) } }
     }
 
+    public func prepareMissingAssetCleanup(_ query: AssetQuery) throws -> MissingAssetPlan {
+        var unlimited = query
+        unlimited.limit = Int.max; unlimited.offset = 0
+        let (sql, arguments) = Self.assetQuerySQL(unlimited, rejectedOnly: false, projection: "a.*")
+        let candidates = try dbPool.read { try MediaAsset.fetchAll($0, sql: sql, arguments: arguments) }
+        var plan = MissingAssetPlan()
+        for (sourceID, files) in Dictionary(grouping: candidates, by: \.sourceID) {
+            try Task.checkCancellation()
+            guard let source = try source(id: sourceID) else { continue }
+            do {
+                let identity = try MissingAssetProbe.identity(for: source)
+                plan.sources[sourceID] = source; plan.identities[sourceID] = identity
+                for file in files {
+                    try Task.checkCancellation()
+                    do {
+                        if try MissingAssetProbe.isMissing(file, source: source, expected: identity) { plan.files.append(file) }
+                    } catch is CancellationError { throw CancellationError() }
+                    catch { plan.warnings.append("\(source.pathHint)/\(file.relativePath)：无法可靠确认，已保留（\(error.localizedDescription)）") }
+                }
+            } catch is CancellationError { throw CancellationError() }
+            catch { plan.warnings.append("\(source.pathHint)：来源离线、身份变化或无法访问，保留全部索引（\(error.localizedDescription)）") }
+        }
+        plan.files.sort { ($0.sourceID, $0.relativePath) < ($1.sourceID, $1.relativePath) }
+        return plan
+    }
+
+    public func cleanupMissingAssets(_ plan: MissingAssetPlan, backupURL: URL) throws -> MissingAssetReport {
+        try Task.checkCancellation()
+        try backup(to: backupURL)
+        // One transaction: cancellation or database failure rolls back every record.
+        return try dbPool.write { db in
+            var report = MissingAssetReport()
+            for file in plan.files {
+                try Task.checkCancellation()
+                guard !report.removedIDs.contains(file.id) else { continue }
+                guard let current = try MediaAsset.fetchOne(db, key: file.id), current == file,
+                      let source = try SourceRoot.fetchOne(db, key: file.sourceID), source == plan.sources[file.sourceID],
+                      let identity = plan.identities[file.sourceID] else {
+                    report.skipped.append("\(file.relativePath)：图库记录已改变"); continue
+                }
+                do {
+                    guard try MissingAssetProbe.isMissing(file, source: source, expected: identity) else {
+                        report.skipped.append("\(file.relativePath)：文件已存在，已保留"); continue
+                    }
+                } catch {
+                    report.skipped.append("\(file.relativePath)：无法复核，已保留（\(error.localizedDescription)）"); continue
+                }
+                _ = try MediaAsset.deleteOne(db, key: file.id)
+                report.removedIDs.insert(file.id)
+            }
+            try Task.checkCancellation()
+            return report
+        }
+    }
+
     public func removeAssetRecords(_ ids: [String]) throws {
         try dbPool.write { db in
             for id in ids { _ = try MediaAsset.deleteOne(db, key: id) }

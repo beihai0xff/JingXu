@@ -2,6 +2,7 @@ import Foundation
 import CoreGraphics
 import ImageIO
 import CoreImage
+import UniformTypeIdentifiers
 
 public struct PreviewImage: @unchecked Sendable {
     public let image: CGImage
@@ -45,7 +46,13 @@ private actor PreviewDecodeWorker {
         // Owned bytes, not a URL-backed/mapped source: ImageIO must never reopen the file later.
         let data = try Data(contentsOf: url, options: .uncached)
         try Task.checkCancellation()
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { throw CocoaError(.fileReadCorruptFile) }
+        // TIFF-based camera RAW needs the filename's format hint when the source
+        // owns bytes instead of a URL. Otherwise ImageIO selects the TIFF decoder.
+        var options: [CFString: Any] = [:]
+        if let type = UTType(filenameExtension: url.pathExtension), !type.isDynamic {
+            options[kCGImageSourceTypeIdentifierHint] = type.identifier
+        }
+        guard let source = CGImageSourceCreateWithData(data as CFData, options as CFDictionary) else { throw CocoaError(.fileReadCorruptFile) }
         let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
         let width = (properties?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
         let height = (properties?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
