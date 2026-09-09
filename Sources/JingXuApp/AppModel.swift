@@ -33,6 +33,9 @@ final class AppModel: ObservableObject {
     @Published var isReanalyzing = false
     @Published var deletionPlan: DeletionPlan?
     @Published var missingAssetPlan: MissingAssetPlan?
+    @Published var archivePlan: ArchivePlan?
+    @Published var archivePending = false
+    private var archiveCoordinator: ArchiveCoordinator?
     @Published var isDeleting = false
     @Published var sourceMergePlan: SourceMergePlan?
     private let histogramProvider = HistogramProvider()
@@ -83,6 +86,9 @@ final class AppModel: ObservableObject {
             let store = try await coordinator.open()
             let scanner = DefaultSourceScanner(repository: store)
             self.store = store
+            self.archiveCoordinator = ArchiveCoordinator(store: store, journalURL: try JingXuPaths.applicationSupport().appendingPathComponent("archive.json"))
+            try await self.archiveCoordinator?.reconcile()
+            self.archivePending = try await self.archiveCoordinator?.hasPending() ?? false
             self.deletionCoordinator = DeletionCoordinator(store: store, journalURL: try JingXuPaths.databaseURL().deletingLastPathComponent().appendingPathComponent("deletions.json"))
             self.scanner = scanner
             self.importer = ImportCoordinator(repository: store, scanner: scanner)
@@ -335,6 +341,9 @@ final class AppModel: ObservableObject {
     }
 
     private func checkDeletionRecovery() async throws {
+        if try await archiveCoordinator?.hasPending() == true {
+            throw NSError(domain: "JingXu", code: 4, userInfo: [NSLocalizedDescriptionKey: "有未完成的归档，请先使用恢复／撤销归档入口处理。"])
+        }
         let warnings = try await deletionCoordinator?.recover() ?? []
         if !warnings.isEmpty { throw NSError(domain: "JingXu", code: 3, userInfo: [NSLocalizedDescriptionKey: warnings.joined(separator: "\n")]) }
     }
@@ -733,7 +742,7 @@ final class AppModel: ObservableObject {
     }
 
     private func startOperation(_ work: @escaping @MainActor @Sendable () async -> Void) {
-        guard !isWorking, deletionPlan == nil, missingAssetPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
+        guard !isWorking, archivePlan == nil, deletionPlan == nil, missingAssetPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
         isWorking = true
         operationTask = Task {
             do {
@@ -745,6 +754,92 @@ final class AppModel: ObservableObject {
             importProgress = nil
             scanProgress = nil
             analysisProgress = nil
+        }
+    }
+
+    func prepareArchive() {
+        guard let archiveCoordinator, let store else { return }
+        startOperation {
+            do {
+                guard !(try await store.qualityJobs()).contains(where: { $0.job.state != .completed && $0.job.state != .cancelled }) else {
+                    throw NSError(domain: "JingXu", code: 5, userInfo: [NSLocalizedDescriptionKey: "请先完成或取消待处理的质量重算任务。"])
+                }
+                self.statusText = "正在读取拍摄日期并校验归档文件…"
+                self.archivePlan = try await archiveCoordinator.prepare()
+            } catch { self.errorMessage = error.localizedDescription }
+        }
+    }
+
+    func confirmArchive() {
+        guard let plan = archivePlan, let store, let archiveCoordinator else { return }
+        // The picker grants write access; never silently replace an existing root with a different folder.
+        do {
+            for source in Dictionary(grouping: plan.groups, by: { $0.source.id }).values.compactMap({ $0.first?.source }) {
+                let panel = NSOpenPanel()
+                panel.title = "授权移动来源中的照片：\(source.name)"
+                panel.message = "请选择原来源目录：\(source.pathHint)"
+                panel.canChooseDirectories = true; panel.canChooseFiles = false
+                panel.directoryURL = URL(fileURLWithPath: source.pathHint)
+                guard panel.runModal() == .OK, let url = panel.url else { return }
+                let identity = try SourceIdentity.resolve(url)
+                guard let expected = plan.groups.first(where: { $0.source.id == source.id })?.identity, identity.matches(expected) else {
+                    throw CocoaError(.fileReadNoPermission)
+                }
+                let bookmark = try BookmarkStore.makeBookmark(for: url)
+                for i in archivePlan!.groups.indices where archivePlan!.groups[i].source.id == source.id {
+                    archivePlan!.groups[i].source.bookmarkData = bookmark
+                }
+            }
+        } catch { errorMessage = "授权失败：\(error.localizedDescription)"; return }
+        guard let authorized = archivePlan else { return }
+        archivePlan = nil
+        startOperation {
+            self.isDeleting = true
+            self.previewAsset = nil
+            defer { self.isDeleting = false }
+            do {
+                for source in Dictionary(grouping: authorized.groups, by: { $0.source.id }).values.compactMap({ $0.first?.source }) {
+                    try await store.upsertSource(source)
+                }
+                let report = try await archiveCoordinator.execute(authorized, backupURL: self.backupURL())
+                self.statusText = report.summary
+                if !report.warnings.isEmpty { self.errorMessage = report.summary }
+                try self.thumbnailProvider?.invalidate(assetIDs: Set(authorized.groups.flatMap(\.files).compactMap { $0.asset?.id }))
+            } catch { self.errorMessage = "归档未完成：\(error.localizedDescription)" }
+            self.archivePending = (try? await archiveCoordinator.hasPending()) ?? true
+            await self.reloadAll()
+        }
+    }
+
+    func resumeArchive(undo: Bool) {
+        guard !isWorking, archivePlan == nil, let archiveCoordinator else { return }
+        let alert = NSAlert()
+        alert.messageText = undo ? "撤销最近一次归档？" : "继续未完成的归档？"
+        alert.informativeText = "会根据日志复核文件并移动，绝不覆盖。冲突将保留并报告。"
+        alert.addButton(withTitle: "取消"); alert.addButton(withTitle: undo ? "撤销归档" : "继续归档")
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        isWorking = true; isDeleting = true; previewAsset = nil
+        operationTask = Task {
+            do {
+                let warnings = try await deletionCoordinator?.recover() ?? []
+                guard warnings.isEmpty else { throw CocoaError(.fileLocking) }
+                for source in try await archiveCoordinator.recoverySources() {
+                    let panel = NSOpenPanel()
+                    panel.title = "重新授权归档来源：\(source.name)"
+                    panel.message = source.pathHint
+                    panel.canChooseDirectories = true; panel.canChooseFiles = false
+                    panel.directoryURL = URL(fileURLWithPath: source.pathHint)
+                    guard panel.runModal() == .OK, let url = panel.url else { throw CancellationError() }
+                    try await archiveCoordinator.authorize(url, sourceID: source.id)
+                }
+                let report = try await archiveCoordinator.resume(undo: undo)
+                statusText = report.summary
+                if !report.warnings.isEmpty { errorMessage = report.summary }
+                try thumbnailProvider?.clearDiskCache()
+            } catch { errorMessage = "归档恢复失败：\(error.localizedDescription)" }
+            archivePending = (try? await archiveCoordinator.hasPending()) ?? true
+            await reloadAll()
+            isWorking = false; isDeleting = false
         }
     }
 }
