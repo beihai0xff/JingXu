@@ -22,10 +22,13 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 420)
         }
         .toolbar { toolbar }
-        .background(FlagKeyboardHandler(enabled: !model.isDeleting && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
+        .background(FlagKeyboardHandler(enabled: !model.isDeleting && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
             if let id = model.previewAsset?.id { model.updateFlag(flag, assetID: id) }
             else { model.updateFlag(flag) }
         })
+        .sheet(item: $model.missingAssetPlan) { plan in
+            MissingAssetCleanupSheet(plan: plan).environmentObject(model)
+        }
         .sheet(item: $model.qualityReanalysisPlan) { plan in
             QualityReanalysisSheet(plan: plan).environmentObject(model)
         }
@@ -357,6 +360,8 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
+            Button("清理失效索引…", systemImage: "photo.badge.exclamationmark") { model.prepareMissingAssetCleanup() }
+                .disabled(model.isWorking || model.missingAssetPlan != nil)
             Button("整理重复来源…", systemImage: "folder.badge.gearshape") { model.prepareSourceMerge() }
                 .disabled(model.isWorking || model.sourceMergePlan != nil || model.deletionPlan != nil)
             Button("清理淘汰图片…", systemImage: "trash") { model.prepareDeletion() }
@@ -364,6 +369,38 @@ struct ContentView: View {
             Button { model.chooseAndAddFolder() } label: { Label("添加文件夹", systemImage: "folder.badge.plus") }
             Button { model.isShowingImport = true } label: { Label("从相机卡导入", systemImage: "externaldrive.badge.plus") }
         }
+    }
+}
+
+private struct MissingAssetCleanupSheet: View {
+    @EnvironmentObject private var model: AppModel
+    let plan: MissingAssetPlan
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("清理失效索引").font(.title2)
+            Text("当前来源、相册和筛选范围内，确认缺失 \(plan.files.count) 项文件（含视频），不受网格显示上限限制。")
+            Text("仅移除图库记录及对应评分、标签、分析和相册成员关系，不操作硬盘文件。执行前备份图库并再次复核。离线或权限异常的项目保留。")
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(plan.files) { file in
+                        Text((plan.sources[file.sourceID]?.pathHint ?? "") + "/" + file.relativePath)
+                            .font(.caption).textSelection(.enabled)
+                    }
+                    if !plan.warnings.isEmpty {
+                        Text("无法确认 \(plan.warnings.count) 项文件或来源，已跳过").font(.headline)
+                        ForEach(Array(plan.warnings.enumerated()), id: \.offset) { _, warning in
+                            Text(warning).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }.frame(height: 260)
+            HStack {
+                Spacer()
+                Button("取消") { model.missingAssetPlan = nil }.keyboardShortcut(.cancelAction)
+                Button("备份并移除索引", role: .destructive) { model.confirmMissingAssetCleanup(plan) }
+                    .disabled(plan.files.isEmpty || model.isWorking)
+            }
+        }.padding(24).frame(width: 620)
     }
 }
 
