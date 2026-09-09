@@ -22,7 +22,30 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 420)
         }
         .toolbar { toolbar }
-        .background(FlagKeyboardHandler(enabled: !model.isDeleting && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
+        .sheet(item: $model.archivePlan) { plan in
+            VStack(alignment: .leading, spacing: 12) {
+                Text("按日期重新归档").font(.title2)
+                Text("\(plan.count) 个文件 · \(ByteCountFormatter.string(fromByteCount: plan.bytes, countStyle: .file))")
+                Text("在各来源内直接移动，不复制、不覆盖。原路径将失效，其他软件不会自动更新。视频保留原位。执行前备份图库。")
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(plan.groups.indices, id: \.self) { i in
+                            Text(plan.groups[i].source.pathHint).font(.headline)
+                            ForEach(plan.groups[i].files.indices, id: \.self) { j in
+                                Text("\(plan.groups[i].files[j].from) → \(plan.groups[i].files[j].to)").font(.caption)
+                            }
+                        }
+                        ForEach(plan.warnings.indices, id: \.self) { Text(plan.warnings[$0]).foregroundStyle(.secondary) }
+                    }.textSelection(.enabled)
+                }
+                HStack {
+                    Spacer()
+                    Button("取消") { model.archivePlan = nil }.keyboardShortcut(.cancelAction)
+                    Button("授权并移动") { model.confirmArchive() }.disabled(plan.count == 0)
+                }
+            }.padding(20).frame(width: 760, height: 520)
+        }
+        .background(FlagKeyboardHandler(enabled: !model.isDeleting && model.archivePlan == nil && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
             if let id = model.previewAsset?.id { model.updateFlag(flag, assetID: id) }
             else { model.updateFlag(flag) }
         })
@@ -360,6 +383,9 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
+            Button("按日期重新归档…") { model.prepareArchive() }.disabled(model.isWorking || model.archivePending)
+            Button("恢复未完成归档…") { model.resumeArchive(undo: false) }.disabled(model.isWorking || !model.archivePending)
+            Button("撤销最近一次归档…") { model.resumeArchive(undo: true) }.disabled(model.isWorking)
             Button("清理失效索引…", systemImage: "photo.badge.exclamationmark") { model.prepareMissingAssetCleanup() }
                 .disabled(model.isWorking || model.missingAssetPlan != nil)
             Button("整理重复来源…", systemImage: "folder.badge.gearshape") { model.prepareSourceMerge() }
