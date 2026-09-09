@@ -109,8 +109,15 @@ jobs:
           # Check server digests for both files before making the draft public.
           # The by-tag REST endpoint does not return unpublished drafts. Resolve the
           # authenticated draft from the release list, then query its numeric ID.
-          RELEASE_ID="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
-            --jq ".[] | select(.tag_name == \"$RELEASE_TAG\" and .draft == true) | .id")"
+          # The list endpoint can lag immediately after creation. Retry only an
+          # empty result; API errors and ambiguous results still fail closed.
+          RELEASE_ID=""
+          for attempt in 1 2 3 4 5 6; do
+            RELEASE_ID="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"$RELEASE_TAG\" and .draft == true) | .id")"
+            test -z "$RELEASE_ID" || break
+            sleep 2
+          done
           [[ "$RELEASE_ID" =~ ^[0-9]+$ ]] || { echo "Expected exactly one release draft"; exit 1; }
           gh api "repos/$GH_REPO/releases/$RELEASE_ID" > uploaded.json
           python3 - <<'PY'
