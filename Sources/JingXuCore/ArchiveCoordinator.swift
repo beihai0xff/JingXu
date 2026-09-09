@@ -14,6 +14,9 @@ public struct ArchiveGroup: Codable, Sendable {
     public var source: SourceRoot
     public var identity: SourceIdentity
     public var files: [ArchiveFile]
+    public var destination: SourceRoot? = nil
+    public var destinationIdentity: SourceIdentity? = nil
+    public var destinationDirectoryIdentity: SourceIdentity? = nil
     public var state = "pending"
 }
 
@@ -21,6 +24,7 @@ public struct ArchivePlan: Codable, Identifiable, Sendable {
     public var id = UUID()
     public var groups: [ArchiveGroup] = []
     public var warnings: [String] = []
+    public var isBatchMove: Bool? = nil
     public var bytes: Int64 { groups.flatMap(\.files).reduce(0) { $0 + $1.fingerprint.size } }
     public var count: Int { groups.flatMap(\.files).count }
 }
@@ -103,15 +107,20 @@ public actor ArchiveCoordinator {
                 let access = root.startAccessingSecurityScopedResource()
                 defer { if access { root.stopAccessingSecurityScopedResource() } }
                 try validateRoot(root, group.identity)
+                let targetRoot = try destinationRoot(group, fallback: root)
+                let targetAccess = targetRoot.startAccessingSecurityScopedResource()
+                defer { if targetAccess { targetRoot.stopAccessingSecurityScopedResource() } }
+                if let identity = group.destinationIdentity { try validateRoot(targetRoot, identity) }
+                try validateDestinationDirectory(group, root: targetRoot)
                 for file in group.files {
-                    let old = try url(reversed ? file.to : file.from, root: root)
-                    let target = try url(reversed ? file.from : file.to, root: root)
+                    let old = try url(reversed ? file.to : file.from, root: reversed ? targetRoot : root)
+                    let target = try url(reversed ? file.from : file.to, root: reversed ? root : targetRoot)
                     if old != target {
                         guard (try? FileManager.default.attributesOfItem(atPath: old.path)) == nil else { throw CocoaError(.fileLocking) }
                     }
                     try verify(file, at: target)
                 }
-                try await store.commitArchive(group.files, reversed: reversed)
+                try await store.commitArchive(group.files, reversed: reversed, destination: group.destination)
                 plan.groups[index].state = reversed ? "undone" : "done"
                 try save(plan)
             } catch { continue }
@@ -120,7 +129,7 @@ public actor ArchiveCoordinator {
 
     public func recoverySources() throws -> [SourceRoot] {
         guard let plan = try load() else { return [] }
-        return Dictionary(grouping: plan.groups, by: { $0.source.id }).values.compactMap { $0.first?.source }.sorted { $0.id < $1.id }
+        return Dictionary(grouping: plan.groups.flatMap { [$0.source] + ($0.destination.map { [$0] } ?? []) }, by: \.id).values.compactMap(\.first).sorted { $0.id < $1.id }
     }
 
     public func authorize(_ url: URL, sourceID: String) throws {
@@ -130,6 +139,10 @@ public actor ArchiveCoordinator {
         for index in plan.groups.indices where plan.groups[index].source.id == sourceID {
             guard plan.groups[index].identity.matches(identity) else { throw CocoaError(.fileReadNoPermission) }
             plan.groups[index].source.bookmarkData = bookmark
+        }
+        for index in plan.groups.indices where plan.groups[index].destination?.id == sourceID {
+            guard plan.groups[index].destinationIdentity?.matches(identity) == true else { throw CocoaError(.fileReadNoPermission) }
+            plan.groups[index].destination?.bookmarkData = bookmark
         }
         try save(plan)
     }
@@ -156,6 +169,20 @@ public actor ArchiveCoordinator {
         let resolved = try BookmarkStore.resolve(group.source)
         guard group.source.isOnline, !resolved.isStale else { throw CocoaError(.fileReadNoPermission) }
         return resolved.url
+    }
+
+    private func destinationRoot(_ group: ArchiveGroup, fallback: URL) throws -> URL {
+        guard let source = group.destination else { return fallback }
+        let resolved = try BookmarkStore.resolve(source)
+        guard source.isOnline, !resolved.isStale else { throw CocoaError(.fileReadNoPermission) }
+        return resolved.url
+    }
+
+    private func validateDestinationDirectory(_ group: ArchiveGroup, root: URL) throws {
+        guard let identity = group.destinationDirectoryIdentity, let file = group.files.first else { return }
+        let directory = try url(file.to, root: root).deletingLastPathComponent()
+        try validateRoot(directory, identity)
+        guard identity.volume == group.identity.volume else { throw POSIXError(.EXDEV) }
     }
 
     private func validateRoot(_ root: URL, _ identity: SourceIdentity) throws {
@@ -191,13 +218,46 @@ public actor ArchiveCoordinator {
               try FileHasher.sha256(of: url) == file.hash else { throw CocoaError(.fileReadCorruptFile) }
     }
 
-    public func prepare() async throws -> ArchivePlan {
+    public func prepare(selectedIDs: Set<String>? = nil, destination: URL? = nil) async throws -> ArchivePlan {
         guard !busy else { throw CocoaError(.fileLocking) }
         busy = true
         defer { busy = false }
         guard try !hasPending() else { throw CocoaError(.fileLocking) }
         var plan = ArchivePlan()
+        plan.isBatchMove = destination != nil
         let sources = try await store.sources()
+        var targetSource: SourceRoot?
+        var targetIdentity: SourceIdentity?
+        var directoryIdentity: SourceIdentity?
+        var targetPrefix = ""
+        let targetAccess = destination?.startAccessingSecurityScopedResource() ?? false
+        defer { if targetAccess { destination?.stopAccessingSecurityScopedResource() } }
+        if let destination {
+            guard let selectedIDs, !selectedIDs.isEmpty else { throw CocoaError(.fileReadUnknown) }
+            let identity = try SourceIdentity.resolve(destination)
+            directoryIdentity = identity
+            try validateRoot(destination, identity)
+            let canonicalPath: (SourceRoot) -> String = { URL(fileURLWithPath: $0.pathHint).resolvingSymlinksInPath().standardizedFileURL.path }
+            let containing = sources.filter { identity.path == canonicalPath($0) || identity.path.hasPrefix(canonicalPath($0) + "/") }
+            guard containing.count <= 1,
+                  !sources.contains(where: { canonicalPath($0).hasPrefix(identity.path + "/") }) else { throw CocoaError(.fileLocking) }
+            if let existing = containing.first {
+                let resolved = try BookmarkStore.resolve(existing)
+                guard !resolved.isStale, existing.isOnline else { throw CocoaError(.fileReadNoPermission) }
+                targetSource = existing
+                targetIdentity = try SourceIdentity.resolve(resolved.url)
+                guard identity.path == targetIdentity!.path || identity.path.hasPrefix(targetIdentity!.path + "/") else { throw CocoaError(.fileReadNoPermission) }
+                if let saved = existing.directoryIdentityJSON {
+                    guard try JSONDecoder().decode(SourceIdentity.self, from: Data(saved.utf8)).matches(targetIdentity!) else { throw CocoaError(.fileReadNoPermission) }
+                }
+                targetPrefix = identity.path == targetIdentity!.path ? "" : String(identity.path.dropFirst(targetIdentity!.path.count + 1))
+            } else {
+                var source = SourceRoot(name: destination.lastPathComponent, bookmarkData: try BookmarkStore.makeBookmark(for: destination), pathHint: identity.path, volumeIdentifier: identity.volume)
+                source.directoryIdentityJSON = String(decoding: try JSONEncoder().encode(identity), as: UTF8.self)
+                targetSource = source; targetIdentity = identity
+            }
+        }
+        var reservedTargets = Set<String>()
         // Parent/child and duplicate roots are conservatively excluded, even when offline.
         let paths = sources.map { URL(fileURLWithPath: $0.pathHint).resolvingSymlinksInPath().standardizedFileURL.path }
         for (index, source) in sources.enumerated() {
@@ -217,6 +277,8 @@ public actor ArchiveCoordinator {
                     guard try JSONDecoder().decode(SourceIdentity.self, from: Data(saved.utf8)).matches(identity) else { throw CocoaError(.fileReadNoPermission) }
                 }
                 let assets = try await store.assets(sourceID: source.id)
+                if let selectedIDs, !assets.contains(where: { selectedIDs.contains($0.id) }) { continue }
+                if let targetIdentity, targetIdentity.volume != identity.volume { throw POSIXError(.EXDEV) }
                 let grouped = Dictionary(grouping: assets.filter { $0.kind == .photo }) {
                     ($0.relativePath as NSString).deletingPathExtension
                 }
@@ -230,10 +292,16 @@ public actor ArchiveCoordinator {
                             let b = MediaSupport.isRaw(URL(fileURLWithPath: $1.fileName))
                             return a == b ? $0.id < $1.id : a
                         }
+                        if let selectedIDs {
+                            guard photos.contains(where: { selectedIDs.contains($0.id) }) else { continue }
+                            guard photos.allSatisfy({ selectedIDs.contains($0.id) }) else {
+                                plan.warnings.append("\(key)：RAW/JPEG 配对未全部选中，跳过整组"); continue
+                            }
+                        }
                         guard photos.count <= 2, photos.count == 1 ||
                             (MediaSupport.isRaw(URL(fileURLWithPath: photos[0].fileName)) && ["jpg", "jpeg"].contains((photos[1].fileName as NSString).pathExtension.lowercased())) else { throw CocoaError(.fileReadUnknown) }
-                        let dates = try photos.compactMap { dateReader(try url($0.relativePath, root: root)) }
-                        guard let folder = dates.first else {
+                        let dates = destination == nil ? try photos.compactMap { dateReader(try url($0.relativePath, root: root)) } : []
+                        guard let folder = destination != nil ? targetPrefix : dates.first else {
                             plan.warnings.append("\(source.name)/\(key)：无可靠 EXIF 拍摄日期"); continue
                         }
                         if Set(dates).count > 1 { plan.warnings.append("\(key)：配对日期不同，采用 \(folder)") }
@@ -271,19 +339,21 @@ public actor ArchiveCoordinator {
                             let newStem = stem + (suffix == 0 ? "" : "-\(suffix)")
                             for i in files.indices {
                                 let name = (files[i].from as NSString).lastPathComponent
-                                files[i].to = folder + "/" + newStem + name.dropFirst(stem.count)
+                                files[i].to = (folder.isEmpty ? "" : folder + "/") + newStem + name.dropFirst(stem.count)
                             }
-                            if files.allSatisfy({ $0.from == $0.to }) { break }
+                            let outputRoot = targetSource.map { URL(fileURLWithPath: $0.pathHint) } ?? root
+                            if outputRoot == root && files.allSatisfy({ $0.from == $0.to }) { break }
                             if files.allSatisfy({ file in
-                                let target = root.appendingPathComponent(file.to)
-                                return !reserved.contains(file.to) && (file.to == file.from || (try? FileManager.default.attributesOfItem(atPath: target.path)) == nil)
+                                let target = outputRoot.appendingPathComponent(file.to)
+                                return !reservedTargets.contains(target.path) && !reserved.contains(file.to) && (target == root.appendingPathComponent(file.from) || (try? FileManager.default.attributesOfItem(atPath: target.path)) == nil)
                             }) { break }
                             suffix += 1
                         }
-                        if files.allSatisfy({ $0.from == $0.to }) { continue }
+                        if (targetSource == nil || targetSource?.id == source.id) && files.allSatisfy({ $0.from == $0.to }) { continue }
                         if suffix > 0 { plan.warnings.append("\(key)：目标重名，整组追加 -\(suffix)") }
                         reserved.formUnion(files.map(\.to))
-                        plan.groups.append(ArchiveGroup(source: source, identity: identity, files: files))
+                        reservedTargets.formUnion(files.map { (targetSource.map { URL(fileURLWithPath: $0.pathHint) } ?? root).appendingPathComponent($0.to).path })
+                        plan.groups.append(ArchiveGroup(source: source, identity: identity, files: files, destination: targetSource, destinationIdentity: targetIdentity, destinationDirectoryIdentity: directoryIdentity))
                     } catch is CancellationError { throw CancellationError() }
                     catch { plan.warnings.append("\(source.name)/\(key)：跳过（\(error.localizedDescription)）") }
                 }
@@ -333,20 +403,30 @@ public actor ArchiveCoordinator {
                 defer { if access { root.stopAccessingSecurityScopedResource() } }
                 try validateRoot(root, group.identity)
                 let reversing = undo || group.state == "undoing" || group.state == "rollbackForward"
+                let targetRoot = try destinationRoot(group, fallback: root)
+                let targetAccess = targetRoot.startAccessingSecurityScopedResource()
+                defer { if targetAccess { targetRoot.stopAccessingSecurityScopedResource() } }
+                if let identity = group.destinationIdentity {
+                    try validateRoot(targetRoot, identity)
+                    guard identity.volume == group.identity.volume else { throw POSIXError(.EXDEV) }
+                }
+                try validateDestinationDirectory(group, root: targetRoot)
+                let fromRoot = reversing ? targetRoot : root
+                let toRoot = reversing ? root : targetRoot
                 let moves = group.files.map { file -> ArchiveFile in
                     var result = file
                     if reversing { swap(&result.from, &result.to) }
                     return result
                 }
-                try await store.validateArchive(group.files, reversed: reversing)
+                try await store.validateArchive(group.files, reversed: reversing, destination: group.destination)
                 // Before the first mutation, validate the entire group. Replaced/offline files are
                 // skips, not ambiguous recovery work. Resuming a partial group uses the journal below.
                 if group.state == "pending" && !undo || group.state == "done" && undo {
                     for file in moves {
-                        let from = try url(file.from, root: root)
+                        let from = try url(file.from, root: fromRoot)
                         try verify(file, at: from)
-                        if file.from != file.to {
-                            let to = root.appendingPathComponent(file.to)
+                        if file.from != file.to || fromRoot != toRoot {
+                            let to = toRoot.appendingPathComponent(file.to)
                             guard (try? FileManager.default.attributesOfItem(atPath: to.path)) == nil else { throw CocoaError(.fileWriteFileExists) }
                         }
                     }
@@ -354,9 +434,9 @@ public actor ArchiveCoordinator {
                 plan.groups[index].state = reversing ? "undoing" : "moving"
                 try save(plan)
                 do {
-                    for file in moves where file.from != file.to {
-                        let from = try url(file.from, root: root, createParents: true)
-                        let to = try url(file.to, root: root, createParents: true)
+                    for file in moves where file.from != file.to || fromRoot != toRoot {
+                        let from = try url(file.from, root: fromRoot, createParents: true)
+                        let to = try url(file.to, root: toRoot, createParents: true)
                         if (try? FileManager.default.attributesOfItem(atPath: from.path)) != nil {
                             try verify(file, at: from)
                             try save(plan)
@@ -368,7 +448,7 @@ public actor ArchiveCoordinator {
                             try verify(file, at: to)
                         }
                     }
-                    try await store.commitArchive(group.files, reversed: reversing)
+                    try await store.commitArchive(group.files, reversed: reversing, destination: group.destination)
                     plan.groups[index].state = reversing ? "undone" : "done"
                     try save(plan)
                     report.completed += moves.count
@@ -379,9 +459,9 @@ public actor ArchiveCoordinator {
                     plan.groups[index].state = reversing ? "rollbackUndo" : "rollbackForward"
                     try save(plan)
                     do {
-                        for file in moves.reversed() where file.from != file.to {
-                            let from = try url(file.from, root: root, createParents: true)
-                            let to = try url(file.to, root: root, createParents: true)
+                        for file in moves.reversed() where file.from != file.to || fromRoot != toRoot {
+                            let from = try url(file.from, root: fromRoot, createParents: true)
+                            let to = try url(file.to, root: toRoot, createParents: true)
                             if (try? FileManager.default.attributesOfItem(atPath: from.path)) != nil {
                                 try verify(file, at: from)
                             } else {
@@ -391,7 +471,7 @@ public actor ArchiveCoordinator {
                             }
                             try save(plan)
                         }
-                        try await store.commitArchive(group.files, reversed: !reversing)
+                        try await store.commitArchive(group.files, reversed: !reversing, destination: group.destination)
                         plan.groups[index].state = reversing ? "done" : "pending"
                         try save(plan)
                         report.warnings.append("本组已安全回退：\(failure.localizedDescription)。可继续或撤销剩余归档。")
