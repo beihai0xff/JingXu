@@ -1,4 +1,4 @@
-镜序 0.2.3（构建 11）· 未公证版本
+镜序 0.2.4（构建 13）· 未公证版本
 
 系统要求：macOS 14+，Apple Silicon。不支持 Intel。
 本程序使用本地临时签名，没有 Developer ID 签名或 Apple 公证。
