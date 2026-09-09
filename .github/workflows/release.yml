@@ -1,0 +1,125 @@
+name: macOS build and tag release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jingxu-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      commit: ${{ steps.metadata.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify runner and toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          swift --version
+      - name: Check release metadata tests
+        run: python3 -m unittest discover -s Tests/ReleasePipeline -v
+      - name: Validate tag and prepare notes
+        id: metadata
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          if [[ "$RELEASE_REF" == refs/tags/* ]]; then
+            git merge-base --is-ancestor HEAD origin/main
+          fi
+          python3 Scripts/ci-release-metadata.py --ref "$RELEASE_REF" --output "$RUNNER_TEMP/jingxu-release"
+      - name: Debug and Release builds
+        run: |
+          swift build
+          swift build -c release
+      - name: Full regression checks
+        run: swift run -c release JingXuChecks
+      - name: Package ad-hoc signed DMG
+        run: zsh Scripts/package-test-app.sh --versioned-name
+      - name: Verify release files
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          cd outputs
+          shasum -a 256 -c "JingXu-${VERSION}-macOS-arm64.dmg.sha256"
+          hdiutil verify "JingXu-${VERSION}-macOS-arm64.dmg"
+          cp "$RUNNER_TEMP/jingxu-release/RELEASE.md" RELEASE.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jingxu-macos-arm64
+          path: |
+            outputs/JingXu-${{ steps.metadata.outputs.version }}-macOS-arm64.dmg
+            outputs/JingXu-${{ steps.metadata.outputs.version }}-macOS-arm64.dmg.sha256
+            outputs/RELEASE.md
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: jingxu-macos-arm64
+          path: release
+      - name: Publish verified assets without overwriting existing releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+          BUILT_COMMIT: ${{ needs.build.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          test "$RELEASE_TAG" = "v$VERSION"
+          # Refuse publication if the tag moved after this run checked it out.
+          test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$BUILT_COMMIT"
+          sha256sum -c "JingXu-${VERSION}-macOS-arm64.dmg.sha256"
+          # An API/authentication error must fail closed, not be treated as absence.
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name' > existing-tags.txt
+          if grep -Fxq -- "$RELEASE_TAG" existing-tags.txt; then
+            echo "Release $RELEASE_TAG already exists; nothing will be overwritten."
+            exit 1
+          fi
+          # Leave a recoverable draft on partial upload failure. Never --clobber.
+          gh release create "$RELEASE_TAG" \
+            "JingXu-${VERSION}-macOS-arm64.dmg" \
+            "JingXu-${VERSION}-macOS-arm64.dmg.sha256" \
+            --verify-tag --draft --prerelease --latest=false \
+            --title "镜序 $VERSION" --notes-file RELEASE.md
+          # Check server digests for both files before making the draft public.
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > uploaded.json
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          files = [f"JingXu-{os.environ['VERSION']}-macOS-arm64.dmg"]
+          files.append(files[0] + '.sha256')
+          assets = {a['name']: a for a in json.loads(Path('uploaded.json').read_text())['assets']}
+          if set(assets) != set(files):
+              raise SystemExit('Unexpected or missing release assets; draft retained')
+          for name in files:
+              digest = 'sha256:' + hashlib.sha256(Path(name).read_bytes()).hexdigest()
+              if assets[name].get('digest') != digest:
+                  raise SystemExit('Remote digest mismatch; draft retained')
+          PY
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          gh release view "$RELEASE_TAG" --json url,isDraft,isPrerelease
