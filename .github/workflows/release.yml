@@ -107,7 +107,12 @@ jobs:
             --verify-tag --draft --prerelease --latest=false \
             --title "镜序 $VERSION" --notes-file RELEASE.md
           # Check server digests for both files before making the draft public.
-          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > uploaded.json
+          # The by-tag REST endpoint does not return unpublished drafts. Resolve the
+          # authenticated draft from the release list, then query its numeric ID.
+          RELEASE_ID="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$RELEASE_TAG\" and .draft == true) | .id")"
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]] || { echo "Expected exactly one release draft"; exit 1; }
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" > uploaded.json
           python3 - <<'PY'
           import hashlib, json, os
           from pathlib import Path
