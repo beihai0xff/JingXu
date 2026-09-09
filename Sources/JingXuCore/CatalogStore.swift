@@ -361,6 +361,41 @@ public actor CatalogStore: CatalogRepository {
         try dbPool.read { db in try MediaAsset.fetchOne(db, key: id) }
     }
 
+    public func validateArchive(_ files: [ArchiveFile], reversed: Bool) throws {
+        try dbPool.read { db in
+            for file in files {
+                guard let expected = file.asset else { continue }
+                guard let current = try MediaAsset.fetchOne(db, key: expected.id),
+                      current.sourceID == expected.sourceID,
+                      current.relativePath == file.from || current.relativePath == file.to,
+                      AnalysisFingerprint(asset: current).matches(file.fingerprint) else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+            }
+        }
+    }
+
+    public func commitArchive(_ files: [ArchiveFile], reversed: Bool) throws {
+        try dbPool.write { db in
+            for file in files {
+                guard let expected = file.asset else { continue }
+                guard var current = try MediaAsset.fetchOne(db, key: expected.id),
+                      current.sourceID == expected.sourceID,
+                      current.relativePath == file.from || current.relativePath == file.to,
+                      AnalysisFingerprint(asset: current).matches(file.fingerprint) else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                current.relativePath = reversed ? file.from : file.to
+                current.fileName = (current.relativePath as NSString).lastPathComponent
+                current.rawPairKey = expected.rawPairKey == nil ? nil :
+                    (current.fileName as NSString).deletingPathExtension.lowercased()
+                try current.update(db)
+                // A same-volume rename preserves inode, bytes and mtime, so analysis fingerprints
+                // and user review remain valid. No annotations or analysis rows are replaced.
+            }
+        }
+    }
+
     public func asset(sourceID: String, relativePath: String) throws -> MediaAsset? {
         try dbPool.read { db in
             try MediaAsset
