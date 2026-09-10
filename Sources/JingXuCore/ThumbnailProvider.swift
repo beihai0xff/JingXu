@@ -1,5 +1,6 @@
 @preconcurrency import AppKit
 import Foundation
+import CryptoKit
 @preconcurrency import QuickLookThumbnailing
 
 public protocol ThumbnailProvider: Sendable {
@@ -19,9 +20,11 @@ public final class DefaultThumbnailProvider: ThumbnailProvider, @unchecked Senda
 
     public func thumbnailData(for assetID: String, url: URL, pixelSize: Int, scale: CGFloat = 2) async throws -> Data {
         let boundedSize = min(max(pixelSize, 64), 2_048)
-        let key = "\(assetID)-\(boundedSize)" as NSString
+        let fingerprint = try AnalysisFingerprint(url: url)
+        let key = "\(assetID)-\(fingerprint.identifier ?? "unknown")-\(fingerprint.size)-\(fingerprint.modifiedAt.timeIntervalSince1970)-\(boundedSize)" as NSString
         if let data = memoryCache.object(forKey: key) { return data as Data }
-        let diskURL = cacheDirectory.appendingPathComponent("\(assetID)-\(boundedSize).jpg")
+        let safeKey = SHA256.hash(data: Data((key as String).utf8)).map { String(format: "%02x", $0) }.joined()
+        let diskURL = cacheDirectory.appendingPathComponent("\(assetID)-\(safeKey).jpg")
         if let data = try? Data(contentsOf: diskURL) {
             memoryCache.setObject(data as NSData, forKey: key, cost: data.count)
             return data

@@ -3,12 +3,13 @@ import SwiftUI
 @main
 struct JingXuApp: App {
     @StateObject private var model = AppModel()
+    @NSApplicationDelegateAdaptor(ColorApplicationDelegate.self) private var applicationDelegate
 
     var body: some Scene {
         WindowGroup("镜序") {
             Group {
                 if model.isStarting {
-                    ProgressView("正在检查图库与升级备份…")
+                    ProgressView("正在检查图库…")
                 } else if let failure = model.startupFailure {
                     VStack(alignment: .leading, spacing: 16) {
                         Text("图库未打开").font(.title)
@@ -24,13 +25,22 @@ struct JingXuApp: App {
                     }.padding(32)
                 } else { ContentView().environmentObject(model) }
             }.frame(minWidth: 1_080, minHeight: 680)
+                .background(ColorWindowGuard(model: model))
+                .onAppear { applicationDelegate.model = model }
         }
         .commands {
             CommandGroup(after: .importExport) {
                 Button("添加照片文件夹…") { model.chooseAndAddFolder() }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
-                Button("从相机卡导入…") { model.isShowingImport = true }
+                Button("从相机卡导入…") { model.isShowingImport = true }.disabled(model.colorEditor != nil || !model.canStartColorAction)
                     .keyboardShortcut("i", modifiers: [.command, .shift])
+                Divider()
+                Button("照片调色") { model.beginColorEditing() }.disabled(model.previewAsset == nil || !model.canStartColorAction)
+                Button("复制调色参数") { model.copyColorAdjustments() }.keyboardShortcut("c", modifiers: [.command, .option]).disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
+                Button("预设与调色…") { model.showColorPresets() }.disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
+                Button("导出成片…") { model.showColorExport() }.keyboardShortcut("e", modifiers: [.command, .shift]).disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
+                Button("撤销调色") { model.colorEditor?.undo() }.keyboardShortcut("z", modifiers: [.command, .option]).disabled(model.colorEditor?.history.canUndo != true || model.isPreviewTransitioning)
+                Button("重做调色") { model.colorEditor?.redo() }.keyboardShortcut("z", modifiers: [.command, .option, .shift]).disabled(model.colorEditor?.history.canRedo != true || model.isPreviewTransitioning)
                 Divider()
                 Button("导出所选 XMP") { model.exportSelectedXMP() }
                     .disabled(model.selectedAssetID == nil)

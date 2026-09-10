@@ -366,6 +366,9 @@ public struct BackgroundJob: Codable, FetchableRecord, PersistableRecord, Identi
 
 public struct AssetListItem: Identifiable, Sendable, Equatable, FetchableRecord, Decodable {
     public var id: String
+    public var colorRevision: Int = 0
+    public var isColorEdited: Bool = false
+    public var fileVersion: String = ""
     public var sourceID: String
     public var relativePath: String
     public var fileName: String

@@ -9,7 +9,7 @@ struct HistogramView: View {
     @State private var rgb = false
     @State private var retry = 0
     var body: some View {
-        GroupBox("直方图") {
+        GroupBox("原片直方图") {
             VStack(spacing: 8) {
                 if item.kind == .video { Text("不支持视频直方图").font(.caption) }
                 else {

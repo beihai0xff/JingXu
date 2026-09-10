@@ -35,7 +35,8 @@ public final class CatalogLease: @unchecked Sendable {
 }
 
 public actor CatalogUpgradeCoordinator {
-    public static let migrations = ["v1-create-catalog", "v2-file-identity-index", "v3-source-directory-identity", "v4-quality-assessment"]
+    public static let schemaVersion = 1
+    public static let applicationID = 0x4A584331
     private let databaseURL: URL
     private var lease: CatalogLease?
     private weak var openedStore: CatalogStore?
@@ -62,7 +63,7 @@ public actor CatalogUpgradeCoordinator {
         databaseURL.deletingLastPathComponent().appendingPathComponent("Backups/Upgrades", isDirectory: true)
     }
 
-    /// Called before opening a write connection or executing any migration.
+    /// Inspect before opening a write connection. Only the current schema is accepted.
     static func prepare(_ databaseURL: URL) throws {
         let fm = FileManager.default
         let parent = databaseURL.deletingLastPathComponent()
@@ -80,35 +81,20 @@ public actor CatalogUpgradeCoordinator {
         do { old = try DatabaseQueue(path: databaseURL.path, configuration: configuration) }
         catch { throw CatalogUpgradeError.blocked("无法只读检查图库 \(databaseURL.path)：\(error.localizedDescription)") }
         defer { try? old.close() }
-        let applied = try old.read { db -> [String] in
-            guard try db.tableExists("grdb_migrations") else { throw CatalogUpgradeError.blocked("无法识别现有数据库，未执行迁移。") }
-            return try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations ORDER BY rowid")
+        let supported = try old.read { db in
+            let version = try Int.fetchOne(db, sql: "PRAGMA user_version")
+            let application = try Int.fetchOne(db, sql: "PRAGMA application_id")
+            return version == schemaVersion && application == applicationID
         }
-        guard Array(migrations.prefix(applied.count)) == applied else {
-            throw CatalogUpgradeError.blocked("图库版本比本程序更新或迁移历史异常，禁止降级写入。")
+        guard supported else {
+            throw CatalogUpgradeError.blocked("此图库格式不受当前版本支持。本版本不迁移旧图库；原数据库及恢复日志已保留。请使用匹配的旧版镜序打开原库。")
         }
         try validate(old)
-        guard applied != migrations else { return }
-        let backup = backupDirectory(for: databaseURL).appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try fm.createDirectory(at: backup, withIntermediateDirectories: true)
-        let snapshot = backup.appendingPathComponent("Catalog.sqlite")
-        let writer = try DatabaseQueue(path: snapshot.path)
-        try old.backup(to: writer)
-        try writer.writeWithoutTransaction { db in try db.execute(sql: "PRAGMA journal_mode = DELETE") }
-        try validate(writer)
-        try writer.close()
-        let journal = parent.appendingPathComponent("deletions.json")
-        var journalHash: String?
-        if fm.fileExists(atPath: journal.path) {
-            let data = try Data(contentsOf: journal)
-            _ = try JSONDecoder().decode([DeletionJournalEntry].self, from: data)
-            let target = backup.appendingPathComponent("deletions.json")
-            try data.write(to: target, options: .atomic)
-            journalHash = try FileHasher.sha256(of: target)
+        try old.read { db in
+            for table in ["sourceRoots", "mediaAssets", "annotations", "analysisResults", "albums", "albumAssets", "importSessions", "backgroundJobs", "qualityJobItems", "colorEdits", "colorPresets"] {
+                guard try db.tableExists(table) else { throw CatalogUpgradeError.blocked("图库缺少 \(table) 数据表，已停止打开；请从备份恢复。") }
+            }
         }
-        let manifest = UpgradeManifest(databasePath: databaseURL.standardizedFileURL.path, migrations: applied,
-            targetVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development", createdAt: Date(), databaseHash: try FileHasher.sha256(of: snapshot), journalHash: journalHash)
-        try JSONEncoder().encode(manifest).write(to: backup.appendingPathComponent("manifest.json"), options: .atomic)
     }
 
     public func restore(from backup: URL) throws {

@@ -58,19 +58,31 @@ public final class PreviewCanvasView: NSView {
     private var actual = false
     private var dragAnchor = CGPoint.zero
     private var initialPan = CGPoint.zero
+    private var assetIdentity: String?
+    private var nativeSize: CGSize = .zero
 
     public override var isOpaque: Bool { true }
     public override var acceptsFirstResponder: Bool { true }
-    private var imageSize: CGSize { image.map { CGSize(width: $0.width, height: $0.height) } ?? .zero }
+    private var imageSize: CGSize { nativeSize }
     public var displayedImageRect: CGRect {
         PreviewGeometry.imageRect(image: imageSize, viewport: bounds.size, scale: scale, pan: pan)
     }
 
-    public func setImage(_ value: CGImage?) {
-        guard image !== value else { return }
-        image = value
+    public func clearImage() {
+        image = nil
+        assetIdentity = nil
+        nativeSize = .zero
         fitted = true; actual = false; pan = .zero
         updateFit()
+        needsDisplay = true
+    }
+
+    public func setImage(_ value: CGImage?, assetID: String, nativeSize size: CGSize) {
+        let changedPhoto = assetIdentity != assetID
+        image = value; assetIdentity = assetID; nativeSize = size
+        if changedPhoto { fitted = true; actual = false; pan = .zero }
+        if fitted { updateFit() }
+        else { pan = PreviewGeometry.clampedPan(pan, image: imageSize, viewport: bounds.size, scale: scale) }
         needsDisplay = true
     }
 

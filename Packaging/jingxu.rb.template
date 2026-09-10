@@ -17,5 +17,7 @@ cask "jingxu" do
     Quit JingXu and finish or safely cancel catalog tasks before upgrading.
     $signature_notice
     Catalog data is kept outside the app; no catalog cleanup is performed.
+    JingXu 0.3.0 requires the new catalog format and does not migrate 0.2.x catalogs.
+    Keep the matching older app to open existing 0.2.x catalogs; back up before upgrading.
   EOS
 end

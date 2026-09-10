@@ -57,7 +57,7 @@ struct ContentView: View {
                 }
             }.padding(20).frame(width: 760, height: 520)
         }
-        .background(FlagKeyboardHandler(enabled: !model.isDeleting && model.archivePlan == nil && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
+        .background(FlagKeyboardHandler(enabled: !model.isDeleting && model.archivePlan == nil && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), requiresCanvasFocus: model.colorEditor != nil, navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
             model.updateFlag(flag, advanceToNext: flag == .rejected)
         })
         .sheet(item: $model.missingAssetPlan) { plan in
@@ -93,7 +93,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("清理淘汰图片").font(.title2)
                 Text("将当前范围内的 \(plan.files.count) 个照片文件（\(ByteCountFormatter.string(fromByteCount: plan.totalBytes, countStyle: .file))）移到废纸篓。不会删除视频、配对文件或 XMP。")
-                Text("可在访达中恢复文件；已清理的评分、标签和相册成员不会自动恢复。")
+                Text("可在访达中恢复文件；已清理的评分、标签、调色和相册成员不会自动恢复。")
                 DisclosureGroup("查看固定文件清单") {
                     ScrollView { LazyVStack(alignment: .leading) {
                         ForEach(plan.files) { file in
@@ -125,6 +125,7 @@ struct ContentView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
+        .modifier(ColorWorkflowPresentation())
         .onChange(of: model.sidebarSelection) { _, _ in
             model.closePreview()
             Task { await model.reloadAssets() }
@@ -151,7 +152,10 @@ struct ContentView: View {
                         PreviewFilmstrip(items: model.previewFilmstrip, currentID: item.id)
                     }
                 }
-                if showsPreviewInspector {
+                if let editor = model.colorEditor {
+                    Divider()
+                    ColorEditPanel(session: editor).frame(width: 310)
+                } else if showsPreviewInspector {
                     Divider()
                     inspector
                         .disabled(model.isDeleting)
@@ -229,6 +233,9 @@ struct ContentView: View {
                     Button("移动到目录…") { model.prepareBatchMove() }
                         .disabled(model.batchSelection.isEmpty || model.archivePending)
                 }
+                Button("预设与调色…") { model.showColorPresets() }.disabled(model.colorTargetIDs.isEmpty)
+                Button("导出成片…") { model.showColorExport() }.disabled(model.colorTargetIDs.isEmpty)
+                if model.colorUndoPlan != nil { Button("撤销批量调色") { model.undoColorBatch() } }
                 Spacer()
             }
             .disabled(model.isWorking)
@@ -355,6 +362,7 @@ struct ContentView: View {
                         .onTapGesture { model.openPreview(item) }
                         .help("点击放大查看原图")
                     HistogramView(item: item).id(item.id)
+                    Text("质量诊断基于原始照片").font(.caption2).foregroundStyle(.secondary)
                     Text(item.fileName).font(.headline).textSelection(.enabled)
                     ratingControl(item)
                     flagControl(item)
@@ -478,7 +486,7 @@ private struct MissingAssetCleanupSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("清理失效索引").font(.title2)
             Text("当前来源、相册和筛选范围内，确认缺失 \(plan.files.count) 项文件（含视频），不受网格显示上限限制。")
-            Text("仅移除图库记录及对应评分、标签、分析和相册成员关系，不操作硬盘文件。执行前备份图库并再次复核。离线或权限异常的项目保留。")
+            Text("仅移除图库记录及对应评分、标签、调色、分析和相册成员关系，不操作硬盘文件。执行前备份图库并再次复核。离线或权限异常的项目保留。")
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     ForEach(plan.files) { file in
@@ -525,6 +533,7 @@ private struct AssetCell: View {
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                 HStack(spacing: 4) {
+                    if item.isColorEdited { badge("slider.horizontal.3", color: .purple).help("已调色").accessibilityLabel("已调色") }
                     if item.kind == .video { badge("video.fill", color: .blue) }
                     if item.hasPendingQualityWarning { badge("exclamationmark.triangle.fill", color: .orange) }
                     if item.similarGroupID != nil || item.issues.contains(.similarBurst) { badge("square.stack.3d.up", color: .blue) }
@@ -547,7 +556,11 @@ private struct AssetCell: View {
         .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2))
         .contentShape(Rectangle())
-        .task(id: "\(item.id)-\(Int(size))") { image = await model.thumbnail(for: item, pixelSize: Int(size * 1.5)) }
+        .task(id: "\(item.id)-\(item.fileVersion)-\(item.colorRevision)-\(Int(size))") {
+            let result = await model.thumbnail(for: item, pixelSize: Int(size * 1.5))
+            guard !Task.isCancelled else { return }
+            image = result
+        }
     }
 
     private func badge(_ symbol: String, color: Color) -> some View {
@@ -572,7 +585,11 @@ private struct LargePreview: View {
                 if let image { Image(nsImage: image).resizable().scaledToFit().padding(4) }
                 else { ProgressView() }
             }
-            .task(id: item.id) { image = await model.thumbnail(for: item, pixelSize: 1_024) }
+            .task(id: "\(item.id)-\(item.fileVersion)-\(item.colorRevision)") {
+                let result = await model.thumbnail(for: item, pixelSize: 1_024)
+                guard !Task.isCancelled else { return }
+                image = result
+            }
     }
 }
 

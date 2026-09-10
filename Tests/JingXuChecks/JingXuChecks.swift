@@ -40,6 +40,24 @@ private struct TestTrash: TrashService {
 @main
 private enum JingXuChecks {
     static func main() async throws {
+        if let index = CommandLine.arguments.firstIndex(of: "--color-file"), CommandLine.arguments.count > index + 2 {
+            try await ColorChecks.verifyFile(URL(fileURLWithPath: CommandLine.arguments[index+1]), output: URL(fileURLWithPath: CommandLine.arguments[index+2]))
+            return
+        }
+        if CommandLine.arguments.contains("--color-checks") {
+            try ColorChecks.presets()
+            print("XMP 与历史检查通过")
+            try await ColorChecks.rendering()
+            print("渲染检查通过")
+            try await ColorChecks.persistence()
+            print("持久化检查通过")
+            try await ColorChecks.exporting()
+            try await ColorChecks.editing()
+            print("导出检查通过")
+            try await CatalogFormatChecks.run()
+            print("调色专项检查通过")
+            return
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--preview-file"), CommandLine.arguments.count > index + 2 {
             try await PreviewCanvasChecks.verifyFile(URL(fileURLWithPath: CommandLine.arguments[index+1]),
                 output: URL(fileURLWithPath: CommandLine.arguments[index+2]))
@@ -73,7 +91,12 @@ private enum JingXuChecks {
             ("大图可见区域绘制、100% 比例、缩放及清帧", PreviewCanvasChecks.run),
             ("直方图统计、透明像素与取消", checkHistogram),
             ("来源注册、合并、备份与移除", checkSourceManagement),
-            ("图库升级备份、锁、失败保护及恢复", checkCatalogUpgrade),
+            ("当前图库格式、旧库拒绝、锁、失败保护及恢复", CatalogFormatChecks.run),
+            ("基础调色、方向、透明度、导出精度和取消", ColorChecks.rendering),
+            ("调色持久化、批量回滚、缓存、移动与合并", ColorChecks.persistence),
+            ("成片导出、不覆盖、写入失败、取消及修订冻结", ColorChecks.exporting),
+            ("XMP 严格导入、稀疏参数及撤销历史", { try ColorChecks.presets() }),
+            ("编辑会话自动保存、并发保存、失败重试及过期渲染", ColorChecks.editing),
             ("10 万条目录查询性能", checkLargeCatalog)
         ]
 
@@ -711,140 +734,6 @@ private enum JingXuChecks {
         _ = try await store.removeSource(id: original.id, backupURL: root.appendingPathComponent("remove-backup.sqlite"))
         let removed = try await store.asset(id: first.id)
         try require(removed == nil && FileManager.default.fileExists(atPath: url.path), "来源移除未清理索引或修改原文件")
-    }
-
-    private static func seedUpgradeFixture(_ url: URL, version: Int) async throws {
-        do {
-            let store = try CatalogStore(databaseURL: url)
-            let source = SourceRoot(id: "upgrade-source", name: "升级测试", bookmarkData: nil, pathHint: url.deletingLastPathComponent().path)
-            try await store.upsertSource(source)
-            let asset = MediaAsset(id: "upgrade-photo", sourceID: source.id, relativePath: "original.jpg", fileIdentifier: "file-1", fileName: "original.jpg", uniformType: "public.jpeg", kind: .photo, fileSize: 8, modifiedAt: Date(timeIntervalSince1970: 1000))
-            _ = try await store.upsertAsset(asset)
-            try await store.saveAnnotation(UserAnnotation(assetID: asset.id, rating: 4, flag: .rejected, keywords: ["升级保留"]))
-            let album = Album(id: "upgrade-album", name: "旧相册")
-            try await store.saveAlbum(album)
-            try await store.add(assetID: asset.id, toAlbum: album.id)
-            try await store.saveAnalysis(AnalysisResult(assetID: asset.id, sharpnessScore: 0.015, shadowClipping: 0.4,
-                highlightClipping: 0.2, issues: [.blurry, .similarBurst], suggestionState: .ignored, similarGroupID: "old-burst"))
-        }
-        let db = try DatabaseQueue(path: url.path)
-        try await db.write { db in
-            if version < 4 {
-                try db.execute(sql: "DROP INDEX analysisResults_qualityStatus")
-                try db.execute(sql: "DROP TABLE qualityJobItems")
-                for column in ["assessmentStatus", "diagnosticJSON", "fingerprintJSON", "analysisError"] {
-                    try db.execute(sql: "ALTER TABLE analysisResults DROP COLUMN \(column)")
-                }
-                try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'v4-quality-assessment'")
-            }
-            if version < 3 {
-                try db.execute(sql: "DROP INDEX sourceRoots_directoryIdentity")
-                try db.execute(sql: "ALTER TABLE sourceRoots DROP COLUMN directoryIdentityJSON")
-                try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'v3-source-directory-identity'")
-            }
-            if version < 2 {
-                try db.execute(sql: "DROP INDEX mediaAssets_fileIdentifier")
-                try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'v2-file-identity-index'")
-            }
-        }
-        try db.close()
-    }
-
-    private static func checkCatalogUpgrade() async throws {
-        let root = try temporaryWorkspace()
-        defer { try? FileManager.default.removeItem(at: root) }
-        for version in 1...4 {
-            let directory = root.appendingPathComponent("v\(version)")
-            let url = directory.appendingPathComponent("Catalog.sqlite")
-            try await seedUpgradeFixture(url, version: version)
-            try Data("original".utf8).write(to: directory.appendingPathComponent("original.jpg"))
-            try JSONEncoder().encode([DeletionJournalEntry]()).write(to: directory.appendingPathComponent("deletions.json"))
-            let coordinator = CatalogUpgradeCoordinator(databaseURL: url)
-            do {
-                let store = try await coordinator.open()
-                let annotation = try await store.annotation(for: "upgrade-photo")
-                let members = try await store.assets(AssetQuery(albumID: "upgrade-album"))
-                try require(annotation.rating == 4 && annotation.flag == .rejected && annotation.keywords == ["升级保留"] && members.count == 1, "升级损坏用户数据")
-                let legacy = try await store.analysis(for: "upgrade-photo")
-                try require(legacy?.algorithmVersion == 1 && legacy?.suggestionState == .ignored && legacy?.similarGroupID == "old-burst" && legacy?.sharpnessScore == 0.015, "迁移改变旧分析或人工审核")
-                do { _ = try CatalogLease(databaseURL: url); throw CheckFailure(description: "第二个实例获得图库锁") } catch is CatalogUpgradeError {}
-                do { try await coordinator.restore(from: directory); throw CheckFailure(description: "连接尚未关闭就恢复") } catch is CatalogUpgradeError {}
-            }
-            let backups = (try? FileManager.default.contentsOfDirectory(at: CatalogUpgradeCoordinator.backupDirectory(for: url), includingPropertiesForKeys: nil)) ?? []
-            try require(backups.count == (version < 4 ? 1 : 0), "备份创建时机错误")
-            if version < 4 {
-                let backup = backups[0]
-                let manifest = try JSONDecoder().decode(UpgradeManifest.self, from: Data(contentsOf: backup.appendingPathComponent("manifest.json")))
-                try require(manifest.migrations.count == version && manifest.journalHash != nil, "备份缺少版本或日志")
-                // A persisted intent simulates a process stopping before recovery completes.
-                let preserved = directory.appendingPathComponent("Backups/preserved")
-                try FileManager.default.createDirectory(at: preserved, withIntermediateDirectories: true)
-                try JSONEncoder().encode(["backup": backup.path, "preserved": preserved.path]).write(to: directory.appendingPathComponent("restore-state.json"))
-                do { _ = try CatalogStore(databaseURL: url); throw CheckFailure(description: "恢复中断时仍允许打开图库") } catch is CatalogUpgradeError {}
-                try await coordinator.restore(from: backup)
-                var config = Configuration(); config.readonly = true
-                let reader = try DatabaseQueue(path: url.path, configuration: config)
-                let count = try await reader.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM grdb_migrations")! }
-                try require(count == version, "没有恢复升级前版本")
-                try reader.close()
-            }
-            let photo = try Data(contentsOf: directory.appendingPathComponent("original.jpg"))
-            try require(photo == Data("original".utf8), "升级或恢复修改原照片")
-        }
-        let unknownURL = root.appendingPathComponent("unknown/Catalog.sqlite")
-        try await seedUpgradeFixture(unknownURL, version: 3)
-        let unknownDB = try DatabaseQueue(path: unknownURL.path)
-        try await unknownDB.write { try $0.execute(sql: "INSERT INTO grdb_migrations(identifier) VALUES ('v99-future')") }
-        do { _ = try CatalogStore(databaseURL: unknownURL); throw CheckFailure(description: "新版数据库允许降级打开") } catch is CatalogUpgradeError {}
-        try unknownDB.close()
-        let failureURL = root.appendingPathComponent("backup-failure/Catalog.sqlite")
-        try await seedUpgradeFixture(failureURL, version: 1)
-        try Data("not a directory".utf8).write(to: failureURL.deletingLastPathComponent().appendingPathComponent("Backups"))
-        do { _ = try CatalogStore(databaseURL: failureURL); throw CheckFailure(description: "备份失败仍继续迁移") } catch is CocoaError {}
-        let reader = try DatabaseQueue(path: failureURL.path)
-        let applied = try await reader.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM grdb_migrations")! }
-        try require(applied == 1, "备份失败后改变数据库版本")
-        try reader.close()
-        let walURL = root.appendingPathComponent("wal/Catalog.sqlite")
-        try await seedUpgradeFixture(walURL, version: 1)
-        let walWriter = try DatabaseQueue(path: walURL.path)
-        try await walWriter.writeWithoutTransaction { db in
-            try db.execute(sql: "PRAGMA journal_mode = WAL")
-            try db.execute(sql: "PRAGMA wal_autocheckpoint = 0")
-            try db.execute(sql: "UPDATE annotations SET rating = 5 WHERE assetID = 'upgrade-photo'")
-        }
-        do { _ = try CatalogStore(databaseURL: walURL) }
-        let walBackups = try FileManager.default.contentsOfDirectory(at: CatalogUpgradeCoordinator.backupDirectory(for: walURL), includingPropertiesForKeys: nil)
-        let snapshot = try DatabaseQueue(path: walBackups[0].appendingPathComponent("Catalog.sqlite").path)
-        let rating = try await snapshot.read { try Int.fetchOne($0, sql: "SELECT rating FROM annotations WHERE assetID = 'upgrade-photo'") }
-        try require(rating == 5, "在线备份遗漏 WAL 中已提交数据")
-        try snapshot.close(); try walWriter.close()
-
-        let faultURL = root.appendingPathComponent("migration-fault/Catalog.sqlite")
-        try await seedUpgradeFixture(faultURL, version: 1)
-        let faultWriter = try DatabaseQueue(path: faultURL.path)
-        try await faultWriter.write { db in
-            try db.execute(sql: "CREATE TRIGGER fail_upgrade BEFORE INSERT ON grdb_migrations BEGIN SELECT RAISE(ABORT, 'injected migration failure'); END")
-        }
-        do { _ = try CatalogStore(databaseURL: faultURL); throw CheckFailure(description: "迁移故障未阻止启动") } catch is DatabaseError {}
-        let unchanged = try await faultWriter.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM grdb_migrations") }
-        try require(unchanged == 1, "失败的迁移没有回滚")
-        try faultWriter.close()
-
-        let v4FaultURL = root.appendingPathComponent("v4-fault/Catalog.sqlite")
-        try await seedUpgradeFixture(v4FaultURL, version: 3)
-        let v4Writer = try DatabaseQueue(path: v4FaultURL.path)
-        try await v4Writer.write { db in
-            try db.execute(sql: "CREATE TRIGGER fail_quality_upgrade BEFORE INSERT ON grdb_migrations WHEN NEW.identifier = 'v4-quality-assessment' BEGIN SELECT RAISE(ABORT, 'injected v4 failure'); END")
-        }
-        do { _ = try CatalogStore(databaseURL: v4FaultURL); throw CheckFailure(description: "v4 迁移失败仍允许打开") } catch is DatabaseError {}
-        let v4Unchanged = try await v4Writer.read { db in
-            let hasItems = try db.tableExists("qualityJobItems")
-            let hasStatus = try db.columns(in: "analysisResults").contains { $0.name == "assessmentStatus" }
-            return !hasItems && !hasStatus
-        }
-        try require(v4Unchanged, "v4 事务失败未回滚新增表和字段")
-        try v4Writer.close()
     }
 
     private static func temporaryWorkspace() throws -> URL {

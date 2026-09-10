@@ -71,7 +71,7 @@ enum PreviewCanvasChecks {
         context.fill(CGRect(origin: .zero, size: size))
         let image = context.makeImage()!
         let canvas = PreviewCanvasView(frame: CGRect(origin: .zero, size: viewport))
-        canvas.setImage(image)
+        canvas.setImage(image, assetID: "fixture", nativeSize: CGSize(width: image.width, height: image.height))
         try check(canvas.frame.size == viewport && canvas.fitted, "画布尺寸随原图膨胀")
         let rendered = try capture(canvas)
         let pixels = try SRGBPixels(rendered).rgba
@@ -81,6 +81,10 @@ enum PreviewCanvasChecks {
         }
         canvas.perform("actual", backingScale: 2)
         try check(canvas.scale == 0.5 && !canvas.fitted && canvas.frame.size == viewport, "Retina 100% 比例或 backing 尺寸错误")
+        let proxy = try QualityV2Checks.image(width: 32, height: 48) { _,_ in (255,0,0,255) }
+        canvas.setImage(proxy, assetID: "fixture", nativeSize: size)
+        try check(canvas.scale == 0.5 && !canvas.fitted && canvas.displayedImageRect.width == size.width * 0.5, "调色更新或降采样重置了缩放／100% 像素比例")
+        canvas.setImage(image, assetID: "fixture", nativeSize: size)
         for _ in 0..<40 { canvas.perform("in") }
         try check(canvas.scale == 16 && canvas.frame.size == viewport, "放大导致超大 backing surface")
         for _ in 0..<80 { canvas.perform("out") }
@@ -88,11 +92,11 @@ enum PreviewCanvasChecks {
         canvas.perform("fit")
         canvas.setFrameSize(CGSize(width: 400, height: 300))
         try check(abs(canvas.displayedImageRect.height - 300) < 0.001, "调整窗口未重新适应")
-        canvas.setImage(nil)
+        canvas.clearImage()
         try check(canvas.image == nil, "关闭预览未释放图片引用")
         let empty = try SRGBPixels(capture(canvas)).rgba
         try check(stride(from: 0, to: empty.count, by: 4).allSatisfy { empty[$0] == 0 && empty[$0+1] == 0 && empty[$0+2] == 0 }, "切图清空后残留旧帧")
-        canvas.setImage(image)
+        canvas.setImage(image, assetID: "fixture", nativeSize: CGSize(width: image.width, height: image.height))
         try check(canvas.fitted, "换图未恢复适应模式")
     }
 
@@ -107,14 +111,14 @@ enum PreviewCanvasChecks {
         let hash = try FileHasher.sha256(of: url)
         let decoded = try await ImagePreviewLoader().load(url: url)
         let canvas = PreviewCanvasView(frame: CGRect(x: 0, y: 0, width: 800, height: 700))
-        canvas.setImage(decoded.image)
+        canvas.setImage(decoded.image, assetID: "real", nativeSize: CGSize(width: decoded.image.width, height: decoded.image.height))
         let baseline = try SRGBPixels(capture(canvas)).rgba
         for _ in 0..<3 {
-            canvas.setImage(nil)
+            canvas.clearImage()
             let repeated = try await ImagePreviewLoader().load(url: url)
             try check(repeated.image.width == decoded.image.width && repeated.image.height == decoded.image.height,
                       "真实图片重复读取尺寸改变")
-            canvas.setImage(repeated.image)
+            canvas.setImage(repeated.image, assetID: "real", nativeSize: CGSize(width: repeated.image.width, height: repeated.image.height))
             canvas.perform("fit")
             try check(try SRGBPixels(capture(canvas)).rgba == baseline, "真实图片重复加载后显示像素改变")
         }
@@ -126,7 +130,7 @@ enum PreviewCanvasChecks {
             CGImageDestinationAddImage(destination, try capture(canvas), nil)
             try check(CGImageDestinationFinalize(destination), "预览导出失败")
         }
-        canvas.setImage(nil)
+        canvas.clearImage()
         try check(try FileHasher.sha256(of: url) == hash, "诊断改变了原文件")
         print("原图 \(decoded.image.width)×\(decoded.image.height)，fit / 100% / 放大 / 再次 fit 绘制完成；原文件 SHA-256 不变")
     }
