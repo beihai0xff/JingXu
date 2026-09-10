@@ -27,10 +27,10 @@ class PublishTriggerTests(unittest.TestCase):
         self.git('remote', 'add', 'origin', str(self.root / 'remote.git'))
         for folder in ('Scripts', 'Packaging', 'Documentation'):
             (self.checkout / folder).mkdir()
-        for name in ('publish-release.sh', 'ci-release-metadata.py'):
+        for name in ('publish-release.sh', 'release-metadata.py'):
             shutil.copy(ROOT / 'Scripts' / name, self.checkout / 'Scripts' / name)
         # A publish helper must not run any local packaging or build program.
-        (self.checkout / 'Scripts/package-app.sh').write_text('exit 99\n')
+        (self.checkout / 'Scripts/build.sh').write_text('exit 99\n')
         with (self.checkout / 'Packaging/Info.plist').open('wb') as stream:
             plistlib.dump(dict(CFBundleShortVersionString='1.2.3', CFBundleVersion='1',
                                CFBundleIdentifier='app.jingxu.desktop'), stream)

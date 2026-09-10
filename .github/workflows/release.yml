@@ -15,51 +15,38 @@ concurrency:
 
 jobs:
   build:
+    if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
     runs-on: macos-15
     timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build and check
+        run: zsh Scripts/build.sh check
+
+  sign:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: release
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       commit: ${{ steps.metadata.outputs.commit }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify runner and toolchain
-        run: |
-          test "$(uname -m)" = arm64
-          xcodebuild -version
-          swift --version
-      - name: Check release metadata tests
-        run: python3 -m unittest discover -s Tests/ReleasePipeline -v
-      - name: Validate tag and prepare notes
+      - name: Validate tag against main and application version
         id: metadata
         env:
           RELEASE_REF: ${{ github.ref }}
         run: |
-          if [[ "$RELEASE_REF" == refs/tags/* ]]; then
-            git merge-base --is-ancestor HEAD origin/main
-          fi
-          python3 Scripts/ci-release-metadata.py --ref "$RELEASE_REF" --output "$RUNNER_TEMP/jingxu-release"
-      - name: Debug and Release builds
-        run: |
-          swift build
-          swift build -c release
-      - name: Full regression checks
-        run: swift run -c release JingXuChecks
-
-  sign:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: build
-    runs-on: macos-15
-    timeout-minutes: 90
-    environment: release
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ needs.build.outputs.commit }}
-          persist-credentials: false
-      - name: Sign and notarize with an isolated keychain
+          git merge-base --is-ancestor HEAD origin/main
+          python3 Scripts/release-metadata.py --ref "$RELEASE_REF" --output "$RUNNER_TEMP/jingxu-release"
+      - name: Build, check, sign and notarize with an isolated keychain
         env:
           DEVELOPER_ID_APPLICATION: ${{ vars.DEVELOPER_ID_APPLICATION }}
           DEVELOPER_TEAM_ID: ${{ vars.DEVELOPER_TEAM_ID }}
@@ -68,31 +55,19 @@ jobs:
           DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: bash Scripts/ci-package-app.sh
-      - name: Prepare release notes
-        env:
-          RELEASE_REF: ${{ github.ref }}
-        run: python3 Scripts/ci-release-metadata.py --ref "$RELEASE_REF" --output "$RUNNER_TEMP/jingxu-release"
-      - name: Verify release files
-        env:
-          VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          cd outputs
-          shasum -a 256 -c "JingXu-${VERSION}-macOS-arm64.dmg.sha256"
-          hdiutil verify "JingXu-${VERSION}-macOS-arm64.dmg"
-          cp "$RUNNER_TEMP/jingxu-release/RELEASE.md" RELEASE.md
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jingxu-macos-arm64
           path: |
-            outputs/JingXu-${{ needs.build.outputs.version }}-macOS-arm64.dmg
-            outputs/JingXu-${{ needs.build.outputs.version }}-macOS-arm64.dmg.sha256
+            outputs/JingXu-${{ steps.metadata.outputs.version }}-macOS-arm64.dmg
+            outputs/JingXu-${{ steps.metadata.outputs.version }}-macOS-arm64.dmg.sha256
             outputs/RELEASE.md
           if-no-files-found: error
           retention-days: 14
 
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: [build, sign]
+    needs: sign
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -107,8 +82,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-          VERSION: ${{ needs.build.outputs.version }}
-          BUILT_COMMIT: ${{ needs.build.outputs.commit }}
+          VERSION: ${{ needs.sign.outputs.version }}
+          BUILT_COMMIT: ${{ needs.sign.outputs.commit }}
         shell: bash
         run: |
           set -euo pipefail
@@ -160,7 +135,7 @@ jobs:
           gh release view "$RELEASE_TAG" --json url,isDraft,isPrerelease
 
   update-cask:
-    needs: [build, publish]
+    needs: [sign, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:

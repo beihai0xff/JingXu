@@ -58,21 +58,15 @@ Swift Package，工具版本声明为 Swift 6.1，最低 macOS 14。界面使用
 
 ## 开发与验证
 
-在仓库根目录运行。先用 `swift --version` 确认实际工具链，不沿用 README 对某台机器的历史描述。
+本地与 CI 共用构建入口，在仓库根目录运行：
 
 ```bash
-swift build
-swift run JingXuChecks
+zsh Scripts/build.sh check
 ```
 
 `JingXuChecks` 是可执行 target，当前不是 XCTest test target；不要用 `swift test` 代替项目回归。新增检查放进相应检查文件，并注册或接入 `JingXuChecks.swift` 的执行链，保证真实运行。
 
-涉及 Swift 行为、并发、性能或发布前，补充 Release 验证；这也是 CI 的主要校验路径：
-
-```bash
-swift build -c release
-swift run -c release JingXuChecks
-```
+该入口显示实际工具链，验证版本元数据和发布脚本，按 `Package.resolved` 固定依赖，以 arm64 构建全部 Debug / Release target，并执行 Release 版 `JingXuChecks`。编译参数和校验顺序只维护在此脚本中，不在 CI 或打包脚本内另写一套。
 
 修改发布元数据、Cask 或流水线时运行：
 
@@ -89,7 +83,7 @@ python3 -m unittest discover -s Tests/ReleasePipeline -v
 
 默认图库位置由 `JingXuPaths` 解析；沙盒应用实际位置受容器影响，不硬编码开发者机器路径。私有照片、路径清单、指纹、人工标签和校准报告必须留在所有 Git 仓库之外，不能提交或附到公开日志中。不要提交数据库、凭据、证书私钥或生成的安装包。
 
-打包按 `Documentation/ReleasePipeline.md` 和 `Packaging/ReleaseChecklist.md` 执行：测试包入口为 `zsh Scripts/package-test-app.sh`，正式签名包入口为 `Scripts/package-app.sh`。版本读取 `Packaging/Info.plist`，不要从 README 复制旧版本。正式签名或公证失败应停止，不能降级或关闭系统保护。
+打包按 `Documentation/ReleasePipeline.md` 和 `Packaging/ReleaseChecklist.md` 执行：测试包使用 `zsh Scripts/build.sh adhoc`，正式签名包使用 `zsh Scripts/build.sh release`。两者先执行完整构建回归，共用应用组装与 DMG 生成；CI 的 `Scripts/ci-package-app.sh` 仅准备和清理签名凭据。版本读取 `Packaging/Info.plist`，不要从 README 复制旧版本。正式签名或公证失败应停止，不能降级或关闭系统保护。
 
 推送 `v*` 标签会触发发布，并在成功后更新 Cask。只有任务包含发布时才执行发布动作；开发修复不隐含替换已安装应用、操作真实图库或推送发布标签。已有版本产物不得覆盖。
 
