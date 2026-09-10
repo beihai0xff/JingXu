@@ -1,8 +1,8 @@
 cask "jingxu" do
-  version "0.2.8"
-  sha256 "899659c9dc1e4845262c201485c51cf98a9d799a247a95df34249ec008b4724f"
+  version "0.3.0"
+  sha256 "2367456f1770959cff32192ac4d66b6d1001eedecd2bef9dcc63537236522850"
 
-  url "https://github.com/beihai0xff/JingXu/releases/download/v#{version}/JingXu-0.2.8-test.17-macOS-arm64.dmg"
+  url "https://github.com/beihai0xff/JingXu/releases/download/v#{version}/JingXu-0.3.0-test.18-macOS-arm64.dmg"
   name "镜序"
   name "JingXu"
   desc "Offline camera photo catalog and organizer"
@@ -17,5 +17,7 @@ cask "jingxu" do
     Quit JingXu and finish or safely cancel catalog tasks before upgrading.
     This prerelease is ad-hoc signed and not notarized by Apple.
     Catalog data is kept outside the app; no catalog cleanup is performed.
+    JingXu 0.3.0 requires the new catalog format and does not migrate 0.2.x catalogs.
+    Keep the matching older app to open existing 0.2.x catalogs; back up before upgrading.
   EOS
 end
