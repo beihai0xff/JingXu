@@ -28,7 +28,7 @@ public protocol CatalogRepository: Sendable {
 
 public actor CatalogStore: CatalogRepository {
     public let databasePath: String
-    private let dbPool: DatabasePool
+    let dbPool: DatabasePool
 
     public init(databaseURL: URL) throws {
         try FileManager.default.createDirectory(
@@ -45,7 +45,7 @@ public actor CatalogStore: CatalogRepository {
             try db.execute(sql: "PRAGMA synchronous = NORMAL")
         }
         dbPool = try DatabasePool(path: databaseURL.path, configuration: configuration)
-        try Self.makeMigrator().migrate(dbPool)
+        try Self.createCurrentSchema(dbPool)
         try CatalogUpgradeCoordinator.validate(dbPool)
         try Data().write(to: databaseURL.appendingPathExtension("initialized"), options: .atomic)
     }
@@ -58,13 +58,14 @@ public actor CatalogStore: CatalogRepository {
         return try CatalogStore(databaseURL: url)
     }
 
-    private static func makeMigrator() -> DatabaseMigrator {
-        var migrator = DatabaseMigrator()
-        migrator.registerMigration("v1-create-catalog") { db in
+    private static func createCurrentSchema(_ writer: DatabasePool) throws {
+        try writer.write { db in
+            if try Int.fetchOne(db, sql: "PRAGMA user_version") == CatalogUpgradeCoordinator.schemaVersion { return }
             try db.create(table: "sourceRoots") { table in
                 table.column("id", .text).primaryKey()
                 table.column("name", .text).notNull()
                 table.column("bookmarkData", .blob)
+                table.column("directoryIdentityJSON", .text)
                 table.column("pathHint", .text).notNull()
                 table.column("volumeIdentifier", .text)
                 table.column("isOnline", .boolean).notNull().defaults(to: true)
@@ -121,6 +122,10 @@ public actor CatalogStore: CatalogRepository {
                 table.column("suggestionState", .text).notNull().indexed()
                 table.column("similarGroupID", .text).indexed()
                 table.column("analyzedAt", .datetime).notNull()
+                table.column("assessmentStatus", .text)
+                table.column("diagnosticJSON", .text)
+                table.column("fingerprintJSON", .text)
+                table.column("analysisError", .text)
             }
 
             try db.create(table: "albums") { table in
@@ -162,27 +167,12 @@ public actor CatalogStore: CatalogRepository {
                 table.column("createdAt", .datetime).notNull()
                 table.column("updatedAt", .datetime).notNull()
             }
-        }
-        migrator.registerMigration("v2-file-identity-index") { db in
             try db.create(index: "mediaAssets_fileIdentifier", on: "mediaAssets", columns: ["fileIdentifier"])
-        }
-        migrator.registerMigration("v3-source-directory-identity") { db in
-            try db.alter(table: "sourceRoots") { $0.add(column: "directoryIdentityJSON", .text) }
             try db.create(index: "sourceRoots_directoryIdentity", on: "sourceRoots", columns: ["directoryIdentityJSON"])
-        }
-        migrator.registerMigration("v4-quality-assessment") { db in
-            try db.alter(table: "analysisResults") { table in
-                table.add(column: "assessmentStatus", .text)
-                table.add(column: "diagnosticJSON", .text)
-                table.add(column: "fingerprintJSON", .text)
-                table.add(column: "analysisError", .text)
-            }
-            try db.execute(sql: "UPDATE analysisResults SET assessmentStatus = 'legacy' WHERE algorithmVersion < 2")
             try db.create(index: "analysisResults_qualityStatus", on: "analysisResults", columns: ["algorithmVersion", "assessmentStatus", "suggestionState"])
             try db.create(table: "qualityJobItems") { table in
                 table.column("jobID", .text).notNull().references("backgroundJobs", onDelete: .cascade)
                 table.column("ordinal", .integer).notNull()
-                // Keep the confirmation snapshot even when the asset is subsequently removed.
                 table.column("assetID", .text).notNull()
                 table.column("state", .text).notNull().defaults(to: "queued")
                 table.column("errorMessage", .text)
@@ -190,8 +180,23 @@ public actor CatalogStore: CatalogRepository {
                 table.uniqueKey(["jobID", "assetID"])
             }
             try db.create(index: "qualityJobItems_pending", on: "qualityJobItems", columns: ["jobID", "state", "ordinal"])
+            try db.create(table: "colorEdits") { table in
+                table.column("assetID", .text).primaryKey().references("mediaAssets", onDelete: .cascade)
+                table.column("adjustmentsJSON", .text).notNull()
+                table.column("fingerprintJSON", .text).notNull()
+                table.column("revision", .integer).notNull()
+                table.column("isEdited", .boolean).notNull()
+                table.column("updatedAt", .datetime).notNull()
+            }
+            try db.create(table: "colorPresets") { table in
+                table.column("id", .text).primaryKey()
+                table.column("name", .text).notNull()
+                table.column("patchJSON", .text).notNull()
+                table.column("updatedAt", .datetime).notNull()
+            }
+            try db.execute(sql: "PRAGMA user_version = \(CatalogUpgradeCoordinator.schemaVersion)")
+            try db.execute(sql: "PRAGMA application_id = \(CatalogUpgradeCoordinator.applicationID)")
         }
-        return migrator
     }
 
     public func upsertSource(_ source: SourceRoot) throws {
@@ -287,11 +292,24 @@ public actor CatalogStore: CatalogRepository {
                     }
                 }
                 if conflict { report.skipped.append("\(keeper.pathHint)：文件身份冲突或未知"); continue }
+                var colorConflict = false
+                for records in byPath.values {
+                    let edits = try records.compactMap { try ColorEditRecord.fetchOne(db, key: $0.id) }
+                    if let first = edits.first {
+                        let adjustments = try first.adjustments
+                        if try edits.dropFirst().contains(where: { try $0.adjustments != adjustments }) { colorConflict = true }
+                    }
+                }
+                if colorConflict { report.skipped.append("\(keeper.pathHint)：调色记录冲突，请先统一调整后再合并"); continue }
                 for records in byPath.values {
                     var target = records[0]
                     if records.count > 1 {
                         var merged = try UserAnnotation.fetchOne(db, key: target.id) ?? UserAnnotation(assetID: target.id, updatedAt: .distantPast)
                         var keywords = merged.keywords
+                        if var edit = try records.compactMap({ try ColorEditRecord.fetchOne(db, key: $0.id) }).first {
+                            edit.assetID = target.id
+                            try edit.save(db)
+                        }
                         for record in records.dropFirst() {
                             let value = try UserAnnotation.fetchOne(db, key: record.id) ?? UserAnnotation(assetID: record.id, updatedAt: .distantPast)
                             keywords += value.keywords
@@ -514,7 +532,7 @@ public actor CatalogStore: CatalogRepository {
 
     private static func assetQuerySQL(_ query: AssetQuery, rejectedOnly: Bool, photosOnly: Bool = false,
                                      legacyOnly: Bool = false, projection: String? = nil, assetID: String? = nil) -> (String, StatementArguments) {
-        var joins = "LEFT JOIN annotations an ON an.assetID = a.id LEFT JOIN analysisResults ar ON ar.assetID = a.id"
+        var joins = "LEFT JOIN annotations an ON an.assetID = a.id LEFT JOIN analysisResults ar ON ar.assetID = a.id LEFT JOIN colorEdits ce ON ce.assetID = a.id"
         var conditions: [String] = []
         var arguments: StatementArguments = []
         if rejectedOnly { conditions.append("a.kind = 'photo' AND an.flag = 'rejected'") }
@@ -575,7 +593,9 @@ public actor CatalogStore: CatalogRepository {
                    COALESCE(an.flag, 'none') AS flag,
                    COALESCE(an.keywordsJSON, '[]') AS keywordsJSON,
                    ar.issuesJSON, ar.suggestionState, ar.algorithmVersion, ar.assessmentStatus,
-                   ar.diagnosticJSON, ar.analysisError, ar.similarGroupID
+                   ar.diagnosticJSON, ar.analysisError, ar.similarGroupID,
+                   COALESCE(ce.revision, 0) AS colorRevision, COALESCE(ce.isEdited, 0) AS isColorEdited,
+                   COALESCE(a.fileIdentifier, '') || '|' || a.fileSize || '|' || a.modifiedAt AS fileVersion
             """
         let sql = """
             SELECT \(columns)

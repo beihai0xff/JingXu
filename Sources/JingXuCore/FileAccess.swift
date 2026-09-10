@@ -4,6 +4,13 @@ import UniformTypeIdentifiers
 
 public enum JingXuPaths {
     public static func applicationSupport() throws -> URL {
+        // Explicit UI-test isolation applies to the whole catalog, backups, journals and caches.
+        if let path = ProcessInfo.processInfo.environment["JINGXU_UI_TEST_ROOT"] {
+            guard path.hasPrefix("/"), path != "/" else { throw CocoaError(.fileReadInvalidFileName) }
+            let isolated = URL(fileURLWithPath: path, isDirectory: true)
+            try FileManager.default.createDirectory(at: isolated, withIntermediateDirectories: true)
+            return isolated
+        }
         let base = try FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,

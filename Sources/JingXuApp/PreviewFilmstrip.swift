@@ -62,6 +62,9 @@ private struct FilmstripCell: View {
                     .foregroundStyle(.white).padding(3)
             }
         }
+        .overlay(alignment: .topLeading) {
+            if item.isColorEdited { Image(systemName: "slider.horizontal.3").font(.caption2).padding(3).background(.purple).help("已调色") }
+        }
         .overlay(alignment: .bottom) {
             if item.rating > 0 {
                 Text(String(repeating: "★", count: min(5, item.rating)))
@@ -73,7 +76,7 @@ private struct FilmstripCell: View {
         .background(selected ? Color.accentColor.opacity(0.22) : Color.clear)
         .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: selected ? 2 : 1))
         .contentShape(Rectangle())
-        .task(id: item.id) {
+        .task(id: "\(item.id)-\(item.fileVersion)-\(item.colorRevision)") {
             thumbnail = nil
             loading = true
             let result = await model.thumbnail(for: item, pixelSize: 192)

@@ -54,17 +54,29 @@ final class AppModel: ObservableObject {
     @Published var sourceMergePlan: SourceMergePlan?
     private let histogramProvider = HistogramProvider()
     private var deletionCoordinator: DeletionCoordinator?
+    @Published var colorEditor: ColorEditSession?
+    @Published var colorPresets: [ColorPreset] = []
+    @Published var copiedColorPatch: ColorPatch?
+    @Published var isShowingColorPresets = false
+    @Published var colorBatchPlan: ColorBatchPlan?
+    @Published var colorExportPlan: ColorExportPlan?
+    @Published var isShowingColorExport = false
+    @Published var colorUndoPlan: ColorBatchPlan?
+    @Published var isPreviewTransitioning = false
+    var colorExportCoordinator: ColorExportCoordinator?
+    var colorThumbnails: ColorThumbnailProvider?
+    var colorEditorObservation: AnyCancellable?
     @Published var previewAsset: AssetListItem?
     private var previewNavigation = PreviewNavigation(photoIDs: [])
 
     let volumeMonitor = VolumeMonitor()
 
-    private var store: CatalogStore?
+    var store: CatalogStore?
     private var scanner: DefaultSourceScanner?
     private var importer: ImportCoordinator?
     private var analysisCoordinator: AnalysisCoordinator?
     private var reanalysisCoordinator: QualityReanalysisCoordinator?
-    private var thumbnailProvider: DefaultThumbnailProvider?
+    var thumbnailProvider: DefaultThumbnailProvider?
     private var xmpExporter: DefaultXMPExporter?
     private var operationTask: Task<Void, Never>?
     @Published var startupFailure: String?
@@ -110,6 +122,9 @@ final class AppModel: ObservableObject {
             self.reanalysisCoordinator = QualityReanalysisCoordinator(store: store, analyzer: self.analysisCoordinator)
             self.thumbnailProvider = try DefaultThumbnailProvider(cacheDirectory: JingXuPaths.thumbnailCache())
             self.xmpExporter = DefaultXMPExporter(repository: store)
+            self.colorExportCoordinator = ColorExportCoordinator(store: store)
+            self.colorThumbnails = ColorThumbnailProvider(directory: try JingXuPaths.thumbnailCache())
+            self.colorPresets = try await store.colorPresets()
         } catch {
             store = nil
             scanner = nil
@@ -119,6 +134,10 @@ final class AppModel: ObservableObject {
             thumbnailProvider = nil
             xmpExporter = nil
             deletionCoordinator = nil
+            archiveCoordinator = nil
+            colorExportCoordinator = nil
+            colorThumbnails = nil
+            colorPresets = []
             startupFailure = "初始化图库失败：\(error.localizedDescription)"
             isStarting = false; isWorking = false
             return
@@ -153,7 +172,7 @@ final class AppModel: ObservableObject {
         guard panel.runModal() == .OK, let backup = panel.url else { return }
         let alert = NSAlert()
         alert.messageText = "恢复升级前图库？"
-        alert.informativeText = "\(backup.path)\n备份之后的图库变更会回退。当前数据库及日志会先保全，原照片不会修改。恢复完成后本版本将重新检查并迁移图库；如需回退程序版本，请退出后使用匹配版本。"
+        alert.informativeText = "\(backup.path)\n备份之后的图库变更会回退。当前数据库及日志会先保全，原照片不会修改。恢复完成后本版本将检查图库格式；旧格式需使用匹配的旧版镜序打开；如需回退程序版本，请退出后使用匹配版本。"
         alert.addButton(withTitle: "取消"); alert.addButton(withTitle: "保全当前数据并恢复")
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         isStarting = true
@@ -286,9 +305,11 @@ final class AppModel: ObservableObject {
 
     func openPreview(_ item: AssetListItem) {
         guard item.kind == .photo, !isDeleting else { return }
-        selectAsset(item)
-        previewNavigation = PreviewNavigation(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
-        previewAsset = item
+        transitionPreview {
+            self.selectAsset(item)
+            self.previewNavigation = PreviewNavigation(photoIDs: self.assets.filter { $0.kind == .photo }.map(\.id))
+            self.previewAsset = item
+        }
     }
     func selectAsset(_ item: AssetListItem) {
         selectedAssetID = item.id
@@ -296,11 +317,14 @@ final class AppModel: ObservableObject {
         NSApp.keyWindow?.makeFirstResponder(nil)
     }
     func closePreview() {
-        previewAsset = nil
-        previewNavigation = PreviewNavigation(photoIDs: [])
+        transitionPreview {
+            self.previewAsset = nil
+            self.previewNavigation = PreviewNavigation(photoIDs: [])
+        }
     }
     var previewNavigationEnabled: Bool {
-        previewAsset != nil && !isDeleting && !isShowingImport && !isShowingAlbumCreator &&
+        previewAsset != nil && !isPreviewTransitioning && !isDeleting && !isShowingImport && !isShowingAlbumCreator &&
+        !isShowingColorPresets && !isShowingColorExport && colorBatchPlan == nil && colorExportPlan == nil &&
         deletionPlan == nil && sourceMergePlan == nil && qualityReanalysisPlan == nil && errorMessage == nil
     }
     func canNavigatePreview(_ direction: Int) -> Bool {
@@ -322,8 +346,10 @@ final class AppModel: ObservableObject {
         guard previewNavigationEnabled, let current = previewAsset,
               previewNavigation.filmstripIDs(currentID: current.id).contains(id),
               let item = assets.first(where: { $0.id == id && $0.kind == .photo }) else { return }
-        selectAsset(item)
-        previewAsset = item
+        transitionPreview {
+            self.selectAsset(item)
+            self.previewAsset = item
+        }
     }
     func flagFromMenu(_ flag: AssetFlag) {
         guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil,
@@ -334,6 +360,11 @@ final class AppModel: ObservableObject {
     func loadOriginal(_ item: AssetListItem) async throws -> PreviewImage {
         guard let store, let asset = try await store.asset(id: item.id),
               let source = try await store.source(id: asset.sourceID) else { throw CocoaError(.fileNoSuchFile) }
+        if item.colorRevision > 0 {
+            let snapshot = try await store.colorSnapshot(assetID: item.id)
+            let result = try await ColorImageRenderer.shared.render(snapshot, adjustments: snapshot.adjustments)
+            return PreviewImage(image: result.image, nativeSize: result.nativeSize, isEmbedded: false, access: nil)
+        }
         let root = try BookmarkStore.resolve(source).url
         let access = PreviewAccessLease(url: root)
         return try await ImagePreviewLoader().load(url: root.appendingPathComponent(asset.relativePath), access: access)
@@ -354,14 +385,14 @@ final class AppModel: ObservableObject {
         Task { await reloadAssets() }
     }
 
-    private func checkDeletionRecovery() async throws {
+    func checkDeletionRecovery() async throws {
         if try await archiveCoordinator?.hasPending() == true {
             throw NSError(domain: "JingXu", code: 4, userInfo: [NSLocalizedDescriptionKey: "有未完成的归档，请先使用恢复／撤销归档入口处理。"])
         }
         let warnings = try await deletionCoordinator?.recover() ?? []
         if !warnings.isEmpty { throw NSError(domain: "JingXu", code: 3, userInfo: [NSLocalizedDescriptionKey: warnings.joined(separator: "\n")]) }
     }
-    private func backupURL() throws -> URL {
+    func backupURL() throws -> URL {
         try JingXuPaths.applicationSupport().appendingPathComponent("Backups/\(UUID().uuidString).sqlite")
     }
     func removeSource(_ source: SourceRoot) {
@@ -373,7 +404,7 @@ final class AppModel: ObservableObject {
                 let count = try await store.assets(sourceID: source.id).count
                 let alert = NSAlert()
                 alert.messageText = "移除来源“\(source.name)”？"
-                alert.informativeText = "\(source.pathHint)\n共 \(count) 项索引。将清理该来源的索引、评分、标签及相册成员关系，不删除硬盘照片。执行前会备份图库。"
+                alert.informativeText = "\(source.pathHint)\n共 \(count) 项索引。将清理该来源的索引、评分、标签、调色及相册成员关系，不删除硬盘照片。执行前会备份图库。"
                 alert.addButton(withTitle: "取消"); alert.addButton(withTitle: "移除来源")
                 guard alert.runModal() == .alertSecondButtonReturn else { return }
                 try await self.checkDeletionRecovery()
@@ -626,6 +657,7 @@ final class AppModel: ObservableObject {
     }
 
     func updateFlag(_ flag: AssetFlag, advanceToNext: Bool = false) {
+        guard colorEditor == nil, !isPreviewTransitioning, !isShowingColorPresets, !isShowingColorExport, colorBatchPlan == nil, colorExportPlan == nil else { return }
         guard let selectedAssetID = previewAsset?.id ?? selectedAssetID else { return }
         updateFlag(flag, assetID: selectedAssetID, advanceToNext: advanceToNext)
     }
@@ -716,8 +748,8 @@ final class AppModel: ObservableObject {
     }
 
     func exportSelectedXMP() {
-        guard let selectedAssetID, let xmpExporter else { return }
-        Task {
+        guard colorEditor == nil, !isShowingColorPresets, !isShowingColorExport, let selectedAssetID, let xmpExporter else { return }
+        startOperation { [self] in
             do {
                 let report = try await xmpExporter.export(assetIDs: [selectedAssetID], conflictPolicy: .skip)
                 if !report.skipped.isEmpty {
@@ -732,8 +764,8 @@ final class AppModel: ObservableObject {
     }
 
     func replaceSelectedXMP() {
-        guard let selectedAssetID, let xmpExporter else { return }
-        Task {
+        guard colorEditor == nil, !isShowingColorPresets, !isShowingColorExport, let selectedAssetID, let xmpExporter else { return }
+        startOperation { [self] in
             do {
                 let report = try await xmpExporter.export(assetIDs: [selectedAssetID], conflictPolicy: .replace)
                 statusText = report.written.isEmpty ? "没有写入 XMP" : "XMP 已替换"
@@ -746,6 +778,10 @@ final class AppModel: ObservableObject {
               let asset = try? await store.asset(id: item.id),
               let source = try? await store.source(id: asset.sourceID) else { return nil }
         do {
+            if item.colorRevision > 0, let colorThumbnails {
+                let snapshot = try await store.colorSnapshot(assetID: item.id)
+                return NSImage(data: try await colorThumbnails.thumbnail(snapshot, pixelSize: pixelSize))
+            }
             let root = try BookmarkStore.resolve(source).url
             let didAccess = root.startAccessingSecurityScopedResource()
             defer { if didAccess { root.stopAccessingSecurityScopedResource() } }
@@ -778,8 +814,8 @@ final class AppModel: ObservableObject {
         } catch { errorMessage = "清理缓存失败：\(error.localizedDescription)" }
     }
 
-    private func startOperation(_ work: @escaping @MainActor @Sendable () async -> Void) {
-        guard !isWorking, archivePlan == nil, deletionPlan == nil, missingAssetPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
+    func startOperation(_ work: @escaping @MainActor @Sendable () async -> Void) {
+        guard !isWorking, colorEditor == nil, !isPreviewTransitioning, colorBatchPlan == nil, colorExportPlan == nil, !isShowingColorPresets, !isShowingColorExport, archivePlan == nil, deletionPlan == nil, missingAssetPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
         isWorking = true
         operationTask = Task {
             do {
@@ -873,7 +909,7 @@ final class AppModel: ObservableObject {
     }
 
     func resumeArchive(undo: Bool) {
-        guard !isWorking, archivePlan == nil, let archiveCoordinator else { return }
+        guard !isWorking, colorEditor == nil, !isPreviewTransitioning, colorBatchPlan == nil, colorExportPlan == nil, !isShowingColorPresets, !isShowingColorExport, archivePlan == nil, let archiveCoordinator else { return }
         let alert = NSAlert()
         alert.messageText = undo ? "撤销最近一次归档？" : "继续未完成的归档？"
         alert.informativeText = "会根据日志复核文件并移动，绝不覆盖。冲突将保留并报告。"

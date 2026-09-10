@@ -1,6 +1,6 @@
 # 镜序 Agent 开发指南
 
-本指南适用于整个仓库。镜序是面向摄影爱好者的原生 macOS 相册整理工具：安全导入、非破坏式索引、本地质量分析与照片整理。默认离线，无账户、云服务或遥测；照片编辑、人脸识别、地图和云同步不属于当前范围。
+本指南适用于整个仓库。镜序是面向摄影爱好者的原生 macOS 相册整理工具：安全导入、非破坏式索引、本地质量分析、照片整理与非破坏式基础调色。默认离线，无账户、云服务或遥测；局部修图、人脸识别、地图和云同步不属于当前范围。
 
 ## 开始任务
 
@@ -31,6 +31,7 @@ Swift Package，工具版本声明为 Swift 6.1，最低 macOS 14。界面使用
 | 缩略图、原图、直方图 | Core 下的 `ThumbnailProvider.swift`、`ImagePreviewLoader.swift`、`DecodedPreview.swift`、`HistogramProvider.swift` |
 | 单图画布、导航和胶片栏 | Core 下的 `PreviewCanvas.swift`、`PreviewNavigation.swift`、`FittedThumbnail.swift`；App 下的 `ZoomPreview.swift`、`PreviewFilmstrip.swift` |
 | 质量诊断、审核和重算 | Core 下的 `QualityAnalyzer.swift`、`QualityDiagnostics.swift`、`QualityReanalysisCoordinator.swift`；App 下的 `QualityInspector.swift` |
+| 调色、预设、导出 | Core 下的 `ColorAdjustments.swift`、`ColorEditSession.swift`、`ColorImageRenderer.swift`、`ColorCatalog.swift`、`ColorXMPImporter.swift`、`ColorExportCoordinator.swift`；App 下的 `ColorActions.swift`、`ColorEditPanel.swift`、`ColorWorkflowSheets.swift` |
 | 私有人工校准工具 | `Sources/JingXuCalibration/JingXuCalibration.swift`、`Sources/JingXuCore/QualityCalibration.swift` |
 | 自动化回归 | `Tests/JingXuChecks/`；入口为 `JingXuChecks.swift` |
 | 打包与发布 | `Scripts/`、`Packaging/`、`.github/workflows/release.yml`、`Tests/ReleasePipeline/` |
@@ -87,4 +88,4 @@ python3 -m unittest discover -s Tests/ReleasePipeline -v
 
 推送 `v*` 标签会触发发布，并在成功后更新 Cask。发布通道在工作流中显式指定：`adhoc` 公开带 `test` 标识的未公证预发布版，`release` 要求 Developer ID 和公证；不得因签名失败自动切换。只有任务包含发布时才执行发布动作；开发修复不隐含替换已安装应用、操作真实图库或推送发布标签。已有版本产物不得覆盖。
 
-行为变化同步更新对应说明：移动看 `Documentation/BatchMove.md`，归档看 `Documentation/DateArchive.md`，质量分析看 `Documentation/QualityAnalysisV2.md`，发布和安装看 `Documentation/ReleasePipeline.md`、`Documentation/Homebrew.md`。交付时简述改动、验证结果和剩余限制，区分代码完成、打包完成、安装验证和已发布。
+行为变化同步更新对应说明：调色看 `Documentation/ColorEditing.md`，移动看 `Documentation/BatchMove.md`，归档看 `Documentation/DateArchive.md`，质量分析看 `Documentation/QualityAnalysisV2.md`，发布和安装看 `Documentation/ReleasePipeline.md`、`Documentation/Homebrew.md`。交付时简述改动、验证结果和剩余限制，区分代码完成、打包完成、安装验证和已发布。

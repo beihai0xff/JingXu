@@ -6,8 +6,12 @@ import UniformTypeIdentifiers
 
 public struct PreviewImage: @unchecked Sendable {
     public let image: CGImage
+    public let nativeSize: CGSize
     public let isEmbedded: Bool
     public let access: PreviewAccessLease?
+    public init(image: CGImage, nativeSize: CGSize, isEmbedded: Bool, access: PreviewAccessLease?) {
+        self.image = image; self.nativeSize = nativeSize; self.isEmbedded = isEmbedded; self.access = access
+    }
 }
 
 /// One balanced security-scope acquisition, retained by the displayed preview.
@@ -70,7 +74,10 @@ private actor PreviewDecodeWorker {
         // Materialize display pixels while access and decoding resources are still alive.
         let image = try Self.materialize(oriented)
         try Task.checkCancellation()
-        return PreviewImage(image: image, isEmbedded: embedded, access: access)
+        let size = width > 0 && height > 0
+            ? CGSize(width: (5...8).contains(orientation) ? height : width, height: (5...8).contains(orientation) ? width : height)
+            : CGSize(width: image.width, height: image.height)
+        return PreviewImage(image: image, nativeSize: size, isEmbedded: embedded, access: access)
     }
 
     private static func materialize(_ image: CGImage) throws -> CGImage {
