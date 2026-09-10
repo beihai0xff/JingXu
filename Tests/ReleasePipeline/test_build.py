@@ -70,7 +70,7 @@ elif name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
     rejected = failure == ('dmg-notary' if is_dmg else 'app-notary')
     sys.stdout.buffer.write(plistlib.dumps({'status': 'Invalid' if rejected else 'Accepted'}))
 elif name == 'hdiutil' and args[0] == 'create':
-    shutil.copytree(args[args.index('-srcfolder')+1], root / 'captured')
+    shutil.copytree(args[args.index('-srcfolder')+1], root / 'captured', symlinks=True)
     pathlib.Path(args[-1]).write_text('fixture dmg')
 elif name == 'ditto': pathlib.Path(args[-1]).write_text('fixture zip')
 '''.replace('PYTHON', sys.executable)
@@ -103,6 +103,7 @@ elif name == 'ditto': pathlib.Path(args[-1]).write_text('fixture zip')
                 self.assertEqual(cmd[cmd.index('--arch')+1], 'arm64')
         self.assertFalse(any(cmd[0] in ('security', 'xcrun') for cmd in self.commands()))
         resources = self.root / 'captured/镜序.app/Contents/Resources'
+        self.assertEqual((self.root / 'captured/应用程序').readlink(), Path('/Applications'))
         self.assertEqual(resources.stat().st_mode & 0o777, 0o755)
         self.assertTrue((resources / 'GRDB_GRDB.bundle/PrivacyInfo.xcprivacy').exists())
         info = plistlib.loads((self.root / 'captured/镜序.app/Contents/Info.plist').read_bytes())
