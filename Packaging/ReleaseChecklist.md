@@ -2,7 +2,7 @@
 
 请记录被验证的完整 Git commit SHA；不得用不同提交的检查结果发布。
 
-- [ ] Developer ID Application 证书及私钥可用，Team ID 固定；凭据仅在钥匙串。
+- [ ] Developer ID Application 证书及私钥可用，Team ID 固定；GitHub `release` 环境的三个 Secrets 和三个 Variables 已配置，凭据仅存 GitHub Secrets 与运行时钥匙串。
 - [ ] Debug / Release 构建和完整 JingXuChecks 通过。
 - [ ] v1 / v2 / v3 图库升级、WAL 备份、迁移失败、锁与恢复中断检查通过。
 - [ ] 受限目录、空间不足及真实进程中断下，停止写入且备份可恢复。
@@ -11,6 +11,7 @@
 - [ ] 直方图亮度/RGB 正常，来源移除与合并确认正确，原文件内容保持不变。
 - [ ] 应用与 DMG 签名验证、公证 Accepted、票据验证通过。
 - [ ] 启用 Gatekeeper 的下载环境中完成 DMG 打开、拖动安装与首次启动，未关闭安全保护。
-- [ ] 校验 GitHub 草稿资产的 SHA-256，版本号、构建号与提交对应；不含用户图库或凭据。
+- [ ] 流水线核对 GitHub 草稿资产的 SHA-256 后公开，版本号、构建号与提交对应；不含用户图库或凭据。
+- [ ] Release 签名、公证、服务端摘要校验均成功后，Cask 版本、摘要和安装说明更新；实际 Homebrew 升级验证通过。
 
-截至此次代码实现，Developer ID 配置、正式公证、真实 DMG 升级和完整界面验收尚未完成。当前机器仅有 Command Line Tools，未运行 XCUITest。不得将这些项目标记为已通过，也不得发布正式 Release。
+每次发布都需按实际证据填写，不沿用历史记录。流水线代码完成不代表 GitHub 凭据已配置，也不代表真实公证、Homebrew 升级或界面验收通过。

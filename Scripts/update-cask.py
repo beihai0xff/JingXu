@@ -5,12 +5,13 @@ import json
 from pathlib import Path
 import re
 import sys
+from string import Template
 
 
 def payload(release, current):
     tag = release["tag_name"]
-    if release["draft"] or not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
-        raise ValueError("Only published numeric version releases are supported")
+    if release["draft"] or release["prerelease"] or not re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", tag):
+        raise ValueError("Only published stable numeric version releases are supported")
     version = tag[1:]
     name = f"JingXu-{version}-macOS-arm64.dmg"
     assets = [a for a in release["assets"] if a["name"] == name]
@@ -35,8 +36,8 @@ def payload(release, current):
         if hashes[0] != digest[7:]:
             raise ValueError("Existing version digest changed")
         return None
-    body = body.replace(f'  version "{old[0]}"', f'  version "{version}"', 1)
-    body = body.replace(f'  sha256 "{hashes[0]}"', f'  sha256 "{digest[7:]}"', 1)
+    template = Path(__file__).resolve().parent.parent / 'Packaging/jingxu.rb.template'
+    body = Template(template.read_text()).substitute(version=version, sha256=digest[7:])
     return {"message": f"chore(cask): update JingXu to {version}", "branch": "main",
             "sha": current["sha"], "content": base64.b64encode(body.encode()).decode()}
 

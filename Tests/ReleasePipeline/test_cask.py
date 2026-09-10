@@ -13,17 +13,20 @@ class CaskTests(unittest.TestCase):
     def setUp(self):
         self.current = {"sha": "file-revision", "content": base64.b64encode(
             ('cask "jingxu" do\n  version "0.2.5"\n  sha256 "' + 'a' * 64 + '"\nend\n').encode()).decode()}
-        self.release = {"tag_name": "v0.2.6", "draft": False, "assets": [{
+        self.release = {"tag_name": "v0.2.6", "draft": False, "prerelease": False, "assets": [{
             "name": "JingXu-0.2.6-macOS-arm64.dmg", "digest": "sha256:" + "b" * 64,
             "browser_download_url": "https://github.com/beihai0xff/JingXu/releases/download/v0.2.6/JingXu-0.2.6-macOS-arm64.dmg"}]}
 
-    def test_update_preserves_cas_and_only_changes_metadata(self):
+    def test_update_preserves_cas_and_renders_signed_cask(self):
         result = module.payload(self.release, self.current)
         self.assertEqual(result["sha"], "file-revision")
         self.assertEqual(result["branch"], "main")
         body = base64.b64decode(result["content"]).decode()
         self.assertIn('version "0.2.6"', body)
         self.assertIn('sha256 "' + 'b' * 64 + '"', body)
+        self.assertIn('Developer ID signed and notarized by Apple', body)
+        self.assertIn('releases/download/v#{version}/JingXu-#{version}-macOS-arm64.dmg', body)
+        self.assertNotIn('ad-hoc', body)
 
     def test_idempotence_and_same_version_mutation(self):
         updated = module.payload(self.release, self.current)
@@ -53,6 +56,10 @@ class CaskTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             module.payload(self.release, self.current)
         self.release["draft"] = False
+        self.release["prerelease"] = True
+        with self.assertRaises(ValueError):
+            module.payload(self.release, self.current)
+        self.release["prerelease"] = False
         self.release["tag_name"] = "v0.2.6-test.1"
         with self.assertRaises(ValueError):
             module.payload(self.release, self.current)
