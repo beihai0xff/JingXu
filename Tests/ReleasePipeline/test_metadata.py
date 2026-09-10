@@ -4,7 +4,7 @@ import plistlib
 import tempfile
 import unittest
 
-spec = importlib.util.spec_from_file_location('release_metadata', Path(__file__).resolve().parents[2] / 'Scripts/ci-release-metadata.py')
+spec = importlib.util.spec_from_file_location('release_metadata', Path(__file__).resolve().parents[2] / 'Scripts/release-metadata.py')
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
@@ -25,7 +25,7 @@ class MetadataTests(unittest.TestCase):
             plistlib.dump(self.info, stream)
 
     def test_matching_tag_and_branch(self):
-        for ref in ['refs/tags/v1.2.3', 'refs/heads/main']:
+        for ref in [None, 'refs/tags/v1.2.3', 'refs/heads/main']:
             self.assertEqual(module.metadata(self.root, ref)[:2], ('1.2.3', '14'))
 
     def test_mismatched_or_unsafe_tags(self):

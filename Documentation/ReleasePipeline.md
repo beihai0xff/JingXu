@@ -2,6 +2,20 @@
 
 工作流：[release.yml](../.github/workflows/release.yml)。GitHub Actions 是唯一 Release 发布入口，本地脚本仅校验提交并推送标签。
 
+## 统一构建入口
+
+本地与 CI 均调用 `Scripts/build.sh`，支持从任意工作目录执行：
+
+```sh
+zsh Scripts/build.sh check    # 元数据、发布脚本测试、Debug / Release 构建、完整回归
+zsh Scripts/build.sh adhoc    # 完成同样检查，再生成临时签名测试 DMG
+zsh Scripts/build.sh release  # 完成同样检查，再签名、公证并生成正式 DMG
+```
+
+省略参数等同于 `check`。三种模式使用相同的 arm64 编译参数和 `Package.resolved`，构建全部 target，直接执行已构建的 Release 版 `JingXuChecks`。两种打包模式共用应用组装、SwiftPM 资源复制、DMG 与 SHA-256 生成，仅签名、公证和安装说明不同。打包入口不推送标签或创建 Release；已有版本产物须先归档或使用新版本。
+
+CI 的 `Scripts/ci-package-app.sh` 仅负责准备、清理临时签名凭据，再调用 `build.sh release`。构建和打包逻辑只维护在 `build.sh`，不在工作流中重复。
+
 ## 触发与执行顺序
 
 | 触发 | 执行内容 |
@@ -10,17 +24,17 @@
 | 手动 Run workflow | 同上，仅验证；即使选中标签也不发布 |
 | 推送 `v*` 标签 | 构建回归 → `release` 环境签名及公证 → 发布正式 Release → 更新 Homebrew Cask |
 
-标签必须为 `v主版本.次版本.补丁`，与 `Packaging/Info.plist` 一致，指向已合入 `main` 的提交。签名任务按构建任务输出的完整 commit SHA 检出源码，发布前再次核对远端标签，防止发布期间标签被移动。
+标签必须为 `v主版本.次版本.补丁`，与 `Packaging/Info.plist` 一致，指向已合入 `main` 的提交。签名任务按触发事件的完整 commit SHA 检出源码，发布前再次核对远端标签，防止发布期间标签被移动。
 
 正式发布依次执行：
 
 1. 将 Developer ID Application 证书和私钥导入临时钥匙串，并验证公证凭据。
-2. 调用 `Scripts/package-app.sh`：Release 构建、Hardened Runtime 与时间戳签名、核对 Team ID、应用公证 Accepted、附加并验证票据及 Gatekeeper 评估。
+2. 调用 `Scripts/build.sh release`：元数据与脚本测试、Debug / Release 构建及完整回归，然后进行 Hardened Runtime 与时间戳签名、核对 Team ID、应用公证 Accepted、附加并验证票据及 Gatekeeper 评估。
 3. 创建 DMG，签名、公证 Accepted、附加并验证票据，生成 SHA-256。
 4. 上传已验证产物，创建 GitHub Release 草稿，核对 DMG 和校验文件的服务端摘要，再公开为正式 Release。
 5. 从已公开 Release 读取 DMG 摘要，生成新 Cask，以 GitHub Contents API 的文件 SHA 作并发保护更新 `main`。
 
-任何凭据、签名、公证、票据或摘要检查失败，都停止后续发布；不会降级到临时签名。普通提交不再生成未公证 Actions 安装包。本地测试仍可显式使用 `zsh Scripts/package-test-app.sh`，产物带 `test` 标识，不进入发布流程。
+标签发布的构建和回归由 `sign` 作业中的统一脚本执行，跳过普通 `build` 作业，避免在两个 runner 上重复编译。任何凭据、构建、回归、签名、公证、票据或摘要检查失败，都停止后续发布；不会降级到临时签名。普通提交不生成未公证 Actions 安装包。本地测试使用 `zsh Scripts/build.sh adhoc`，产物带 `test` 标识，不进入发布流程。
 
 ## 一次性配置 GitHub
 
@@ -65,12 +79,12 @@ base64 -i /path/outside-repo/DeveloperID.p12 | pbcopy
 
    脚本校验版本和说明，创建并推送版本标签；不在本机打包或创建 Release，不需要本机安装 `gh`。也可以自行推送符合条件的新标签，验收要求相同。
 
-4. 查看 Actions 的 `build`、`sign`、`publish`、`update-cask` 四个作业。成功后在 Releases 核对下载文件，并检查 `Casks/jingxu.rb` 的版本、摘要与签名说明。
+4. 查看 Actions 的 `sign`、`publish`、`update-cask` 作业（标签发布跳过 `build`）。成功后在 Releases 核对下载文件，并检查 `Casks/jingxu.rb` 的版本、摘要与签名说明。
 5. 使用独立安装环境验证 Homebrew 更新及首次启动。脚本通过不代表真实界面、图库授权或覆盖升级已经验收。
 
 ## 本机签名验证
 
-本机具备有效签名身份并用 `xcrun notarytool store-credentials` 配置钥匙串后，可设置以下三个变量运行 `zsh Scripts/package-app.sh`：
+本机具备有效签名身份并用 `xcrun notarytool store-credentials` 配置钥匙串后，可设置以下三个变量运行 `zsh Scripts/build.sh release`：
 
 - `DEVELOPER_ID_APPLICATION`
 - `DEVELOPER_TEAM_ID`
@@ -92,7 +106,7 @@ base64 -i /path/outside-repo/DeveloperID.p12 | pbcopy
 ```sh
 python3 -m unittest discover -s Tests/ReleasePipeline -v
 bash -n Scripts/ci-package-app.sh
-zsh -n Scripts/package-app.sh Scripts/package-test-app.sh Scripts/publish-release.sh
+zsh -n Scripts/build.sh Scripts/publish-release.sh
 ruby -c Casks/jingxu.rb
 actionlint .github/workflows/release.yml
 ```

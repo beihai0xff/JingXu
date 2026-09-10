@@ -13,7 +13,7 @@ REMOTE_TAG=$(git ls-remote --tags origin "refs/tags/${TAG}")
 [[ -z "$REMOTE_TAG" ]] || { print -u2 "远端版本标签已存在，不覆盖。"; exit 1; }
 METADATA_TEMP=$(mktemp -d "${TMPDIR:-/tmp}/jingxu-release-metadata.XXXXXX")
 trap 'rm -rf "$METADATA_TEMP"' EXIT
-python3 Scripts/ci-release-metadata.py --ref "refs/tags/${TAG}" --output "$METADATA_TEMP"
+python3 Scripts/release-metadata.py --ref "refs/tags/${TAG}" --output "$METADATA_TEMP"
 git tag -a "$TAG" "$COMMIT" -m "JingXu ${VERSION}"
 git push origin "refs/tags/${TAG}"
 print "已推送 ${TAG}。GitHub Actions 将统一执行构建、签名、公证、Release 和 Cask 更新。"

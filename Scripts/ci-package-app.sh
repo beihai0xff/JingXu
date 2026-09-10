@@ -43,4 +43,4 @@ xcrun notarytool store-credentials "$NOTARY_KEYCHAIN_PROFILE" \
   --keychain "$NOTARY_KEYCHAIN_PATH" --apple-id "$APPLE_ID" \
   --team-id "$DEVELOPER_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD"
 unset DEVELOPER_ID_P12_BASE64 DEVELOPER_ID_P12_PASSWORD APPLE_APP_SPECIFIC_PASSWORD KEYCHAIN_PASSWORD
-zsh "$(dirname "$0")/package-app.sh"
+zsh "$(dirname "$0")/build.sh" release

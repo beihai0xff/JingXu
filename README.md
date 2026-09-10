@@ -124,9 +124,10 @@ brew upgrade --cask beihai0xff/jingxu/jingxu
 开发需要 macOS 和支持 Swift 6.1 的工具链。在仓库根目录运行：
 
 ```sh
-swift build
-swift run JingXuChecks
+zsh Scripts/build.sh check
 ```
+
+该入口与 CI 共用，执行版本与发布脚本检查、Debug / Release 构建和完整回归。生成临时签名测试包使用 `zsh Scripts/build.sh adhoc`；配置 Developer ID 和公证凭据后，使用 `zsh Scripts/build.sh release` 生成正式签名包。安装包输出到 `outputs/`，详见[打包与发布](Documentation/ReleasePipeline.md)。
 
 本地启动界面使用 `swift run JingXuApp`，也可以通过 Xcode 打开 `Package.swift`。启动会访问默认图库，开发验收请使用隔离环境。
 

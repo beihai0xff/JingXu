@@ -39,6 +39,8 @@ if [[ "$name" == xcrun ]]; then
   test -f "$NOTARY_KEYCHAIN_PATH"
 fi
 if [[ "$name" == zsh ]]; then
+  test "$(basename "$1")" = build.sh
+  test "$2" = release
   test -z "${DEVELOPER_ID_P12_BASE64:-}"
   test -z "${DEVELOPER_ID_P12_PASSWORD:-}"
   test -z "${APPLE_APP_SPECIFIC_PASSWORD:-}"

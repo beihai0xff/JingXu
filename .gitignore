@@ -9,3 +9,4 @@
 /outputs/*.sha256
 *.xcuserstate
 xcuserdata/
+/outputs/RELEASE.md

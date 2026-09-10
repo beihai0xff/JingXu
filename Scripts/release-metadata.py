@@ -8,7 +8,7 @@ import re
 import subprocess
 
 
-def metadata(root: Path, ref: str):
+def metadata(root: Path, ref=None):
     with (root / 'Packaging/Info.plist').open('rb') as stream:
         info = plistlib.load(stream)
     version = info['CFBundleShortVersionString']
@@ -17,9 +17,9 @@ def metadata(root: Path, ref: str):
         raise ValueError('Application version must be major.minor.patch')
     if not isinstance(build, str) or not re.fullmatch(r'[1-9]\d*', build):
         raise ValueError('Build number must be a positive integer')
-    if ref.startswith('refs/tags/') and ref != f'refs/tags/v{version}':
+    if ref is not None and ref.startswith('refs/tags/') and ref != f'refs/tags/v{version}':
         raise ValueError(f'Tag must match application version v{version}')
-    if not ref.startswith(('refs/tags/', 'refs/heads/')):
+    if ref is not None and not ref.startswith(('refs/tags/', 'refs/heads/')):
         raise ValueError('Unsupported ref')
     if info['CFBundleIdentifier'] != 'app.jingxu.desktop':
         raise ValueError('Do not change the existing catalog application identity')
@@ -31,7 +31,7 @@ def metadata(root: Path, ref: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ref', required=True)
+    parser.add_argument('--ref', help='Also validate the CI ref or a tag being published')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
