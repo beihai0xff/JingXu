@@ -4,22 +4,31 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var keywordDraft = ""
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var showsPreviewFilmstrip = true
+    @State private var showsPreviewInspector = false
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: model.gridSize, maximum: model.gridSize * 1.35), spacing: 12)]
     }
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 300)
-        } content: {
-            libraryGrid
-                .navigationSplitViewColumnWidth(min: 560, ideal: 760)
-        } detail: {
-            inspector
-                .disabled(model.isDeleting)
-                .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 420)
+        Group {
+            if let item = model.previewAsset {
+                photoPreview(item)
+            } else {
+                NavigationSplitView(columnVisibility: $columnVisibility) {
+                    sidebar
+                        .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 300)
+                } content: {
+                    libraryGrid
+                        .navigationSplitViewColumnWidth(min: 560, ideal: 760)
+                } detail: {
+                    inspector
+                        .disabled(model.isDeleting)
+                        .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 420)
+                }
+            }
         }
         .toolbar { toolbar }
         .sheet(item: $model.archivePlan) { plan in
@@ -131,6 +140,33 @@ struct ContentView: View {
         }
     }
 
+    private func photoPreview(_ item: AssetListItem) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    ZoomPreview(item: item, showsFilmstrip: $showsPreviewFilmstrip, showsInspector: $showsPreviewInspector)
+                        .id(item.id)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if showsPreviewFilmstrip {
+                        PreviewFilmstrip(items: model.previewFilmstrip, currentID: item.id)
+                    }
+                }
+                if showsPreviewInspector {
+                    Divider()
+                    inspector
+                        .disabled(model.isDeleting)
+                        .frame(width: 300)
+                }
+            }
+            if model.isWorking || model.resumableQualityJob != nil {
+                Divider()
+                statusBar
+            }
+        }
+        .background(.black)
+        .environment(\.colorScheme, .dark)
+    }
+
     private var sidebar: some View {
         List(selection: $model.sidebarSelection) {
             Section("图库") {
@@ -180,32 +216,25 @@ struct ContentView: View {
     private var libraryGrid: some View {
         VStack(spacing: 0) {
             filterBar
-            if model.previewAsset == nil {
-                HStack {
-                    Toggle("批量选择", isOn: $model.isBatchSelecting)
-                        .toggleStyle(.button)
-                        .onChange(of: model.isBatchSelecting) { _, enabled in
-                            if !enabled { model.batchSelection.removeAll() }
-                        }
-                    if model.isBatchSelecting {
-                        Text("已选 \(model.batchSelection.count) 张")
-                        Button("全选当前照片") { model.selectVisiblePhotos() }
-                        Button("清空选择") { model.batchSelection.removeAll() }
-                        Button("移动到目录…") { model.prepareBatchMove() }
-                            .disabled(model.batchSelection.isEmpty || model.archivePending)
+            HStack {
+                Toggle("批量选择", isOn: $model.isBatchSelecting)
+                    .toggleStyle(.button)
+                    .onChange(of: model.isBatchSelecting) { _, enabled in
+                        if !enabled { model.batchSelection.removeAll() }
                     }
-                    Spacer()
+                if model.isBatchSelecting {
+                    Text("已选 \(model.batchSelection.count) 张")
+                    Button("全选当前照片") { model.selectVisiblePhotos() }
+                    Button("清空选择") { model.batchSelection.removeAll() }
+                    Button("移动到目录…") { model.prepareBatchMove() }
+                        .disabled(model.batchSelection.isEmpty || model.archivePending)
                 }
-                .disabled(model.isWorking)
-                .padding(8)
+                Spacer()
             }
+            .disabled(model.isWorking)
+            .padding(8)
             Divider()
-            if let item = model.previewAsset {
-                ZoomPreview(item: item)
-                    .id(item.id)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                PreviewFilmstrip(items: model.previewFilmstrip, currentID: item.id)
-            } else if model.assets.isEmpty {
+            if model.assets.isEmpty {
                 ContentUnavailableView {
                     Label(model.hasUserFilters ? "当前筛选无匹配结果" : "当前范围暂无照片", systemImage: "photo.on.rectangle.angled")
                 } description: {
@@ -307,9 +336,11 @@ struct ContentView: View {
                 Button("继续") { model.resumeQualityReanalysis() }.buttonStyle(.borderless)
                 Button("取消重算") { model.cancelPausedQualityJob() }.buttonStyle(.borderless)
             }
-            Image(systemName: "photo")
-            Slider(value: $model.gridSize, in: 100...260)
-                .frame(width: 110)
+            if model.previewAsset == nil {
+                Image(systemName: "photo")
+                Slider(value: $model.gridSize, in: 100...260)
+                    .frame(width: 110)
+            }
         }
         .padding(.horizontal, 12)
         .frame(height: 30)
@@ -423,17 +454,19 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
-            Button("按日期重新归档…") { model.prepareArchive() }.disabled(model.isWorking || model.archivePending)
-            Button("恢复未完成归档…") { model.resumeArchive(undo: false) }.disabled(model.isWorking || !model.archivePending)
-            Button("撤销最近一次归档…") { model.resumeArchive(undo: true) }.disabled(model.isWorking)
-            Button("清理失效索引…", systemImage: "photo.badge.exclamationmark") { model.prepareMissingAssetCleanup() }
-                .disabled(model.isWorking || model.missingAssetPlan != nil)
-            Button("整理重复来源…", systemImage: "folder.badge.gearshape") { model.prepareSourceMerge() }
-                .disabled(model.isWorking || model.sourceMergePlan != nil || model.deletionPlan != nil)
-            Button("清理淘汰图片…", systemImage: "trash") { model.prepareDeletion() }
-                .disabled(model.isWorking || model.deletionPlan != nil)
-            Button { model.chooseAndAddFolder() } label: { Label("添加文件夹", systemImage: "folder.badge.plus") }
-            Button { model.isShowingImport = true } label: { Label("从相机卡导入", systemImage: "externaldrive.badge.plus") }
+            if model.previewAsset == nil {
+                Button("按日期重新归档…") { model.prepareArchive() }.disabled(model.isWorking || model.archivePending)
+                Button("恢复未完成归档…") { model.resumeArchive(undo: false) }.disabled(model.isWorking || !model.archivePending)
+                Button("撤销最近一次归档…") { model.resumeArchive(undo: true) }.disabled(model.isWorking)
+                Button("清理失效索引…", systemImage: "photo.badge.exclamationmark") { model.prepareMissingAssetCleanup() }
+                    .disabled(model.isWorking || model.missingAssetPlan != nil)
+                Button("整理重复来源…", systemImage: "folder.badge.gearshape") { model.prepareSourceMerge() }
+                    .disabled(model.isWorking || model.sourceMergePlan != nil || model.deletionPlan != nil)
+                Button("清理淘汰图片…", systemImage: "trash") { model.prepareDeletion() }
+                    .disabled(model.isWorking || model.deletionPlan != nil)
+                Button { model.chooseAndAddFolder() } label: { Label("添加文件夹", systemImage: "folder.badge.plus") }
+                Button { model.isShowingImport = true } label: { Label("从相机卡导入", systemImage: "externaldrive.badge.plus") }
+            }
         }
     }
 }
