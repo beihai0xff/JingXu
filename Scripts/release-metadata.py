@@ -32,18 +32,24 @@ def metadata(root: Path, ref=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--ref', help='Also validate the CI ref or a tag being published')
+    parser.add_argument('--mode', choices=('check', 'adhoc', 'release'), default='check')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     version, build, notes = metadata(root, args.ref)
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
     args.output.mkdir(parents=True, exist_ok=True)
-    notice = ('> 安装前先结束后台任务、退出旧应用并备份图库，再拖动替换安装。'
-              '首次切换到 Developer ID 签名版本时，可能需要重新授权原容器或照片目录。\n\n')
+    notice = '> 安装前先结束后台任务、退出旧应用并备份图库，再拖动替换安装。\n\n'
+    if args.mode == 'adhoc':
+        notice += '> 本包为 ad-hoc 签名、未经 Apple 公证的预发布版，可能被 Gatekeeper 拦截；不要关闭系统安全保护。\n\n'
+    elif args.mode == 'release':
+        notice += '> 本包使用 Developer ID 签名并经 Apple 公证；首次切换签名时可能需要重新授权原容器或照片目录。\n\n'
+    suffix = f'-test.{build}' if args.mode == 'adhoc' else ''
+    dmg = f'JingXu-{version}{suffix}-macOS-arm64.dmg'
     (args.output / 'RELEASE.md').write_text(notice + notes + f'\n\n构建 {build} · 源提交 `{commit}`\n')
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-            output.write(f'version={version}\ncommit={commit}\n')
+            output.write(f'version={version}\ncommit={commit}\ndmg={dmg}\nprerelease={str(args.mode == "adhoc").lower()}\n')
     print(f'Validated v{version} (build {build}) at {commit}')
 
 

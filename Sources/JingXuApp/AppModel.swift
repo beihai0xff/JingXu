@@ -50,6 +50,7 @@ final class AppModel: ObservableObject {
     @Published var archivePending = false
     private var archiveCoordinator: ArchiveCoordinator?
     @Published var isDeleting = false
+    @Published private(set) var isSavingFlag = false
     @Published var sourceMergePlan: SourceMergePlan?
     private let histogramProvider = HistogramProvider()
     private var deletionCoordinator: DeletionCoordinator?
@@ -328,8 +329,7 @@ final class AppModel: ObservableObject {
         guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil,
               !isShowingImport, !isShowingAlbumCreator else { return }
         guard NSApp.keyWindow?.title == "镜序" else { return }
-        if let id = previewAsset?.id { updateFlag(flag, assetID: id) }
-        else { updateFlag(flag) }
+        updateFlag(flag, advanceToNext: flag == .rejected)
     }
     func loadOriginal(_ item: AssetListItem) async throws -> PreviewImage {
         guard let store, let asset = try await store.asset(id: item.id),
@@ -625,20 +625,43 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func updateFlag(_ flag: AssetFlag) {
+    func updateFlag(_ flag: AssetFlag, advanceToNext: Bool = false) {
         guard let selectedAssetID = previewAsset?.id ?? selectedAssetID else { return }
-        updateFlag(flag, assetID: selectedAssetID)
+        updateFlag(flag, assetID: selectedAssetID, advanceToNext: advanceToNext)
     }
-    func updateFlag(_ flag: AssetFlag, assetID: String) {
-        guard !isDeleting, sourceMergePlan == nil, deletionPlan == nil, qualityReanalysisPlan == nil, let store else { return }
+    func updateFlag(_ flag: AssetFlag, assetID: String, advanceToNext: Bool = false) {
+        guard !isDeleting, !isSavingFlag, sourceMergePlan == nil, deletionPlan == nil, qualityReanalysisPlan == nil, let store else { return }
+        let wasPreview = previewAsset != nil
+        let query = currentQuery()
+        var navigation = wasPreview ? previewNavigation : PreviewNavigation(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
+        isSavingFlag = true
         Task {
+            defer { isSavingFlag = false }
             do {
                 guard let asset = try await store.asset(id: assetID), asset.kind == .photo, !isDeleting else { return }
                 var annotation = try await store.annotation(for: assetID)
                 annotation.flag = flag
                 try await store.saveAnnotation(annotation)
+                let stillOnTarget = (previewAsset?.id ?? selectedAssetID) == assetID
                 await reloadAssets()
                 statusText = "\(asset.fileName)：\(flag.displayName)"
+                // Reload may hide the rejected photo. Keep its original position as
+                // the anchor, but never take over a later user selection or filter.
+                guard advanceToNext, stillOnTarget, currentQuery() == query,
+                      errorMessage == nil, !isDeleting,
+                      NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil,
+                      wasPreview == (previewAsset != nil) else { return }
+                if wasPreview {
+                    guard previewAsset?.id == assetID else { return }
+                } else {
+                    guard selectedAssetID == assetID ||
+                            (selectedAssetID == nil && !assets.contains(where: { $0.id == assetID })) else { return }
+                }
+                navigation.refresh(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
+                guard let nextID = navigation.neighbor(of: assetID, direction: 1),
+                      let next = assets.first(where: { $0.id == nextID }) else { return }
+                if wasPreview { selectPreview(id: nextID) }
+                else { selectAsset(next) }
             } catch { errorMessage = "保存旗标失败：\(error.localizedDescription)" }
         }
     }

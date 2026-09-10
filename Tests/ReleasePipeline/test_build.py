@@ -108,6 +108,8 @@ elif name == 'ditto': pathlib.Path(args[-1]).write_text('fixture zip')
         self.assertTrue((resources / 'GRDB_GRDB.bundle/PrivacyInfo.xcprivacy').exists())
         info = plistlib.loads((self.root / 'captured/镜序.app/Contents/Info.plist').read_bytes())
         self.assertEqual(info['JingXuReleaseChannel'], '未公证测试版')
+        self.assertTrue((self.root / f'outputs/JingXu-{self.version}-test.{self.build}-macOS-arm64.dmg.sha256').exists())
+        self.assertIn('未经 Apple 公证', (self.root / 'outputs/RELEASE.md').read_text())
 
     def test_release_validates_app_and_dmg_and_uses_explicit_keychain(self):
         result = self.run_build('release')
@@ -119,6 +121,7 @@ elif name == 'ditto': pathlib.Path(args[-1]).write_text('fixture zip')
         self.assertTrue((self.root / f'outputs/JingXu-{self.version}-macOS-arm64.dmg.sha256').exists())
         info = plistlib.loads((self.root / 'captured/镜序.app/Contents/Info.plist').read_bytes())
         self.assertNotIn('JingXuReleaseChannel', info)
+        self.assertIn('使用 Developer ID 签名并经 Apple 公证', (self.root / 'outputs/RELEASE.md').read_text())
 
     def test_build_or_checks_failure_never_packages(self):
         for stage in ('python', 'debug', 'release', 'checks'):

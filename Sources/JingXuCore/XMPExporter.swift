@@ -59,7 +59,6 @@ public struct DefaultXMPExporter: XMPExporter {
         let label: String
         switch annotation.flag {
         case .none: label = ""
-        case .picked: label = "Pick"
         case .rejected: label = "Reject"
         }
         return """

@@ -37,7 +37,7 @@ enum ArchiveChecks {
         try FileManager.default.createDirectory(at: occupied.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("existing target".utf8).write(to: occupied)
         var annotation = try await store.annotation(for: originals[0].id)
-        annotation.rating = 5; annotation.flag = .picked; annotation.keywords = ["保留关键词"]
+        annotation.rating = 5; annotation.flag = .rejected; annotation.keywords = ["保留关键词"]
         try await store.saveAnnotation(annotation)
         let album = Album(name: "归档前相册")
         try await store.saveAlbum(album)
@@ -69,7 +69,7 @@ enum ArchiveChecks {
         try check(try Data(contentsOf: occupied) == Data("existing target".utf8))
         try check(try FileHasher.sha256(of: photos.appendingPathComponent(moved.relativePath)) == plan.groups[0].files[0].hash)
         let kept = try await store.annotation(for: moved.id)
-        try check(kept.rating == 5 && kept.flag == .picked)
+        try check(kept.rating == 5 && kept.flag == .rejected)
         try check(kept.keywords == ["保留关键词"])
         try check(try await store.assets(AssetQuery(albumID: album.id)).map(\.id) == [moved.id])
         try check(try await store.analysis(for: moved.id)?.suggestionState == .ignored)

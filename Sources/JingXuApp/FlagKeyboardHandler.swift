@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Carbon.HIToolbox
 import JingXuCore
 
 // Window-scoped local monitor: text editing and modal UI retain their key events.
@@ -34,8 +35,15 @@ final class KeyboardView: NSView {
                     navigate(event.keyCode == 123 ? -1 : 1)
                     return true
                 }
-                guard let key = event.charactersIgnoringModifiers?.lowercased(), key == "x" || key == "u" else { return false }
-                self.action?(key == "x" ? .rejected : .none)
+                if event.keyCode == UInt16(kVK_Delete) || event.keyCode == UInt16(kVK_ForwardDelete) {
+                    // Holding Delete must not reject every photo as selection advances.
+                    guard !event.isARepeat else { return true }
+                    self.action?(.rejected)
+                } else if event.charactersIgnoringModifiers?.lowercased() == "u" {
+                    self.action?(.none)
+                } else {
+                    return false
+                }
                 return true
             }
             return handled ? nil : event

@@ -1,17 +1,18 @@
-# 正式发布门槛
+# 发布检查清单
 
-请记录被验证的完整 Git commit SHA；不得用不同提交的检查结果发布。
+请记录被验证的完整 Git commit SHA 和发布通道；不得用不同提交的检查结果发布。所有通道必须完成构建回归、变更相关界面验证、签名验证和发布摘要校验。`adhoc` 预发布版如未完成覆盖升级、真实目录授权或 Gatekeeper 安装，必须在 Release 中列明；`release` 正式版要求全部验收通过。
 
-- [ ] Developer ID Application 证书及私钥可用，Team ID 固定；GitHub `release` 环境的三个 Secrets 和三个 Variables 已配置，凭据仅存 GitHub Secrets 与运行时钥匙串。
+- [ ] `release` 通道：Developer ID Application 证书及私钥可用，Team ID 固定；GitHub `release` 环境的三个 Secrets 和三个 Variables 已配置，凭据仅存 GitHub Secrets 与运行时钥匙串。
 - [ ] Debug / Release 构建和完整 JingXuChecks 通过。
 - [ ] v1 / v2 / v3 图库升级、WAL 备份、迁移失败、锁与恢复中断检查通过。
 - [ ] 受限目录、空间不足及真实进程中断下，停止写入且备份可恢复。
 - [ ] 独立测试图库完成旧版写入、退出、DMG 替换、授权、新版核对及重启。
-- [ ] X/U 在网格和大图只修改目标照片，输入文字和输入法组合输入不截获。
+- [ ] Delete/U 在网格和大图只修改目标照片，输入文字和输入法组合输入不截获；Delete 仅标记淘汰，不直接删除文件。
+- [ ] Delete 保存成功后跳至下一张照片；当前照片被筛选隐藏时仍正确前进，末张不循环，失败或长按重复事件不跳转，U 不跳转。
 - [ ] 直方图亮度/RGB 正常，来源移除与合并确认正确，原文件内容保持不变。
-- [ ] 应用与 DMG 签名验证、公证 Accepted、票据验证通过。
+- [ ] 应用签名验证与 DMG 完整性检查通过；`release` 通道另需应用及 DMG 公证 Accepted、票据验证和 DMG 签名验证。
 - [ ] 启用 Gatekeeper 的下载环境中完成 DMG 打开、拖动安装与首次启动，未关闭安全保护。
 - [ ] 流水线核对 GitHub 草稿资产的 SHA-256 后公开，版本号、构建号与提交对应；不含用户图库或凭据。
-- [ ] Release 签名、公证、服务端摘要校验均成功后，Cask 版本、摘要和安装说明更新；实际 Homebrew 升级验证通过。
+- [ ] 所选通道的签名与服务端摘要校验成功后，Release 的预发布状态以及 Cask 的版本、摘要、产物名称和签名说明一致；实际 Homebrew 升级验证另行记录。
 
 每次发布都需按实际证据填写，不沿用历史记录。流水线代码完成不代表 GitHub 凭据已配置，也不代表真实公证、Homebrew 升级或界面验收通过。

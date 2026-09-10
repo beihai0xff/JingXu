@@ -144,17 +144,17 @@ enum QualityV2Checks {
         try check(try await store.assets(AssetQuery(collection: .review)).count == 1, "新版待审核筛选失败")
         let album = Album(name: "keep")
         try await store.saveAlbum(album); try await store.add(assetID: first.id, toAlbum: album.id)
-        try await store.saveAnnotation(UserAnnotation(assetID: first.id, rating: 5, flag: .picked, keywords: ["keep"]))
+        try await store.saveAnnotation(UserAnnotation(assetID: first.id, rating: 5, flag: .rejected, keywords: ["keep"]))
         // A worker captured `computed` before this review; its later commit must not revert the review.
         _ = try await store.saveQualityReview(assetID: first.id, state: .ignored)
         try await store.saveComputedAnalysis(computed, expectedAsset: first, fileURL: firstURL)
         try check(try await store.analysis(for: first.id)?.suggestionState == .ignored, "重算覆盖了最新人工审核")
         try check(try await store.assets(AssetQuery(collection: .review)).isEmpty, "忽略后警告未消失")
         async let reviewSafe: Void = store.saveComputedAnalysis(computed, expectedAsset: first, fileURL: firstURL)
-        async let annotationSafe: Void = store.saveAnnotation(UserAnnotation(assetID: first.id, rating: 4, flag: .picked, keywords: ["concurrent"]))
+        async let annotationSafe: Void = store.saveAnnotation(UserAnnotation(assetID: first.id, rating: 4, flag: .rejected, keywords: ["concurrent"]))
         _ = try await (reviewSafe, annotationSafe)
         let annotation = try await store.annotation(for: first.id)
-        try check(annotation.rating == 4 && annotation.flag == .picked && annotation.keywords == ["concurrent"], "计算修改了并发标注")
+        try check(annotation.rating == 4 && annotation.flag == .rejected && annotation.keywords == ["concurrent"], "计算修改了并发标注")
         try check(try await store.assets(AssetQuery(albumID: album.id)).count == 1, "重算改变相册成员")
         try await store.saveSimilarGroup("burst", assetIDs: [first.id])
         try check(try await store.assets(AssetQuery(collection: .review)).isEmpty, "连拍进入质量问题计数")
@@ -206,6 +206,6 @@ enum QualityV2Checks {
         }
         _ = try await store.upsertAssets(many)
         try check(try await store.analysisCandidates(AssetQuery(sourceID: source.id, searchText: "scope-", limit: 1)).count == 2005, "完整重算范围仍被网格截断")
-        try check(try await store.analysisCandidates(AssetQuery(albumID: album.id, flag: .picked)).count == 1, "相册和旗标筛选隔离失败")
+        try check(try await store.analysisCandidates(AssetQuery(albumID: album.id, flag: .rejected)).count == 1, "相册和旗标筛选隔离失败")
     }
 }

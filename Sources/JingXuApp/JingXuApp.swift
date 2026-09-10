@@ -36,10 +36,10 @@ struct JingXuApp: App {
                     .disabled(model.selectedAssetID == nil)
             }
             CommandGroup(after: .sidebar) {
-                Button("标记淘汰（X）") { model.flagFromMenu(.rejected) }
-                    .disabled(model.isDeleting)
-                Button("取消旗标（U）") { model.flagFromMenu(.none) }
-                    .disabled(model.isDeleting)
+                Button("淘汰并下一张（Delete）") { model.flagFromMenu(.rejected) }
+                    .disabled(model.isDeleting || model.isSavingFlag)
+                Button("取消淘汰标记（U）") { model.flagFromMenu(.none) }
+                    .disabled(model.isDeleting || model.isSavingFlag)
                 Divider()
                 Button("重新分析当前范围…") { model.prepareQualityReanalysis() }.disabled(model.isWorking)
                 Button("重新分析全部旧结果…") { model.prepareQualityReanalysis(legacyOnly: true) }.disabled(model.isWorking)
