@@ -14,7 +14,7 @@ MODE="${1:-check}"
 cd "$PROJECT_DIR"
 BUILD_TEMP=$(mktemp -d "${TMPDIR:-/tmp}/jingxu-build.XXXXXX")
 trap 'rm -rf "$BUILD_TEMP"' EXIT
-python3 Scripts/release-metadata.py --output "$BUILD_TEMP"
+python3 Scripts/release-metadata.py --mode "$MODE" --output "$BUILD_TEMP"
 VERSION=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Packaging/Info.plist)
 BUILD=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' Packaging/Info.plist)
 

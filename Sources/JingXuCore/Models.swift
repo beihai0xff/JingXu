@@ -8,13 +8,11 @@ public enum MediaKind: String, Codable, CaseIterable, Sendable, DatabaseValueCon
 
 public enum AssetFlag: String, Codable, CaseIterable, Sendable, DatabaseValueConvertible {
     case none
-    case picked
     case rejected
 
     public var displayName: String {
         switch self {
         case .none: "未标记"
-        case .picked: "保留"
         case .rejected: "淘汰"
         }
     }

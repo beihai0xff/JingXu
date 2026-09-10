@@ -10,14 +10,17 @@ from string import Template
 
 def payload(release, current):
     tag = release["tag_name"]
-    if release["draft"] or release["prerelease"] or not re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", tag):
-        raise ValueError("Only published stable numeric version releases are supported")
+    if release["draft"] or not re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", tag):
+        raise ValueError("Only published numeric version releases are supported")
     version = tag[1:]
-    name = f"JingXu-{version}-macOS-arm64.dmg"
-    assets = [a for a in release["assets"] if a["name"] == name]
+    suffix = r"-test\.[1-9]\d*" if release["prerelease"] else ""
+    assets = [a for a in release["assets"] if a["name"].endswith('.dmg')]
     if len(assets) != 1:
         raise ValueError("Expected exactly one DMG")
     asset = assets[0]
+    name = asset["name"]
+    if not re.fullmatch(rf"JingXu-{re.escape(version)}{suffix}-macOS-arm64\.dmg", name):
+        raise ValueError("DMG name does not match version and release channel")
     expected_url = f"https://github.com/beihai0xff/JingXu/releases/download/{tag}/{name}"
     if asset["browser_download_url"] != expected_url:
         raise ValueError("Unexpected asset URL")
@@ -37,7 +40,10 @@ def payload(release, current):
             raise ValueError("Existing version digest changed")
         return None
     template = Path(__file__).resolve().parent.parent / 'Packaging/jingxu.rb.template'
-    body = Template(template.read_text()).substitute(version=version, sha256=digest[7:])
+    signature_notice = ("This prerelease is ad-hoc signed and not notarized by Apple."
+                        if release["prerelease"] else "This build is Developer ID signed and notarized by Apple.")
+    body = Template(template.read_text()).substitute(
+        version=version, sha256=digest[7:], artifact=name, signature_notice=signature_notice)
     return {"message": f"chore(cask): update JingXu to {version}", "branch": "main",
             "sha": current["sha"], "content": base64.b64encode(body.encode()).decode()}
 

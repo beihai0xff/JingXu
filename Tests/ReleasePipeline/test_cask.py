@@ -25,8 +25,33 @@ class CaskTests(unittest.TestCase):
         self.assertIn('version "0.2.6"', body)
         self.assertIn('sha256 "' + 'b' * 64 + '"', body)
         self.assertIn('Developer ID signed and notarized by Apple', body)
-        self.assertIn('releases/download/v#{version}/JingXu-#{version}-macOS-arm64.dmg', body)
+        self.assertIn('releases/download/v#{version}/JingXu-0.2.6-macOS-arm64.dmg', body)
         self.assertNotIn('ad-hoc', body)
+
+    def test_prerelease_uses_test_artifact_and_truthful_signature_notice(self):
+        self.release['prerelease'] = True
+        asset = self.release['assets'][0]
+        asset['name'] = 'JingXu-0.2.6-test.15-macOS-arm64.dmg'
+        asset['browser_download_url'] = 'https://github.com/beihai0xff/JingXu/releases/download/v0.2.6/' + asset['name']
+        result = module.payload(self.release, self.current)
+        body = base64.b64decode(result['content']).decode()
+        self.assertIn(asset['name'], body)
+        self.assertIn('ad-hoc signed and not notarized by Apple', body)
+        self.assertNotIn('Developer ID signed', body)
+        self.assertIsNone(module.payload(self.release, result))
+        self.release['prerelease'] = False
+        with self.assertRaises(ValueError):
+            module.payload(self.release, self.current)
+
+    def test_prerelease_rejects_wrong_version_or_invalid_build(self):
+        self.release['prerelease'] = True
+        for name in ['JingXu-0.2.5-test.15-macOS-arm64.dmg',
+                     'JingXu-0.2.6-test.0-macOS-arm64.dmg',
+                     'JingXu-0.2.6-test.01-macOS-arm64.dmg']:
+            with self.subTest(name=name):
+                self.release['assets'][0]['name'] = name
+                with self.assertRaises(ValueError):
+                    module.payload(self.release, self.current)
 
     def test_idempotence_and_same_version_mutation(self):
         updated = module.payload(self.release, self.current)

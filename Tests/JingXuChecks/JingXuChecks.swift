@@ -169,17 +169,35 @@ private enum JingXuChecks {
         let stored = try await store.upsertAsset(raw)
         var annotation = try await store.annotation(for: stored.id)
         annotation.rating = 4
-        annotation.flag = .picked
+        annotation.flag = .rejected
         annotation.keywords = ["旅行", " 夜景 ", "旅行", ""]
         try await store.saveAnnotation(annotation)
 
         let all = try await store.assets(AssetQuery())
         let rawResults = try await store.assets(AssetQuery(collection: .raw))
-        let filtered = try await store.assets(AssetQuery(searchText: "Alpha", minimumRating: 4, flag: .picked))
+        let filtered = try await store.assets(AssetQuery(searchText: "Alpha", minimumRating: 4, flag: .rejected))
         try require(all.count == 1, "目录未返回已保存资源")
         try require(all.first?.keywords == ["夜景", "旅行"], "关键词未规范化")
         try require(rawResults.first?.fileName == "IMG_0001.ARW", "RAW 筛选失败")
         try require(filtered.count == 1, "组合筛选失败")
+
+        let unmarked = try await store.upsertAsset(MediaAsset(
+            sourceID: source.id, relativePath: "unmarked.jpg", fileIdentifier: nil,
+            fileName: "unmarked.jpg", uniformType: "public.jpeg", kind: .photo,
+            fileSize: 100, modifiedAt: Date()
+        ))
+        let unmarkedResults = try await store.assets(AssetQuery(flag: AssetFlag.none))
+        try require(unmarkedResults.map(\.id) == [unmarked.id], "未标记筛选应包含尚无标注的照片并排除淘汰照片")
+        let rejected = try await store.assets(AssetQuery(collection: .rejected))
+        try require(rejected.map(\.id) == [stored.id], "淘汰集合范围错误")
+
+        annotation.flag = .none
+        try await store.saveAnnotation(annotation)
+        let cleared = try await store.annotation(for: stored.id)
+        let rejectedAfterClear = try await store.assets(AssetQuery(flag: .rejected))
+        let unmarkedAfterClear = try await store.assets(AssetQuery(flag: AssetFlag.none))
+        try require(cleared.flag == .none && cleared.rating == 4 && cleared.keywords == ["夜景", "旅行"], "取消淘汰未保存或修改了其他标注")
+        try require(rejectedAfterClear.isEmpty && Set(unmarkedAfterClear.map(\.id)) == [stored.id, unmarked.id], "取消淘汰后筛选未更新")
     }
 
     private static func checkStableIdentityAndAlbum() async throws {
@@ -231,11 +249,15 @@ private enum JingXuChecks {
             fileSize: 1,
             modifiedAt: Date()
         )
-        let annotation = UserAnnotation(assetID: asset.id, rating: 5, flag: .picked, keywords: ["人与风景", "A<B"])
+        var annotation = UserAnnotation(assetID: asset.id, rating: 5, flag: .rejected, keywords: ["人与风景", "A<B"])
         let document = DefaultXMPExporter.document(asset: asset, annotation: annotation)
         try require(document.contains("xmp:Rating=\"5\""), "XMP 未写评分")
-        try require(document.contains("xmp:Label=\"Pick\""), "XMP 未写旗标")
+        try require(document.contains("xmp:Label=\"Reject\""), "XMP 未写旗标")
         try require(document.contains("A&lt;B"), "XMP 未转义关键词")
+        annotation.flag = .none
+        let unmarkedDocument = DefaultXMPExporter.document(asset: asset, annotation: annotation)
+        try require(unmarkedDocument.contains("xmp:Label=\"\""), "取消淘汰后 XMP 仍包含标记")
+        try require(unmarkedDocument.contains("xmp:Rating=\"5\"") && unmarkedDocument.contains("A&lt;B"), "取消淘汰改变了导出的评分或关键词")
     }
 
     private static func checkMetadataAndQuality() async throws {
@@ -462,8 +484,8 @@ private enum JingXuChecks {
         try require(all.files.count == 2_005, "删除候选被显示上限截断")
         let excluded = try await coordinator.prepare(AssetQuery(searchText: "absent"))
         try require(excluded.files.isEmpty, "搜索范围泄漏")
-        let picked = try await coordinator.prepare(AssetQuery(flag: .picked))
-        try require(picked.files.isEmpty, "旗标范围泄漏")
+        let unmarked = try await coordinator.prepare(AssetQuery(flag: AssetFlag.none))
+        try require(unmarked.files.isEmpty, "未标记筛选进入淘汰清理")
         let album = Album(name: "隔离")
         try await store.saveAlbum(album)
         try await store.add(assetID: saved[0].id, toAlbum: album.id)
@@ -633,7 +655,7 @@ private enum JingXuChecks {
         let modified = Date(timeIntervalSince1970: 1000)
         let first = try await store.upsertAsset(MediaAsset(sourceID: original.id, relativePath: "one.jpg", fileIdentifier: "same-id", fileName: "one.jpg", uniformType: nil, kind: .photo, fileSize: 8, modifiedAt: modified))
         let second = try await store.upsertAsset(MediaAsset(sourceID: duplicate.id, relativePath: "one.jpg", fileIdentifier: "same-id", fileName: "one.jpg", uniformType: nil, kind: .photo, fileSize: 8, modifiedAt: modified))
-        try await store.saveAnnotation(UserAnnotation(assetID: first.id, rating: 2, flag: .picked, keywords: ["A"]))
+        try await store.saveAnnotation(UserAnnotation(assetID: first.id, rating: 2, flag: .none, keywords: ["A"]))
         try await Task.sleep(for: .milliseconds(10))
         try await store.saveAnnotation(UserAnnotation(assetID: second.id, rating: 5, flag: .rejected, keywords: ["B"]))
         let album = Album(name: "保留成员")
@@ -698,7 +720,7 @@ private enum JingXuChecks {
             try await store.upsertSource(source)
             let asset = MediaAsset(id: "upgrade-photo", sourceID: source.id, relativePath: "original.jpg", fileIdentifier: "file-1", fileName: "original.jpg", uniformType: "public.jpeg", kind: .photo, fileSize: 8, modifiedAt: Date(timeIntervalSince1970: 1000))
             _ = try await store.upsertAsset(asset)
-            try await store.saveAnnotation(UserAnnotation(assetID: asset.id, rating: 4, flag: .picked, keywords: ["升级保留"]))
+            try await store.saveAnnotation(UserAnnotation(assetID: asset.id, rating: 4, flag: .rejected, keywords: ["升级保留"]))
             let album = Album(id: "upgrade-album", name: "旧相册")
             try await store.saveAlbum(album)
             try await store.add(assetID: asset.id, toAlbum: album.id)
@@ -742,7 +764,7 @@ private enum JingXuChecks {
                 let store = try await coordinator.open()
                 let annotation = try await store.annotation(for: "upgrade-photo")
                 let members = try await store.assets(AssetQuery(albumID: "upgrade-album"))
-                try require(annotation.rating == 4 && annotation.flag == .picked && annotation.keywords == ["升级保留"] && members.count == 1, "升级损坏用户数据")
+                try require(annotation.rating == 4 && annotation.flag == .rejected && annotation.keywords == ["升级保留"] && members.count == 1, "升级损坏用户数据")
                 let legacy = try await store.analysis(for: "upgrade-photo")
                 try require(legacy?.algorithmVersion == 1 && legacy?.suggestionState == .ignored && legacy?.similarGroupID == "old-burst" && legacy?.sharpnessScore == 0.015, "迁移改变旧分析或人工审核")
                 do { _ = try CatalogLease(databaseURL: url); throw CheckFailure(description: "第二个实例获得图库锁") } catch is CatalogUpgradeError {}

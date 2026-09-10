@@ -85,6 +85,6 @@ python3 -m unittest discover -s Tests/ReleasePipeline -v
 
 打包按 `Documentation/ReleasePipeline.md` 和 `Packaging/ReleaseChecklist.md` 执行：测试包使用 `zsh Scripts/build.sh adhoc`，正式签名包使用 `zsh Scripts/build.sh release`。两者先执行完整构建回归，共用应用组装与 DMG 生成；CI 的 `Scripts/ci-package-app.sh` 仅准备和清理签名凭据。版本读取 `Packaging/Info.plist`，不要从 README 复制旧版本。正式签名或公证失败应停止，不能降级或关闭系统保护。
 
-推送 `v*` 标签会触发发布，并在成功后更新 Cask。只有任务包含发布时才执行发布动作；开发修复不隐含替换已安装应用、操作真实图库或推送发布标签。已有版本产物不得覆盖。
+推送 `v*` 标签会触发发布，并在成功后更新 Cask。发布通道在工作流中显式指定：`adhoc` 公开带 `test` 标识的未公证预发布版，`release` 要求 Developer ID 和公证；不得因签名失败自动切换。只有任务包含发布时才执行发布动作；开发修复不隐含替换已安装应用、操作真实图库或推送发布标签。已有版本产物不得覆盖。
 
 行为变化同步更新对应说明：移动看 `Documentation/BatchMove.md`，归档看 `Documentation/DateArchive.md`，质量分析看 `Documentation/QualityAnalysisV2.md`，发布和安装看 `Documentation/ReleasePipeline.md`、`Documentation/Homebrew.md`。交付时简述改动、验证结果和剩余限制，区分代码完成、打包完成、安装验证和已发布。

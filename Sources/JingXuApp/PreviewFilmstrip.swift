@@ -65,10 +65,10 @@ private struct FilmstripCell: View {
                 }
             }.frame(width: 96, height: 64).clipped()
             .overlay(alignment: .topTrailing) {
-                if item.flag == .rejected || item.flag == .picked {
-                    Image(systemName: item.flag == .rejected ? "xmark" : "checkmark")
+                if item.flag == .rejected {
+                    Image(systemName: "xmark")
                         .font(.caption2.bold()).padding(3)
-                        .background(item.flag == .rejected ? Color.red : Color.green, in: RoundedRectangle(cornerRadius: 3))
+                        .background(Color.red, in: RoundedRectangle(cornerRadius: 3))
                         .foregroundStyle(.white).padding(3)
                 }
             }

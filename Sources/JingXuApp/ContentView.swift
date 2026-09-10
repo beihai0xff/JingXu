@@ -49,8 +49,7 @@ struct ContentView: View {
             }.padding(20).frame(width: 760, height: 520)
         }
         .background(FlagKeyboardHandler(enabled: !model.isDeleting && model.archivePlan == nil && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
-            if let id = model.previewAsset?.id { model.updateFlag(flag, assetID: id) }
-            else { model.updateFlag(flag) }
+            model.updateFlag(flag, advanceToNext: flag == .rejected)
         })
         .sheet(item: $model.missingAssetPlan) { plan in
             MissingAssetCleanupSheet(plan: plan).environmentObject(model)
@@ -219,42 +218,47 @@ struct ContentView: View {
                     }
                 }
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
-                        ForEach(model.assets) { item in
-                            AssetCell(item: item, size: model.gridSize, isSelected: model.isBatchSelecting ? model.batchSelection.contains(item.id) : model.selectedAssetID == item.id)
-                                .overlay(alignment: .topLeading) {
-                                    if model.isBatchSelecting && item.kind == .photo {
-                                        Image(systemName: model.batchSelection.contains(item.id) ? "checkmark.circle.fill" : "circle")
-                                            .foregroundStyle(.white).padding(8)
-                                            .allowsHitTesting(false)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
+                            ForEach(model.assets) { item in
+                                AssetCell(item: item, size: model.gridSize, isSelected: model.isBatchSelecting ? model.batchSelection.contains(item.id) : model.selectedAssetID == item.id)
+                                    .overlay(alignment: .topLeading) {
+                                        if model.isBatchSelecting && item.kind == .photo {
+                                            Image(systemName: model.batchSelection.contains(item.id) ? "checkmark.circle.fill" : "circle")
+                                                .foregroundStyle(.white).padding(8)
+                                                .allowsHitTesting(false)
+                                        }
                                     }
-                                }
-                                .onTapGesture(count: 2) {
-                                    if model.isBatchSelecting { model.toggleBatchSelection(item) }
-                                    else { model.selectAsset(item); model.openPreview(item) }
-                                }
-                                .onTapGesture {
-                                    if model.isBatchSelecting { model.toggleBatchSelection(item) }
-                                    else { model.selectAsset(item) }
-                                }
-                                .contextMenu {
-                                    Button("在访达中显示") {
-                                        model.selectedAssetID = item.id
-                                        model.revealSelectedInFinder()
+                                    .onTapGesture(count: 2) {
+                                        if model.isBatchSelecting { model.toggleBatchSelection(item) }
+                                        else { model.selectAsset(item); model.openPreview(item) }
                                     }
-                                    Menu("添加到相册") {
-                                        ForEach(model.albums) { album in
-                                            Button(album.name) {
-                                                model.selectedAssetID = item.id
-                                                model.addSelectedAsset(to: album)
+                                    .onTapGesture {
+                                        if model.isBatchSelecting { model.toggleBatchSelection(item) }
+                                        else { model.selectAsset(item) }
+                                    }
+                                    .contextMenu {
+                                        Button("在访达中显示") {
+                                            model.selectedAssetID = item.id
+                                            model.revealSelectedInFinder()
+                                        }
+                                        Menu("添加到相册") {
+                                            ForEach(model.albums) { album in
+                                                Button(album.name) {
+                                                    model.selectedAssetID = item.id
+                                                    model.addSelectedAsset(to: album)
+                                                }
                                             }
                                         }
                                     }
-                                }
+                            }
                         }
+                        .padding(14)
                     }
-                    .padding(14)
+                    .onChange(of: model.selectedAssetID) { _, id in
+                        if let id { proxy.scrollTo(id) }
+                    }
                 }
             }
             Divider()
@@ -277,9 +281,9 @@ struct ContentView: View {
             .frame(width: 115)
             Picker("旗标", selection: $model.flagFilter) {
                 Text("全部旗标").tag(AssetFlag?.none)
-                Text("保留").tag(AssetFlag?.some(.picked))
-                Text("淘汰").tag(AssetFlag?.some(.rejected))
-                Text("未标记").tag(AssetFlag?.some(.none))
+                ForEach(AssetFlag.allCases, id: \.self) {
+                    Text($0.displayName).tag(AssetFlag?.some($0))
+                }
             }
             .labelsHidden()
             .frame(width: 105)
@@ -363,7 +367,7 @@ struct ContentView: View {
 
     private func flagControl(_ item: AssetListItem) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("旗标 · X 淘汰 / U 未标记").font(.caption).foregroundStyle(.secondary)
+            Text("Delete 淘汰并下一张 / U 未标记").font(.caption).foregroundStyle(.secondary)
             Picker("旗标", selection: Binding(
                 get: { item.flag },
                 set: { model.updateFlag($0) }
@@ -372,6 +376,7 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .disabled(model.isSavingFlag)
         }
     }
 
@@ -490,7 +495,6 @@ private struct AssetCell: View {
                     if item.kind == .video { badge("video.fill", color: .blue) }
                     if item.hasPendingQualityWarning { badge("exclamationmark.triangle.fill", color: .orange) }
                     if item.similarGroupID != nil || item.issues.contains(.similarBurst) { badge("square.stack.3d.up", color: .blue) }
-                    if item.flag == .picked { badge("checkmark", color: .green) }
                     if item.flag == .rejected { badge("xmark", color: .red) }
                 }
                 .padding(7)

@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Explicit release channel. Developer ID failures never fall back to ad-hoc.
+  RELEASE_MODE: adhoc
+
 concurrency:
   group: jingxu-release-${{ github.ref }}
   cancel-in-progress: false
@@ -33,6 +37,8 @@ jobs:
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       commit: ${{ steps.metadata.outputs.commit }}
+      dmg: ${{ steps.metadata.outputs.dmg }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -45,8 +51,12 @@ jobs:
           RELEASE_REF: ${{ github.ref }}
         run: |
           git merge-base --is-ancestor HEAD origin/main
-          python3 Scripts/release-metadata.py --ref "$RELEASE_REF" --output "$RUNNER_TEMP/jingxu-release"
+          python3 Scripts/release-metadata.py --ref "$RELEASE_REF" --mode "$RELEASE_MODE" --output "$RUNNER_TEMP/jingxu-release"
+      - name: Build, check and ad-hoc sign the unnotarized prerelease
+        if: env.RELEASE_MODE == 'adhoc'
+        run: zsh Scripts/build.sh adhoc
       - name: Build, check, sign and notarize with an isolated keychain
+        if: env.RELEASE_MODE == 'release'
         env:
           DEVELOPER_ID_APPLICATION: ${{ vars.DEVELOPER_ID_APPLICATION }}
           DEVELOPER_TEAM_ID: ${{ vars.DEVELOPER_TEAM_ID }}
@@ -59,8 +69,8 @@ jobs:
         with:
           name: jingxu-macos-arm64
           path: |
-            outputs/JingXu-${{ steps.metadata.outputs.version }}-macOS-arm64.dmg
-            outputs/JingXu-${{ steps.metadata.outputs.version }}-macOS-arm64.dmg.sha256
+            outputs/${{ steps.metadata.outputs.dmg }}
+            outputs/${{ steps.metadata.outputs.dmg }}.sha256
             outputs/RELEASE.md
           if-no-files-found: error
           retention-days: 14
@@ -84,6 +94,8 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.sign.outputs.version }}
           BUILT_COMMIT: ${{ needs.sign.outputs.commit }}
+          DMG_NAME: ${{ needs.sign.outputs.dmg }}
+          PRERELEASE: ${{ needs.sign.outputs.prerelease }}
         shell: bash
         run: |
           set -euo pipefail
@@ -91,7 +103,7 @@ jobs:
           test "$RELEASE_TAG" = "v$VERSION"
           # Refuse publication if the tag moved after this run checked it out.
           test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$BUILT_COMMIT"
-          sha256sum -c "JingXu-${VERSION}-macOS-arm64.dmg.sha256"
+          sha256sum -c "${DMG_NAME}.sha256"
           # An API/authentication error must fail closed, not be treated as absence.
           gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name' > existing-tags.txt
           if grep -Fxq -- "$RELEASE_TAG" existing-tags.txt; then
@@ -100,9 +112,8 @@ jobs:
           fi
           # Leave a recoverable draft on partial upload failure. Never --clobber.
           gh release create "$RELEASE_TAG" \
-            "JingXu-${VERSION}-macOS-arm64.dmg" \
-            "JingXu-${VERSION}-macOS-arm64.dmg.sha256" \
-            --verify-tag --draft --prerelease=false --latest=false \
+            "$DMG_NAME" "${DMG_NAME}.sha256" \
+            --verify-tag --draft --prerelease="$PRERELEASE" --latest=false \
             --title "镜序 $VERSION" --notes-file RELEASE.md
           # Check server digests for both files before making the draft public.
           # The by-tag REST endpoint does not return unpublished drafts. Resolve the
@@ -121,7 +132,7 @@ jobs:
           python3 - <<'PY'
           import hashlib, json, os
           from pathlib import Path
-          files = [f"JingXu-{os.environ['VERSION']}-macOS-arm64.dmg"]
+          files = [os.environ['DMG_NAME']]
           files.append(files[0] + '.sha256')
           assets = {a['name']: a for a in json.loads(Path('uploaded.json').read_text())['assets']}
           if set(assets) != set(files):
@@ -131,7 +142,7 @@ jobs:
               if assets[name].get('digest') != digest:
                   raise SystemExit('Remote digest mismatch; draft retained')
           PY
-          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest=false
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$PRERELEASE" --latest=false
           gh release view "$RELEASE_TAG" --json url,isDraft,isPrerelease
 
   update-cask:
