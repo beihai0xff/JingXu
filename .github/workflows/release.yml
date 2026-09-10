@@ -47,11 +47,34 @@ jobs:
           swift build -c release
       - name: Full regression checks
         run: swift run -c release JingXuChecks
-      - name: Package ad-hoc signed DMG
-        run: zsh Scripts/package-test-app.sh --versioned-name
+
+  sign:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          persist-credentials: false
+      - name: Sign and notarize with an isolated keychain
+        env:
+          DEVELOPER_ID_APPLICATION: ${{ vars.DEVELOPER_ID_APPLICATION }}
+          DEVELOPER_TEAM_ID: ${{ vars.DEVELOPER_TEAM_ID }}
+          APPLE_ID: ${{ vars.APPLE_ID }}
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: bash Scripts/ci-package-app.sh
+      - name: Prepare release notes
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: python3 Scripts/ci-release-metadata.py --ref "$RELEASE_REF" --output "$RUNNER_TEMP/jingxu-release"
       - name: Verify release files
         env:
-          VERSION: ${{ steps.metadata.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           cd outputs
           shasum -a 256 -c "JingXu-${VERSION}-macOS-arm64.dmg.sha256"
@@ -61,15 +84,15 @@ jobs:
         with:
           name: jingxu-macos-arm64
           path: |
-            outputs/JingXu-${{ steps.metadata.outputs.version }}-macOS-arm64.dmg
-            outputs/JingXu-${{ steps.metadata.outputs.version }}-macOS-arm64.dmg.sha256
+            outputs/JingXu-${{ needs.build.outputs.version }}-macOS-arm64.dmg
+            outputs/JingXu-${{ needs.build.outputs.version }}-macOS-arm64.dmg.sha256
             outputs/RELEASE.md
           if-no-files-found: error
           retention-days: 14
 
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs: [build, sign]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -104,7 +127,7 @@ jobs:
           gh release create "$RELEASE_TAG" \
             "JingXu-${VERSION}-macOS-arm64.dmg" \
             "JingXu-${VERSION}-macOS-arm64.dmg.sha256" \
-            --verify-tag --draft --prerelease --latest=false \
+            --verify-tag --draft --prerelease=false --latest=false \
             --title "镜序 $VERSION" --notes-file RELEASE.md
           # Check server digests for both files before making the draft public.
           # The by-tag REST endpoint does not return unpublished drafts. Resolve the
@@ -112,7 +135,7 @@ jobs:
           # The list endpoint can lag immediately after creation. Retry only an
           # empty result; API errors and ambiguous results still fail closed.
           RELEASE_ID=""
-          for attempt in 1 2 3 4 5 6; do
+          for _attempt in 1 2 3 4 5 6; do
             RELEASE_ID="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
               --jq ".[] | select(.tag_name == \"$RELEASE_TAG\" and .draft == true) | .id")"
             test -z "$RELEASE_ID" || break
@@ -133,7 +156,7 @@ jobs:
               if assets[name].get('digest') != digest:
                   raise SystemExit('Remote digest mismatch; draft retained')
           PY
-          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest=false
           gh release view "$RELEASE_TAG" --json url,isDraft,isPrerelease
 
   update-cask:

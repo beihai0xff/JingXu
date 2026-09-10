@@ -38,8 +38,8 @@ def main():
     version, build, notes = metadata(root, args.ref)
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
     args.output.mkdir(parents=True, exist_ok=True)
-    notice = ('> 自动打包的未公证预发布版本：使用临时签名，没有 Developer ID 或 Apple 公证。'
-              '请勿关闭系统安全保护。先退出旧应用并备份图库，再拖动替换安装。\n\n')
+    notice = ('> 安装前先结束后台任务、退出旧应用并备份图库，再拖动替换安装。'
+              '首次切换到 Developer ID 签名版本时，可能需要重新授权原容器或照片目录。\n\n')
     (args.output / 'RELEASE.md').write_text(notice + notes + f'\n\n构建 {build} · 源提交 `{commit}`\n')
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
