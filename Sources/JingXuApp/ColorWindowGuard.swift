@@ -10,6 +10,10 @@ final class ColorApplicationDelegate: NSObject, NSApplicationDelegate {
         guard !terminating else { return .terminateCancel }
         terminating = true; model.isPreviewTransitioning = true
         Task {
+            guard await model.prepareShareForExit() else {
+                model.isPreviewTransitioning = false; terminating = false
+                sender.reply(toApplicationShouldTerminate: false); return
+            }
             await model.automationConnection?.shutdown(preservePreference: true)
             let editor = model.colorEditor
             let saved = await editor?.flush() ?? true

@@ -31,6 +31,7 @@ struct ContentView: View {
             }
         }
         .toolbar { toolbar }
+        .modifier(PhotoSharePresentation(model: model, session: model.photoShareSession))
         .sheet(item: $model.archivePlan) { plan in
             VStack(alignment: .leading, spacing: 12) {
                 Text(plan.isBatchMove == true ? "移动所选照片" : "按日期重新归档").font(.title2)
@@ -58,7 +59,7 @@ struct ContentView: View {
                 }
             }.padding(20).frame(width: 760, height: 520)
         }
-        .background(FlagKeyboardHandler(enabled: !model.isDeleting && model.archivePlan == nil && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), requiresCanvasFocus: model.colorEditor != nil, navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
+        .background(FlagKeyboardHandler(enabled: !model.isShowingPhotoShare && !model.isDeleting && model.archivePlan == nil && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), requiresCanvasFocus: model.colorEditor != nil, navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
             model.updateFlag(flag, advanceToNext: flag == .rejected)
         })
         .sheet(item: $model.missingAssetPlan) { plan in
@@ -184,13 +185,15 @@ struct ContentView: View {
                     .tag(row.destination)
                     .contextMenu {
                         if row.depth == 0 {
-                            Button("移除来源…", role: .destructive) { model.removeSource(row.source) }.disabled(model.isWorking)
+                            Button("移除来源…", role: .destructive) { model.removeSource(row.source) }
+                                .disabled(model.isWorking || model.fileOperationsBlockedByShare)
                         }
                     }
                 }
                 Button("添加文件夹…") { model.chooseAndAddFolder() }
                     .buttonStyle(.plain)
                     .foregroundStyle(.tint)
+                    .disabled(model.fileOperationsBlockedByShare)
             }
 
             Section("相册") {
@@ -198,7 +201,8 @@ struct ContentView: View {
                     Label(album.name, systemImage: "rectangle.stack")
                         .tag(SidebarDestination.album(album.id))
                         .contextMenu {
-                            Button("删除相册…", role: .destructive) { model.deleteAlbum(album) }.disabled(model.isWorking)
+                            Button("删除相册…", role: .destructive) { model.deleteAlbum(album) }
+                                .disabled(model.isWorking || model.fileOperationsBlockedByShare)
                         }
                 }
                 Button("新建相册…") { model.isShowingAlbumCreator = true }
@@ -215,23 +219,27 @@ struct ContentView: View {
         VStack(spacing: 0) {
             FolderScopeBar()
             filterBar
-            HStack {
-                Toggle("批量选择", isOn: $model.isBatchSelecting)
-                    .toggleStyle(.button)
-                    .onChange(of: model.isBatchSelecting) { _, enabled in
-                        if !enabled { model.batchSelection.removeAll() }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Toggle("批量选择", isOn: Binding(get: { model.isBatchSelecting }, set: { model.changeCheckboxMode($0) }))
+                        .toggleStyle(.button)
+                        .help("也可使用 ⌘ 点击增减、Shift 点击连续选择")
+                    if model.isBatchSelecting || !model.selectedPhotoIDs.isEmpty {
+                        Text("已选 \(model.selectedPhotoIDs.count) 张")
+                        Button("全选当前照片") { model.selectVisiblePhotos() }
+                        Button("清空选择") { model.clearPhotoSelection() }
                     }
-                if model.isBatchSelecting {
-                    Text("已选 \(model.batchSelection.count) 张")
-                    Button("全选当前照片") { model.selectVisiblePhotos() }
-                    Button("清空选择") { model.batchSelection.removeAll() }
-                    Button("移动到目录…") { model.prepareBatchMove() }
-                        .disabled(model.batchSelection.isEmpty || model.archivePending)
+                    Spacer()
                 }
-                Button("预设与调色…") { model.showColorPresets() }.disabled(model.colorTargetIDs.isEmpty)
-                Button("导出成片…") { model.showColorExport() }.disabled(model.colorTargetIDs.isEmpty)
-                if model.colorUndoPlan != nil { Button("撤销批量调色") { model.undoColorBatch() } }
-                Spacer()
+                HStack {
+                    Button("移动到目录…") { model.prepareBatchMove() }
+                        .disabled(model.selectedPhotoIDs.isEmpty || model.archivePending || model.fileOperationsBlockedByShare)
+                    Button("分享…", systemImage: "square.and.arrow.up") { model.showPhotoShare() }.disabled(!model.canShowPhotoShare)
+                    Button("预设与调色…") { model.showColorPresets() }.disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
+                    Button("导出成片…") { model.showColorExport() }.disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
+                    if model.colorUndoPlan != nil { Button("撤销批量调色") { model.undoColorBatch() }.disabled(!model.canStartColorAction) }
+                    Spacer()
+                }
             }
             .disabled(model.isWorking)
             .padding(8)
@@ -249,28 +257,25 @@ struct ContentView: View {
                     HStack {
                         Button("添加文件夹") { model.chooseAndAddFolder() }
                         Button("从相机卡导入") { model.isShowingImport = true }
-                    }
+                    }.disabled(model.fileOperationsBlockedByShare)
                 }
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
                             ForEach(model.assets) { item in
-                                AssetCell(item: item, size: model.gridSize, isSelected: model.isBatchSelecting ? model.batchSelection.contains(item.id) : model.selectedAssetID == item.id)
+                                AssetCell(item: item, size: model.gridSize, isSelected: item.kind == .photo ? model.photoSelection.selectedIDs.contains(item.id) : model.selectedAssetID == item.id)
                                     .overlay(alignment: .topLeading) {
                                         if model.isBatchSelecting && item.kind == .photo {
-                                            Image(systemName: model.batchSelection.contains(item.id) ? "checkmark.circle.fill" : "circle")
+                                            Image(systemName: model.photoSelection.selectedIDs.contains(item.id) ? "checkmark.circle.fill" : "circle")
                                                 .foregroundStyle(.white).padding(8)
                                                 .allowsHitTesting(false)
                                         }
                                     }
-                                    .onTapGesture(count: 2) {
-                                        if model.isBatchSelecting { model.toggleBatchSelection(item) }
-                                        else { model.selectAsset(item); model.openPreview(item) }
-                                    }
-                                    .onTapGesture {
-                                        if model.isBatchSelecting { model.toggleBatchSelection(item) }
-                                        else { model.selectAsset(item) }
+                                    .overlay {
+                                        GridClickHandler(label: item.fileName) { command, shift, count in
+                                            model.clickAsset(item, command: command, shift: shift, count: count)
+                                        }
                                     }
                                     .contextMenu {
                                         Button("在访达中显示") {
@@ -460,19 +465,21 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
-            if model.previewAsset == nil {
-                Button("按日期重新归档…") { model.prepareArchive() }.disabled(model.isWorking || model.archivePending)
-                Button("恢复未完成归档…") { model.resumeArchive(undo: false) }.disabled(model.isWorking || !model.archivePending)
-                Button("撤销最近一次归档…") { model.resumeArchive(undo: true) }.disabled(model.isWorking)
-                Button("清理失效索引…", systemImage: "photo.badge.exclamationmark") { model.prepareMissingAssetCleanup() }
-                    .disabled(model.isWorking || model.missingAssetPlan != nil)
-                Button("整理重复来源…", systemImage: "folder.badge.gearshape") { model.prepareSourceMerge() }
-                    .disabled(model.isWorking || model.sourceMergePlan != nil || model.deletionPlan != nil)
-                Button("清理淘汰图片…", systemImage: "trash") { model.prepareDeletion() }
-                    .disabled(model.isWorking || model.deletionPlan != nil)
-                Button { model.chooseAndAddFolder() } label: { Label("添加文件夹", systemImage: "folder.badge.plus") }
-                Button { model.isShowingImport = true } label: { Label("从相机卡导入", systemImage: "externaldrive.badge.plus") }
-            }
+            Group {
+                if model.previewAsset == nil {
+                    Button("按日期重新归档…") { model.prepareArchive() }.disabled(model.isWorking || model.archivePending)
+                    Button("恢复未完成归档…") { model.resumeArchive(undo: false) }.disabled(model.isWorking || !model.archivePending)
+                    Button("撤销最近一次归档…") { model.resumeArchive(undo: true) }.disabled(model.isWorking)
+                    Button("清理失效索引…", systemImage: "photo.badge.exclamationmark") { model.prepareMissingAssetCleanup() }
+                        .disabled(model.isWorking || model.missingAssetPlan != nil)
+                    Button("整理重复来源…", systemImage: "folder.badge.gearshape") { model.prepareSourceMerge() }
+                        .disabled(model.isWorking || model.sourceMergePlan != nil || model.deletionPlan != nil)
+                    Button("清理淘汰图片…", systemImage: "trash") { model.prepareDeletion() }
+                        .disabled(model.isWorking || model.deletionPlan != nil)
+                    Button { model.chooseAndAddFolder() } label: { Label("添加文件夹", systemImage: "folder.badge.plus") }
+                    Button { model.isShowingImport = true } label: { Label("从相机卡导入", systemImage: "externaldrive.badge.plus") }
+                }
+            }.disabled(model.fileOperationsBlockedByShare)
         }
     }
 }

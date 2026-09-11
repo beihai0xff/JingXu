@@ -154,12 +154,19 @@ public actor ColorImageRenderer {
     }
 
     /// Writes only a caller-owned temporary file. Publication is the export coordinator's job.
-    public func encode(_ snapshot: ColorEditSnapshot, adjustments: ColorAdjustments, format: ColorExportFormat, to temporaryURL: URL) throws {
+    public func encode(_ snapshot: ColorEditSnapshot, adjustments: ColorAdjustments, format: ColorExportFormat, to temporaryURL: URL, maximumDimension: Int? = nil) throws {
         try Task.checkCancellation()
         try autoreleasepool {
             let access = try ColorSourceAccess(snapshot)
             let input = try load(snapshot, access: access)
             var image = try graph(input, adjustments: adjustments, isRAW: snapshot.isRAW)
+            if let limit = maximumDimension {
+                guard limit > 0 else { throw ColorEditError("成片尺寸必须大于零") }
+                if max(image.extent.width, image.extent.height) > CGFloat(limit) {
+                    let scale = CGFloat(limit) / max(image.extent.width, image.extent.height)
+                    image = image.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1])
+                }
+            }
             if format == .jpeg { image = image.composited(over: CIImage(color: .white).cropped(to: image.extent)) }
             guard let rendered = context.createCGImage(image, from: image.extent.integral,
                 format: format == .tiff ? .RGBA16 : .RGBA8, colorSpace: outputSpace),

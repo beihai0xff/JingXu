@@ -6,11 +6,13 @@ import JingXuCore
 extension AppModel {
     var colorTargetIDs: [String] {
         if let item = previewAsset { return [item.id] }
-        if isBatchSelecting { return assets.filter { batchSelection.contains($0.id) && $0.kind == .photo }.map(\.id) }
-        return selectedAsset.map { $0.kind == .photo ? [$0.id] : [] } ?? []
+        return selectedPhotoIDs
     }
     var canStartColorAction: Bool {
-        !isWorking && !isPreviewTransitioning && colorBatchPlan == nil && colorExportPlan == nil &&
+        canInteractWithLibrary && !photoShareSession.blocksFileChanges
+    }
+    var canInteractWithLibrary: Bool {
+        !isShowingPhotoShare && !isWorking && !isPreviewTransitioning && colorBatchPlan == nil && colorExportPlan == nil &&
         archivePlan == nil && deletionPlan == nil && missingAssetPlan == nil && sourceMergePlan == nil && qualityReanalysisPlan == nil &&
         !isShowingImport && !isShowingAlbumCreator && !isShowingColorExport
     }
