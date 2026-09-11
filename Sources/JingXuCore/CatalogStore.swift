@@ -448,13 +448,13 @@ public actor CatalogStore: CatalogRepository {
 
     public func analysisCandidates(_ query: AssetQuery = AssetQuery(), legacyOnly: Bool = false) throws -> [String] {
         var unlimited = query; unlimited.limit = Int.max; unlimited.offset = 0
-        let (sql, arguments) = Self.assetQuerySQL(unlimited, rejectedOnly: false, photosOnly: true,
+        let (sql, arguments) = try Self.assetQuerySQL(unlimited, rejectedOnly: false, photosOnly: true,
             legacyOnly: legacyOnly, projection: "a.id")
         return try dbPool.read { try String.fetchAll($0, sql: sql, arguments: arguments) }
     }
 
     public func assetListItem(id: String) throws -> AssetListItem? {
-        let (sql, arguments) = Self.assetQuerySQL(AssetQuery(limit: 1), rejectedOnly: false, assetID: id)
+        let (sql, arguments) = try Self.assetQuerySQL(AssetQuery(limit: 1), rejectedOnly: false, assetID: id)
         return try dbPool.read { try AssetListItem.fetchOne($0, sql: sql, arguments: arguments) }
     }
 
@@ -469,7 +469,7 @@ public actor CatalogStore: CatalogRepository {
     public func prepareMissingAssetCleanup(_ query: AssetQuery) throws -> MissingAssetPlan {
         var unlimited = query
         unlimited.limit = Int.max; unlimited.offset = 0
-        let (sql, arguments) = Self.assetQuerySQL(unlimited, rejectedOnly: false, projection: "a.*")
+        let (sql, arguments) = try Self.assetQuerySQL(unlimited, rejectedOnly: false, projection: "a.*")
         let candidates = try dbPool.read { try MediaAsset.fetchAll($0, sql: sql, arguments: arguments) }
         var plan = MissingAssetPlan()
         for (sourceID, files) in Dictionary(grouping: candidates, by: \.sourceID) {
@@ -534,12 +534,18 @@ public actor CatalogStore: CatalogRepository {
     }
 
     private func queryAssets(_ query: AssetQuery, rejectedOnly: Bool) throws -> [AssetListItem] {
-        let (sql, arguments) = Self.assetQuerySQL(query, rejectedOnly: rejectedOnly)
+        let (sql, arguments) = try Self.assetQuerySQL(query, rejectedOnly: rejectedOnly)
         return try dbPool.read { try AssetListItem.fetchAll($0, sql: sql, arguments: arguments) }
     }
 
+    public func matchingAssetCount(_ query: AssetQuery) throws -> Int {
+        let (sql, arguments) = try Self.assetQuerySQL(query, rejectedOnly: false, projection: "COUNT(*)", paginated: false)
+        return try dbPool.read { try Int.fetchOne($0, sql: sql, arguments: arguments) ?? 0 }
+    }
+
     private static func assetQuerySQL(_ query: AssetQuery, rejectedOnly: Bool, photosOnly: Bool = false,
-                                     legacyOnly: Bool = false, projection: String? = nil, assetID: String? = nil) -> (String, StatementArguments) {
+                                     legacyOnly: Bool = false, projection: String? = nil, assetID: String? = nil,
+                                     paginated: Bool = true) throws -> (String, StatementArguments) {
         var joins = "LEFT JOIN annotations an ON an.assetID = a.id LEFT JOIN analysisResults ar ON ar.assetID = a.id LEFT JOIN colorEdits ce ON ce.assetID = a.id"
         var conditions: [String] = []
         var arguments: StatementArguments = []
@@ -556,6 +562,22 @@ public actor CatalogStore: CatalogRepository {
         if let sourceID = query.sourceID {
             conditions.append("a.sourceID = ?")
             arguments += [sourceID]
+        }
+        if let directory = query.relativeDirectory {
+            guard query.sourceID != nil else { throw CatalogFolderError.missingSource }
+            guard !directory.contains("\0"), directory.isEmpty || directory.split(separator: "/", omittingEmptySubsequences: false)
+                .allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { throw CatalogFolderError.invalidDirectory }
+            if !directory.isEmpty {
+                // '/' is immediately followed by '0' in BINARY order. This range
+                // uses the existing (sourceID, relativePath) index, not LIKE's
+                // case folding or wildcard semantics, and includes a slash boundary.
+                conditions.append("a.relativePath COLLATE BINARY >= ? AND a.relativePath COLLATE BINARY < ?")
+                arguments += [directory + "/", directory + "0"]
+            }
+            if !query.includeSubdirectories {
+                conditions.append("instr(substr(a.relativePath, ?), '/') = 0")
+                arguments += [directory.isEmpty ? 1 : directory.unicodeScalars.count + 2]
+            }
         }
 
         switch query.collection {
@@ -592,7 +614,7 @@ public actor CatalogStore: CatalogRepository {
         }
 
         let whereClause = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
-        arguments += [query.limit, query.offset]
+        if paginated { arguments += [query.limit, query.offset] }
         let columns = projection ?? """
                    a.id, a.sourceID, a.relativePath, a.fileName, a.kind,
                    a.capturedAt, a.importedAt, a.width, a.height,
@@ -610,8 +632,7 @@ public actor CatalogStore: CatalogRepository {
             FROM mediaAssets a
             \(joins)
             \(whereClause)
-            ORDER BY COALESCE(a.capturedAt, a.modifiedAt) DESC, a.fileName ASC
-            LIMIT ? OFFSET ?
+            \(paginated ? "ORDER BY COALESCE(a.capturedAt, a.modifiedAt) DESC, a.fileName ASC LIMIT ? OFFSET ?" : "")
             """
         return (sql, arguments)
     }

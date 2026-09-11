@@ -57,7 +57,7 @@ struct JingXuApp: App {
                 Button("继续质量重算") { model.resumeQualityReanalysis() }.disabled(model.isWorking || model.resumableQualityJob == nil)
                 Divider()
                 Button("整理重复来源…") { model.prepareSourceMerge() }.disabled(model.isWorking)
-                Button("重新扫描当前来源") { model.rescanSelectedSource() }
+                Button("重新扫描整个来源…") { model.rescanSelectedSource() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
             }
         }

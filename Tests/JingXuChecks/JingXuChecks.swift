@@ -40,6 +40,17 @@ private struct TestTrash: TrashService {
 @main
 private enum JingXuChecks {
     static func main() async throws {
+        if CommandLine.arguments.contains("--folder-ui-fixtures") {
+            print(try await FolderBrowsingChecks.uiFixtures().path)
+            return
+        }
+        if CommandLine.arguments.contains("--folder-checks") {
+            try await FolderBrowsingChecks.run()
+            try await FolderBrowsingChecks.completeScope()
+            try await checkLargeCatalog()
+            print("目录浏览专项校验通过")
+            return
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--verify-legacy-copy"), CommandLine.arguments.count > index + 1 {
             let url = URL(fileURLWithPath: CommandLine.arguments[index + 1])
             guard url.lastPathComponent == "Catalog-copy.sqlite", !url.path.contains("/Library/Containers/") else {
@@ -100,6 +111,8 @@ private enum JingXuChecks {
             ("目录命名与清理", checkImportNaming),
             ("文件路径与 SHA-256", checkFileIdentityAndHash),
             ("目录持久化、筛选与标注", checkCatalog),
+            ("来源目录树、精确路径、计数、筛选与最近上级", FolderBrowsingChecks.run),
+            ("目录超过 2000 项的清理和重算范围隔离", FolderBrowsingChecks.completeScope),
             ("稳定资源身份与相册", checkStableIdentityAndAlbum),
             ("XMP 编码", checkXMP),
             ("图像元数据与质量建议", checkMetadataAndQuality),
@@ -435,6 +448,20 @@ private enum JingXuChecks {
         let elapsed = start.duration(to: .now)
         try require(firstPage.count == 2_000, "10 万条目录未返回完整首批结果")
         try require(elapsed < .milliseconds(500), "10 万条目录筛选超过 500ms：\(elapsed)")
+        let treeStart = ContinuousClock.now
+        let tree = try await store.folderTree()
+        let treeElapsed = treeStart.duration(to: .now)
+        try require(tree.first?.recursiveCount == 100_000 && tree.first?.children.count == 100, "10 万条目录树不完整")
+        let folderStart = ContinuousClock.now
+        let query = AssetQuery(sourceID: source.id, relativeDirectory: "0042", searchText: "Camera A", limit: 2000)
+        let folderPage = try await store.assets(query)
+        let folderCount = try await store.matchingAssetCount(query)
+        let folderElapsed = folderStart.duration(to: .now)
+        try require(folderPage.count == 500 && folderCount == 500, "10 万条目录筛选不正确")
+        try require(folderElapsed < .milliseconds(500), "目录筛选和计数超过 500ms：\(folderElapsed)")
+        var usage = rusage()
+        getrusage(RUSAGE_SELF, &usage)
+        print("  10 万条：目录树 \(treeElapsed)，目录首批＋计数 \(folderElapsed)，进程峰值内存 \(usage.ru_maxrss / 1_048_576) MiB（含此前全部校验）")
     }
 
     private static func checkMissingAssetCleanup() async throws {

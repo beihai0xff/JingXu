@@ -27,6 +27,10 @@ class CaskTests(unittest.TestCase):
         self.assertIn('Developer ID signed and notarized by Apple', body)
         self.assertIn('releases/download/v#{version}/JingXu-0.2.6-macOS-arm64.dmg', body)
         self.assertNotIn('ad-hoc', body)
+        self.assertIn('complete legacy v4 catalogs after making a backup', body)
+        self.assertIn('Unknown or incomplete catalog formats are rejected', body)
+        self.assertIn('Downgrading the app alone does not safely downgrade its catalog', body)
+        self.assertNotIn('does not migrate 0.2.x', body)
 
     def test_prerelease_uses_test_artifact_and_truthful_signature_notice(self):
         self.release['prerelease'] = True

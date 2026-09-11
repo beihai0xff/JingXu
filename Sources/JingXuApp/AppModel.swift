@@ -8,6 +8,7 @@ import JingXuAutomation
 enum SidebarDestination: Hashable {
     case smart(SmartCollection)
     case source(String)
+    case folder(CatalogFolderID)
     case album(String)
 }
 
@@ -16,7 +17,15 @@ final class AppModel: ObservableObject {
     @Published var sources: [SourceRoot] = []
     @Published var albums: [Album] = []
     @Published var assets: [AssetListItem] = [] { didSet { if oldValue.map(\.id) != assets.map(\.id) { automationSelectionToken = UUID() } } }
-    @Published var sidebarSelection: SidebarDestination? = .smart(.all)
+    @Published private(set) var sidebarSelection: SidebarDestination? = .smart(.all)
+    @Published var folderRoots: [CatalogFolderNode] = []
+    @Published var expandedFolders = Set<CatalogFolderID>()
+    @Published private(set) var includeSubdirectories: Bool
+    @Published var matchingAssetCount = 0
+    @Published var isLoadingAssets = false
+    var assetRequestID = UUID()
+    var folderRequestID = UUID()
+    private let browsingDefaults: UserDefaults
     @Published var selectedAssetID: String? { didSet { if oldValue != selectedAssetID { automationSelectionToken = UUID() } } }
     @Published var batchSelection = Set<String>() { didSet { if oldValue != batchSelection { automationSelectionToken = UUID() } } }
     @Published var isBatchSelecting = false { didSet { if oldValue != isBatchSelecting { automationSelectionToken = UUID() } } }
@@ -99,6 +108,12 @@ final class AppModel: ObservableObject {
     }
 
     init() {
+        if let root = ProcessInfo.processInfo.environment["JINGXU_UI_TEST_ROOT"] {
+            let id = SHA256.hash(data: Data(URL(fileURLWithPath: root).standardizedFileURL.path.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+            browsingDefaults = UserDefaults(suiteName: "app.jingxu.ui-test.\(id)")!
+        } else { browsingDefaults = .standard }
+        includeSubdirectories = browsingDefaults.object(forKey: "BrowseIncludesSubdirectories") as? Bool ?? true
         Task { await initializeCatalog() }
     }
 
@@ -215,13 +230,22 @@ final class AppModel: ObservableObject {
 
     func reloadAll() async {
         guard let store else { return }
+        let request = UUID(); folderRequestID = request
         do {
             async let loadedSources = store.sources()
             async let loadedAlbums = store.albums()
-            sources = try await loadedSources
-            albums = try await loadedAlbums
+            async let loadedFolders = store.folderTree()
+            let (newSources, newAlbums, newFolders) = try await (loadedSources, loadedAlbums, loadedFolders)
+            guard folderRequestID == request else { return }
+            let knownSources = Set(sources.map(\.id))
+            sources = newSources; albums = newAlbums; folderRoots = newFolders
+            for source in sources where !knownSources.contains(source.id) {
+                expandedFolders.insert(CatalogFolderID(sourceID: source.id))
+            }
+            reconcileFolderSelection()
             await reloadAssets()
         } catch {
+            guard folderRequestID == request else { return }
             errorMessage = "读取图库失败：\(error.localizedDescription)"
         }
     }
@@ -229,21 +253,36 @@ final class AppModel: ObservableObject {
     func reloadAssets() async {
         guard let store else { return }
         let query = currentQuery()
+        let request = UUID(); assetRequestID = request
+        isLoadingAssets = true
+        defer { if assetRequestID == request { isLoadingAssets = false } }
         do {
-            assets = try await store.assets(query)
+            async let page = store.assets(query)
+            async let count = store.matchingAssetCount(query)
+            let (loaded, total) = try await (page, count)
+            let previewID = previewAsset?.id
+            let refreshedPreview: AssetListItem?
+            if let previewID {
+                if let item = loaded.first(where: { $0.id == previewID }) { refreshedPreview = item }
+                else { refreshedPreview = try await store.assetListItem(id: previewID) }
+            } else { refreshedPreview = nil }
+            guard assetRequestID == request, currentQuery() == query, !Task.isCancelled else { return }
+            assets = loaded
+            matchingAssetCount = total
             batchSelection.formIntersection(assets.filter { $0.kind == .photo }.map(\.id))
             previewNavigation.refresh(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
-            if let id = previewAsset?.id, let refreshed = assets.first(where: { $0.id == id }) {
-                previewAsset = refreshed
-                self.selectedAssetID = id
-            } else if let id = previewAsset?.id {
-                previewAsset = try await store.assetListItem(id: id)
+            if previewAsset?.id == previewID {
+                previewAsset = refreshedPreview
+                if let id = refreshedPreview?.id, assets.contains(where: { $0.id == id }) { selectedAssetID = id }
             }
             if let selectedAssetID, !assets.contains(where: { $0.id == selectedAssetID }) {
                 self.selectedAssetID = nil
             }
-            statusText = "显示 \(assets.count) 项"
-        } catch { errorMessage = "载入照片失败：\(error.localizedDescription)" }
+            statusText = "匹配 \(total) 项，已显示 \(assets.count) 项\(total > assets.count ? "（最多 2,000 项）" : "")"
+        } catch {
+            guard assetRequestID == request, currentQuery() == query, !Task.isCancelled else { return }
+            errorMessage = "载入照片失败：\(error.localizedDescription)"
+        }
     }
 
     private func currentQuery() -> AssetQuery {
@@ -255,11 +294,90 @@ final class AppModel: ObservableObject {
         )
         switch sidebarSelection {
         case .smart(let collection): query.collection = collection
-        case .source(let id): query.sourceID = id
+        case .source(let id):
+            query.sourceID = id; query.relativeDirectory = ""; query.includeSubdirectories = includeSubdirectories
+        case .folder(let folder):
+            query.sourceID = folder.sourceID; query.relativeDirectory = folder.relativeDirectory
+            query.includeSubdirectories = includeSubdirectories
         case .album(let id): query.albumID = id
         case nil: break
         }
         return query
+    }
+
+    var selectedFolderID: CatalogFolderID? {
+        switch sidebarSelection {
+        case .source(let id): CatalogFolderID(sourceID: id)
+        case .folder(let id): id
+        default: nil
+        }
+    }
+
+    var selectedFolder: CatalogFolderNode? {
+        guard let id = selectedFolderID else { return nil }
+        return folderRoots.first(where: { $0.id.sourceID == id.sourceID })?.node(id)
+    }
+
+    var selectedFolderPath: String? {
+        guard let id = selectedFolderID, let source = sources.first(where: { $0.id == id.sourceID }) else { return nil }
+        return source.pathHint + (id.relativeDirectory.isEmpty ? "" : "/" + id.relativeDirectory)
+    }
+
+    var directoryHasNoDirectFiles: Bool {
+        selectedFolder != nil && !includeSubdirectories && selectedFolder?.directCount == 0
+    }
+
+    var canChangeBrowseScope: Bool {
+        !isStarting && !isSavingFlag && !automationOwnsOperation && canStartColorAction &&
+        errorMessage == nil && NSApp.modalWindow == nil && NSApp.keyWindow?.attachedSheet == nil
+    }
+
+    func selectSidebar(_ destination: SidebarDestination?) {
+        guard let destination, destination != sidebarSelection, canChangeBrowseScope else { return }
+        transitionPreview {
+            self.applyBrowseScope(destination)
+            Task { await self.reloadAssets() }
+        }
+    }
+
+    func setIncludeSubdirectories(_ value: Bool) {
+        guard selectedFolderID != nil, value != includeSubdirectories, canChangeBrowseScope else { return }
+        transitionPreview {
+            self.applyBrowseScope(self.sidebarSelection, includeSubdirectories: value)
+            Task { await self.reloadAssets() }
+        }
+    }
+
+    /// Called only after a successful preview-save transition, or by a completed
+    /// catalog operation which already owns the operation gate and has no editor.
+    func applyBrowseScope(_ destination: SidebarDestination?, includeSubdirectories value: Bool? = nil) {
+        assetRequestID = UUID()
+        automationSelectionToken = UUID()
+        sidebarSelection = destination
+        if let value {
+            includeSubdirectories = value
+            browsingDefaults.set(value, forKey: "BrowseIncludesSubdirectories")
+        }
+        previewAsset = nil; previewNavigation = PreviewNavigation(photoIDs: [])
+        selectedAssetID = nil; batchSelection.removeAll()
+        assets = []; matchingAssetCount = 0; isLoadingAssets = false
+        statusText = "正在载入当前范围…"
+    }
+
+    private func reconcileFolderSelection() {
+        guard let id = selectedFolderID else { return }
+        let nearest = folderRoots.first(where: { $0.id.sourceID == id.sourceID })?.nearestSurvivingAncestor(of: id)
+        guard nearest != id else { return }
+        let destination: SidebarDestination = nearest.map {
+            $0.relativeDirectory.isEmpty ? .source($0.sourceID) : .folder($0)
+        } ?? .smart(.all)
+        if colorEditor == nil { applyBrowseScope(destination) }
+        else {
+            transitionPreview {
+                self.applyBrowseScope(destination)
+                Task { await self.reloadAssets() }
+            }
+        }
     }
 
     func prepareMissingAssetCleanup() {
@@ -436,7 +554,7 @@ final class AppModel: ObservableObject {
                 self.closePreview()
                 let ids = try await store.removeSource(id: source.id, backupURL: self.backupURL())
                 try self.thumbnailProvider?.invalidate(assetIDs: ids)
-                if self.sidebarSelection == .source(source.id) { self.sidebarSelection = .smart(.all) }
+                if self.selectedFolderID?.sourceID == source.id { self.applyBrowseScope(.smart(.all)) }
                 await self.reloadAll()
                 self.statusText = "来源已移除，原照片未改动；图库备份保存在 Backups"
             } catch { self.errorMessage = "移除失败：\(error.localizedDescription)"; await self.reloadAll() }
@@ -455,7 +573,7 @@ final class AppModel: ObservableObject {
             do {
                 try await self.checkDeletionRecovery()
                 try await store.deleteAlbum(id: album.id)
-                if self.sidebarSelection == .album(album.id) { self.sidebarSelection = .smart(.all) }
+                if self.sidebarSelection == .album(album.id) { self.applyBrowseScope(.smart(.all)) }
                 await self.reloadAll()
             } catch { self.errorMessage = error.localizedDescription }
         }
@@ -480,7 +598,7 @@ final class AppModel: ObservableObject {
                 self.closePreview()
                 let report = try await store.mergeSources(plan, backupURL: self.backupURL())
                 try self.thumbnailProvider?.invalidate(assetIDs: report.invalidatedIDs)
-                self.sidebarSelection = .smart(.all)
+                self.applyBrowseScope(.smart(.all))
                 await self.reloadAll()
                 self.errorMessage = "已合并 \(report.mergedGroups) 组来源。原文件未改动。\n" + report.skipped.joined(separator: "\n")
             } catch { self.errorMessage = "合并失败：\(error.localizedDescription)"; await self.reloadAll() }
@@ -519,8 +637,10 @@ final class AppModel: ObservableObject {
                 await MainActor.run { self.analysisProgress = nil }
                 await self.reloadAll()
             } catch is CancellationError {
+                await Task { await self.reloadAll() }.value
                 await MainActor.run { self.statusText = "操作已取消" }
             } catch {
+                await Task { await self.reloadAll() }.value
                 await MainActor.run { self.errorMessage = "索引失败：\(error.localizedDescription)" }
             }
         }
@@ -549,17 +669,19 @@ final class AppModel: ObservableObject {
                 await MainActor.run { self.analysisProgress = nil }
                 await self.reloadAll()
             } catch is CancellationError {
+                await Task { await self.reloadAll() }.value
                 await MainActor.run { self.statusText = "导入已取消，已复制的文件保持完整" }
             } catch {
+                await Task { await self.reloadAll() }.value
                 await MainActor.run { self.errorMessage = "导入失败：\(error.localizedDescription)" }
             }
         }
     }
 
     func rescanSelectedSource() {
-        guard case .source(let sourceID) = sidebarSelection,
+        guard let sourceID = selectedFolderID?.sourceID,
               let source = sources.first(where: { $0.id == sourceID }) else {
-            statusText = "请先在侧栏选择一个来源"
+            statusText = "请先在侧栏选择来源或目录；重新扫描会检查整个来源"
             return
         }
         addFolderFromExistingSource(source)
@@ -579,6 +701,7 @@ final class AppModel: ObservableObject {
                 await MainActor.run { self.analysisProgress = nil }
                 await self.reloadAll()
             } catch {
+                await Task { await self.reloadAll() }.value
                 await MainActor.run { self.errorMessage = "重新扫描失败：\(error.localizedDescription)" }
             }
         }
@@ -757,7 +880,7 @@ final class AppModel: ObservableObject {
                 let album = Album(name: trimmed)
                 try await store.saveAlbum(album)
                 albums = try await store.albums()
-                sidebarSelection = .album(album.id)
+                applyBrowseScope(.album(album.id))
                 await reloadAssets()
             } catch { errorMessage = "创建相册失败：\(error.localizedDescription)" }
         }
