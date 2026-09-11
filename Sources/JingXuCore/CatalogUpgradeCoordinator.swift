@@ -9,6 +9,8 @@ public struct UpgradeManifest: Codable, Sendable {
     public var createdAt: Date
     public var databaseHash: String
     public var journalHash: String?
+    public var archiveHash: String? = nil
+    public var includesArchive: Bool? = nil
 }
 
 public enum CatalogUpgradeError: LocalizedError {
@@ -45,7 +47,7 @@ public actor CatalogUpgradeCoordinator {
     public func open() throws -> CatalogStore {
         if lease == nil { lease = try CatalogLease(databaseURL: databaseURL) }
         if let openedStore { return openedStore }
-        let store = try CatalogStore(databaseURL: databaseURL)
+        let store = try CatalogStore(databaseURL: databaseURL, lease: lease)
         openedStore = store
         return store
     }
@@ -63,7 +65,7 @@ public actor CatalogUpgradeCoordinator {
         databaseURL.deletingLastPathComponent().appendingPathComponent("Backups/Upgrades", isDirectory: true)
     }
 
-    /// Inspect before opening a write connection. Only the current schema is accepted.
+    /// Called while holding the catalog lease, before opening the application's writer.
     static func prepare(_ databaseURL: URL) throws {
         let fm = FileManager.default
         let parent = databaseURL.deletingLastPathComponent()
@@ -86,8 +88,9 @@ public actor CatalogUpgradeCoordinator {
             let application = try Int.fetchOne(db, sql: "PRAGMA application_id")
             return version == schemaVersion && application == applicationID
         }
-        guard supported else {
-            throw CatalogUpgradeError.blocked("此图库格式不受当前版本支持。本版本不迁移旧图库；原数据库及恢复日志已保留。请使用匹配的旧版镜序打开原库。")
+        if !supported {
+            try LegacyCatalogMigration.upgrade(databaseURL, reader: old)
+            return
         }
         try validate(old)
         try old.read { db in
@@ -114,6 +117,11 @@ public actor CatalogUpgradeCoordinator {
         if let hash = manifest.journalHash {
             guard try FileHasher.sha256(of: journalBackup) == hash else { throw CatalogUpgradeError.blocked("删除日志备份校验失败。") }
         }
+        if let hash = manifest.archiveHash {
+            guard try FileHasher.sha256(of: backup.appendingPathComponent("archive.json")) == hash else {
+                throw CatalogUpgradeError.blocked("归档日志备份校验失败。")
+            }
+        }
         var config = Configuration(); config.readonly = true
         let check = try DatabaseQueue(path: snapshot.path, configuration: config)
         try Self.validate(check); try check.close()
@@ -134,7 +142,7 @@ public actor CatalogUpgradeCoordinator {
         guard preserved.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL == parent.appendingPathComponent("Backups").resolvingSymlinksInPath().standardizedFileURL else {
             throw CatalogUpgradeError.blocked("恢复保全目录不在图库备份目录内，已停止。")
         }
-        for name in [databaseURL.lastPathComponent, databaseURL.lastPathComponent + "-wal", databaseURL.lastPathComponent + "-shm", "deletions.json"] {
+        for name in [databaseURL.lastPathComponent, databaseURL.lastPathComponent + "-wal", databaseURL.lastPathComponent + "-shm", "deletions.json", "archive.json"] {
             let live = parent.appendingPathComponent(name)
             let saved = preserved.appendingPathComponent(name)
             if fm.fileExists(atPath: live.path), !fm.fileExists(atPath: saved.path) { try fm.copyItem(at: live, to: saved) }
@@ -149,6 +157,12 @@ public actor CatalogUpgradeCoordinator {
         let journal = parent.appendingPathComponent("deletions.json")
         if manifest.journalHash != nil { try Data(contentsOf: journalBackup).write(to: journal, options: .atomic) }
         else if fm.fileExists(atPath: journal.path) { try fm.removeItem(at: journal) }
+        if manifest.includesArchive == true {
+            let archive = parent.appendingPathComponent("archive.json")
+            if manifest.archiveHash != nil {
+                try Data(contentsOf: backup.appendingPathComponent("archive.json")).write(to: archive, options: .atomic)
+            } else if fm.fileExists(atPath: archive.path) { try fm.removeItem(at: archive) }
+        }
         let restored = try DatabaseQueue(path: databaseURL.path, configuration: config)
         try Self.validate(restored); try restored.close()
         try fm.removeItem(at: state)
