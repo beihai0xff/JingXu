@@ -1,8 +1,8 @@
 cask "jingxu" do
-  version "0.3.0"
-  sha256 "2367456f1770959cff32192ac4d66b6d1001eedecd2bef9dcc63537236522850"
+  version "0.4.0"
+  sha256 "014af0f168ad597a135159db06fdb294a579cae6a28547666967b58907f2b1c7"
 
-  url "https://github.com/beihai0xff/JingXu/releases/download/v#{version}/JingXu-0.3.0-test.18-macOS-arm64.dmg"
+  url "https://github.com/beihai0xff/JingXu/releases/download/v#{version}/JingXu-0.4.0-test.19-macOS-arm64.dmg"
   name "镜序"
   name "JingXu"
   desc "Offline camera photo catalog and organizer"
