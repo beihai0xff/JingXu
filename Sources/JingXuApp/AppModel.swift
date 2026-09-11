@@ -1,7 +1,9 @@
 @preconcurrency import AppKit
 import Combine
+import CryptoKit
 import Foundation
 import JingXuCore
+import JingXuAutomation
 
 enum SidebarDestination: Hashable {
     case smart(SmartCollection)
@@ -13,11 +15,15 @@ enum SidebarDestination: Hashable {
 final class AppModel: ObservableObject {
     @Published var sources: [SourceRoot] = []
     @Published var albums: [Album] = []
-    @Published var assets: [AssetListItem] = []
+    @Published var assets: [AssetListItem] = [] { didSet { if oldValue.map(\.id) != assets.map(\.id) { automationSelectionToken = UUID() } } }
     @Published var sidebarSelection: SidebarDestination? = .smart(.all)
-    @Published var selectedAssetID: String?
-    @Published var batchSelection = Set<String>()
-    @Published var isBatchSelecting = false
+    @Published var selectedAssetID: String? { didSet { if oldValue != selectedAssetID { automationSelectionToken = UUID() } } }
+    @Published var batchSelection = Set<String>() { didSet { if oldValue != batchSelection { automationSelectionToken = UUID() } } }
+    @Published var isBatchSelecting = false { didSet { if oldValue != isBatchSelecting { automationSelectionToken = UUID() } } }
+    var automationSelectionToken = UUID()
+    var automationOwnsOperation = false
+    var automationDirectoryPanel: NSOpenPanel?
+    @Published var automationConnection: AutomationConnection?
 
     func toggleBatchSelection(_ item: AssetListItem) {
         guard item.kind == .photo, !isWorking else { return }
@@ -66,7 +72,7 @@ final class AppModel: ObservableObject {
     var colorExportCoordinator: ColorExportCoordinator?
     var colorThumbnails: ColorThumbnailProvider?
     var colorEditorObservation: AnyCancellable?
-    @Published var previewAsset: AssetListItem?
+    @Published var previewAsset: AssetListItem? { didSet { if oldValue?.id != previewAsset?.id { automationSelectionToken = UUID() } } }
     private var previewNavigation = PreviewNavigation(photoIDs: [])
 
     let volumeMonitor = VolumeMonitor()
@@ -125,6 +131,19 @@ final class AppModel: ObservableObject {
             self.colorExportCoordinator = ColorExportCoordinator(store: store)
             self.colorThumbnails = ColorThumbnailProvider(directory: try JingXuPaths.thumbnailCache())
             self.colorPresets = try await store.colorPresets()
+            let testID = ProcessInfo.processInfo.environment["JINGXU_UI_TEST_ROOT"].map {
+                SHA256.hash(data: Data(URL(fileURLWithPath: $0).standardizedFileURL.path.utf8)).map { String(format: "%02x", $0) }.joined()
+            }
+            let defaults = testID.map {
+                UserDefaults(suiteName: "app.jingxu.ui-test.\($0)")!
+            } ?? .standard
+            let credentialService = testID.map {
+                "app.jingxu.desktop.mcp.ui-test.\($0)"
+            } ?? "app.jingxu.desktop.mcp"
+            self.automationConnection = AutomationConnection(defaults: defaults, credentialService: credentialService) { [weak self] in
+                guard let self, let store = self.store else { throw ColorEditError("图库未打开") }
+                return ColorAutomationController(host: self, store: store, exporter: self.colorExportCoordinator)
+            }
         } catch {
             store = nil
             scanner = nil
@@ -306,12 +325,18 @@ final class AppModel: ObservableObject {
     func openPreview(_ item: AssetListItem) {
         guard item.kind == .photo, !isDeleting else { return }
         transitionPreview {
-            self.selectAsset(item)
-            self.previewNavigation = PreviewNavigation(photoIDs: self.assets.filter { $0.kind == .photo }.map(\.id))
-            self.previewAsset = item
+            self.presentPreview(item)
         }
     }
+    /// The caller owns either the UI transition or the automation operation gate.
+    func presentPreview(_ item: AssetListItem) {
+        selectedAssetID = item.id
+        previewNavigation = PreviewNavigation(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
+        previewAsset = item
+        NSApp.mainWindow?.makeFirstResponder(nil)
+    }
     func selectAsset(_ item: AssetListItem) {
+        guard !automationOwnsOperation else { return }
         selectedAssetID = item.id
         // A non-focusable SwiftUI grid cell otherwise leaves the search field editing.
         NSApp.keyWindow?.makeFirstResponder(nil)
@@ -323,7 +348,7 @@ final class AppModel: ObservableObject {
         }
     }
     var previewNavigationEnabled: Bool {
-        previewAsset != nil && !isPreviewTransitioning && !isDeleting && !isShowingImport && !isShowingAlbumCreator &&
+        previewAsset != nil && !automationOwnsOperation && !isPreviewTransitioning && !isDeleting && !isShowingImport && !isShowingAlbumCreator &&
         !isShowingColorPresets && !isShowingColorExport && colorBatchPlan == nil && colorExportPlan == nil &&
         deletionPlan == nil && sourceMergePlan == nil && qualityReanalysisPlan == nil && errorMessage == nil
     }
@@ -560,6 +585,7 @@ final class AppModel: ObservableObject {
     }
 
     func cancelCurrentOperation() {
+        if automationOwnsOperation { automationConnection?.cancelCurrentJob(); return }
         if isReanalyzing {
             Task { await reanalysisCoordinator?.requestCancel(); operationTask?.cancel() }
         } else { operationTask?.cancel() }

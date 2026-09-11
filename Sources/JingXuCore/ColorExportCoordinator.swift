@@ -70,7 +70,7 @@ public actor ColorExportCoordinator {
             let temporary = plan.directory.appendingPathComponent(".jingxu-export-\(UUID().uuidString).tmp")
             defer { try? FileManager.default.removeItem(at: temporary) }
             do {
-                guard item.destination.deletingLastPathComponent().standardizedFileURL == plan.directory.standardizedFileURL,
+                guard item.destination.deletingLastPathComponent().standardizedFileURL.pathComponents == plan.directory.standardizedFileURL.pathComponents,
                       try SourceIdentity.resolve(plan.directory) == plan.identity else { throw ColorEditError("导出目标越界或目录已变化") }
                 try await store.validateColorSnapshot(item.snapshot)
                 if Self.exists(item.destination) { report.skipped.append("\(item.destination.lastPathComponent)：目标已存在"); continue }

@@ -43,6 +43,7 @@ extension CatalogStore {
             guard let other, identity.matches(other) else { continue }
             source.bookmarkData = try BookmarkStore.makeBookmark(for: canonicalURL)
             source.pathHint = identity.path; source.isOnline = true
+            source.volumeIdentifier = identity.volume
             source.directoryIdentityJSON = String(decoding: try JSONEncoder().encode(identity), as: UTF8.self)
             try upsertSource(source)
             return source

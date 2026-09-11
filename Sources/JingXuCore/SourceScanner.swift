@@ -75,7 +75,9 @@ public struct DefaultSourceScanner: SourceScanner {
                 let relativePath = FileIdentity.relativePath(of: fileURL, under: root)
                 let fileSize = Int64(values.fileSize ?? 0)
                 let modifiedAt = values.contentModificationDate ?? Date.distantPast
+                let fileIdentifier = FileIdentity.resourceIdentifier(for: fileURL)
                 if let existing = existingByPath[relativePath],
+                   existing.fileIdentifier == fileIdentifier,
                    existing.fileSize == fileSize,
                    abs(existing.modifiedAt.timeIntervalSince(modifiedAt)) < 0.001 {
                     continue
@@ -85,7 +87,7 @@ public struct DefaultSourceScanner: SourceScanner {
                 let asset = MediaAsset(
                     sourceID: source.id,
                     relativePath: relativePath,
-                    fileIdentifier: FileIdentity.resourceIdentifier(for: fileURL),
+                    fileIdentifier: fileIdentifier,
                     fileName: fileURL.lastPathComponent,
                     uniformType: metadata.uniformType ?? UTType(filenameExtension: fileURL.pathExtension)?.identifier,
                     kind: kind,
@@ -126,6 +128,7 @@ public struct DefaultSourceScanner: SourceScanner {
         mutableSource.isOnline = true
         mutableSource.lastScanAt = Date()
         if let identity = try? SourceIdentity.resolve(root), let data = try? JSONEncoder().encode(identity) {
+            mutableSource.volumeIdentifier = identity.volume
             mutableSource.directoryIdentityJSON = String(decoding: data, as: UTF8.self)
         }
         if resolved.isStale {

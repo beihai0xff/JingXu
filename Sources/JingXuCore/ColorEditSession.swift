@@ -4,7 +4,11 @@ import Foundation
 @MainActor
 public final class ColorEditSession: ObservableObject {
     @Published public private(set) var snapshot: ColorEditSnapshot
-    @Published public private(set) var adjustments: ColorAdjustments
+    @Published public private(set) var adjustments: ColorAdjustments {
+        didSet { if adjustments != oldValue { editVersion = UUID() } }
+    }
+    public private(set) var editVersion = UUID()
+    @Published public private(set) var isExternallyControlled = false
     @Published public private(set) var result: ColorRenderedImage?
     @Published public var comparing = false { didSet { render(interactive: false) } }
     @Published public private(set) var renderError: String?
@@ -37,8 +41,9 @@ public final class ColorEditSession: ObservableObject {
         }
         return adjustments[parameter]
     }
-    public func beginGesture() { isDragging = true; if gestureStart == nil { gestureStart = adjustments } }
+    public func beginGesture() { guard !isExternallyControlled else { return }; isDragging = true; if gestureStart == nil { gestureStart = adjustments } }
     public func endGesture() {
+        guard !isExternallyControlled else { return }
         if let initial = gestureStart, initial != adjustments { history.push(initial) }
         gestureStart = nil; isDragging = false
         render(interactive: false)
@@ -46,6 +51,7 @@ public final class ColorEditSession: ObservableObject {
         autoSave = Task { _ = await flush() }
     }
     public func change(_ parameter: ColorParameter, value: Double) {
+        guard !isExternallyControlled else { return }
         if gestureStart == nil { gestureStart = adjustments }
         if parameter.group == .whiteBalance, adjustments.whiteBalance == .asShot {
             adjustments.temperature = displayValue(.temperature); adjustments.tint = displayValue(.tint)
@@ -65,9 +71,10 @@ public final class ColorEditSession: ObservableObject {
     }
     public func asShot() { var value = adjustments; value.whiteBalance = .asShot; apply(value) }
     public func resetAll() { apply(ColorAdjustments()) }
-    public func undo() { endGestureIfNeeded(); if let value = history.undo(adjustments) { apply(value, track: false) } }
-    public func redo() { endGestureIfNeeded(); if let value = history.redo(adjustments) { apply(value, track: false) } }
+    public func undo() { guard !isExternallyControlled else { return }; endGestureIfNeeded(); if let value = history.undo(adjustments) { apply(value, track: false) } }
+    public func redo() { guard !isExternallyControlled else { return }; endGestureIfNeeded(); if let value = history.redo(adjustments) { apply(value, track: false) } }
     public func apply(_ value: ColorAdjustments, track: Bool = true) {
+        guard !isExternallyControlled else { return }
         guard value != adjustments else { return }
         if track { endGestureIfNeeded(); history.push(adjustments) }
         adjustments = value; comparing = false; schedule()
@@ -133,6 +140,7 @@ public final class ColorEditSession: ObservableObject {
         return await task.value
     }
     public func discardDraft() {
+        guard !isExternallyControlled else { return }
         autoSave?.cancel(); autoSave = nil
         guard !isSaving, let saved = try? snapshot.adjustments else { return }
         adjustments = saved; saveError = nil; history = ColorEditHistory(); gestureStart = nil
@@ -141,5 +149,22 @@ public final class ColorEditSession: ObservableObject {
     public func dispose() {
         disposed = true; autoSave?.cancel(); rendering?.cancel(); generation = UUID(); result = nil
         Task { await ColorImageRenderer.shared.release() }
+    }
+
+    public enum ExternalChange: Sendable { case set(ColorAdjustments), undo, redo }
+
+    /// A command and its save form one edit. Manual input cannot overtake the database await.
+    public func applyExternal(_ change: ExternalChange, expectedVersion: UUID) async throws {
+        guard !disposed, !isExternallyControlled, !isDragging, !isSaving else { throw ColorEditError("调色会话正在操作，请稍后重新读取上下文") }
+        guard editVersion == expectedVersion else { throw ColorEditError("调整已变化，请重新读取上下文") }
+        guard saveError == nil else { throw ColorEditError("请先在镜序中重试保存或放弃未保存调整") }
+        switch change {
+        case .set(let values): try values.validate(isRAW: isRAW); apply(values)
+        case .undo: undo()
+        case .redo: redo()
+        }
+        isExternallyControlled = true
+        defer { isExternallyControlled = false }
+        guard await flush() else { throw ColorEditError(saveError ?? "调色保存失败，草稿已保留") }
     }
 }

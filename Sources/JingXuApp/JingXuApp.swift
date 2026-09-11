@@ -65,7 +65,7 @@ struct JingXuApp: App {
         Settings {
             SettingsView()
                 .environmentObject(model)
-                .frame(width: 520, height: 280)
+                .frame(width: 560, height: 480)
         }
     }
 }

@@ -6,12 +6,14 @@ final class ColorApplicationDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
     private var terminating = false
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let model, let editor = model.colorEditor else { return .terminateNow }
+        guard let model else { return .terminateNow }
         guard !terminating else { return .terminateCancel }
         terminating = true; model.isPreviewTransitioning = true
         Task {
-            let saved = await editor.flush()
-            if saved { editor.dispose() }
+            await model.automationConnection?.shutdown(preservePreference: true)
+            let editor = model.colorEditor
+            let saved = await editor?.flush() ?? true
+            if saved { editor?.dispose() }
             model.isPreviewTransitioning = false; terminating = false
             sender.reply(toApplicationShouldTerminate: saved)
         }

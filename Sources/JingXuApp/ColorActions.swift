@@ -19,16 +19,14 @@ extension AppModel {
         startOperation {
             do {
                 let snapshot = try await store.colorSnapshot(assetID: item.id)
-                let session = try ColorEditSession(store: store, snapshot: snapshot) { [weak self] in await self?.reloadAssets() }
-                self.colorEditor = session
-                self.colorEditorObservation = session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
-                session.start()
+                let session = try self.makeColorSession(snapshot)
+                self.attachColorSession(session)
             } catch { self.errorMessage = error.localizedDescription }
         }
     }
     /// Navigation remains synchronous for browsing, but editing must drain pending writes first.
     func transitionPreview(_ action: @escaping @MainActor () -> Void) {
-        guard !isPreviewTransitioning else { return }
+        guard !isPreviewTransitioning, !automationOwnsOperation else { return }
         guard let editor = colorEditor else { action(); return }
         isPreviewTransitioning = true
         Task {
@@ -39,6 +37,15 @@ extension AppModel {
         }
     }
     func finishColorEditing() { transitionPreview {} }
+    func makeColorSession(_ snapshot: ColorEditSnapshot) throws -> ColorEditSession {
+        guard let store else { throw ColorEditError("图库未打开") }
+        return try ColorEditSession(store: store, snapshot: snapshot) { [weak self] in await self?.reloadAssets() }
+    }
+    func attachColorSession(_ session: ColorEditSession) {
+        colorEditor = session
+        colorEditorObservation = session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        session.start()
+    }
     func discardStaleColor() {
         guard let editor = colorEditor, let store, !editor.isSaving, !isPreviewTransitioning else { return }
         let alert = NSAlert()

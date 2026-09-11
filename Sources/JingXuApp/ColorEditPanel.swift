@@ -74,6 +74,7 @@ struct ColorEditPanel: View {
                 Text("调整自动保存在图库；导出成片可生成独立图片。").font(.caption2).foregroundStyle(.secondary)
             }.padding(14)
         }.background(Color(nsColor: .controlBackgroundColor))
+            .disabled(model.automationOwnsOperation || session.isExternallyControlled)
             .onChange(of: focusedParameter) { previous, _ in if previous != nil { session.endGesture() } }
     }
 }

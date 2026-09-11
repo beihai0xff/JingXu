@@ -44,6 +44,20 @@ private enum JingXuChecks {
             try await ColorChecks.verifyFile(URL(fileURLWithPath: CommandLine.arguments[index+1]), output: URL(fileURLWithPath: CommandLine.arguments[index+2]))
             return
         }
+        if CommandLine.arguments.contains("--mcp-checks") {
+            try await AutomationChecks.run()
+            try await AutomationChecks.networking()
+            print("MCP 调色与 HTTP 实连检查通过")
+            return
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--mcp-serve-file"), CommandLine.arguments.count > index + 1 {
+            try await AutomationChecks.serveFile(URL(fileURLWithPath: CommandLine.arguments[index+1]))
+            return
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--mcp-file"), CommandLine.arguments.count > index + 2 {
+            try await AutomationChecks.verifyFile(URL(fileURLWithPath: CommandLine.arguments[index+1]), output: URL(fileURLWithPath: CommandLine.arguments[index+2]))
+            return
+        }
         if CommandLine.arguments.contains("--color-checks") {
             try ColorChecks.presets()
             print("XMP 与历史检查通过")
@@ -97,6 +111,8 @@ private enum JingXuChecks {
             ("成片导出、不覆盖、写入失败、取消及修订冻结", ColorChecks.exporting),
             ("XMP 严格导入、稀疏参数及撤销历史", { try ColorChecks.presets() }),
             ("编辑会话自动保存、并发保存、失败重试及过期渲染", ColorChecks.editing),
+            ("MCP 调色、预览、批量、导出、版本冲突与取消", AutomationChecks.run),
+            ("MCP HTTP 实连、认证、Origin、Host 与端口冲突", AutomationChecks.networking),
             ("10 万条目录查询性能", checkLargeCatalog)
         ]
 
@@ -317,6 +333,25 @@ private enum JingXuChecks {
         }
         try require(first.assetIDs.count == 2 && second.assetIDs.isEmpty, "扫描未正确增量跳过")
         try require(assets.count == 2 && pairKeys == ["img_0001"], "RAW/JPEG 未正确配对")
+
+        // A remount or same-size replacement can change file identity without changing its timestamp.
+        guard let jpegID = assets.first(where: { $0.fileName == "IMG_0001.JPG" })?.id,
+              let jpeg = try await store.asset(id: jpegID) else { throw CheckFailure(description: "缺少 JPEG") }
+        try await store.saveAnnotation(UserAnnotation(assetID: jpeg.id, rating: 4, flag: .none, keywords: ["保留"]))
+        let jpegURL = library.appendingPathComponent(jpeg.fileName)
+        try FileManager.default.moveItem(at: jpegURL, to: workspace.appendingPathComponent("original.jpg"))
+        try Data("jpeg".utf8).write(to: jpegURL)
+        try FileManager.default.setAttributes([.modificationDate: jpeg.modifiedAt], ofItemAtPath: jpegURL.path)
+        var previousMount = source
+        previousMount.volumeIdentifier = "previous-mount"
+        let refreshed = try await scanner.scan(source: previousMount, progress: nil)
+        guard let replacement = try await store.asset(id: jpeg.id) else { throw CheckFailure(description: "替换后照片 ID 丢失") }
+        try require(refreshed.assetIDs == [jpeg.id] && replacement.fileIdentifier != jpeg.fileIdentifier,
+                    "同尺寸、同时间文件的身份变化被增量扫描跳过")
+        let annotation = try await store.annotation(for: jpeg.id)
+        try require(annotation.rating == 4 && annotation.keywords == ["保留"], "更新文件身份丢失用户标注")
+        guard let refreshedSource = try await store.source(id: source.id) else { throw CheckFailure(description: "扫描后来源丢失") }
+        _ = try MissingAssetProbe.identity(for: refreshedSource)
     }
 
     private static func checkSafeImport() async throws {
@@ -659,6 +694,16 @@ private enum JingXuChecks {
         let original = try await store.registerSource(at: folder)
         let same = try await store.registerSource(at: folder)
         try require(original.id == same.id, "重复添加未复用来源")
+        var previousMount = same
+        previousMount.volumeIdentifier = "previous-mount"
+        try await store.upsertSource(previousMount)
+        do {
+            _ = try MissingAssetProbe.identity(for: previousMount)
+            throw CheckFailure(description: "卷身份变化未拒绝")
+        } catch let error as CocoaError { try require(error.code == .fileReadUnknown, "卷身份变化错误类型不符") }
+        let reauthorized = try await store.registerSource(at: folder)
+        try require(reauthorized.id == original.id, "重新授权未保留来源 ID")
+        _ = try MissingAssetProbe.identity(for: reauthorized)
         let link = root.appendingPathComponent("linked")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folder)
         let linked = try await store.registerSource(at: link)

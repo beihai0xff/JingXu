@@ -118,8 +118,11 @@ struct SettingsView: View {
         Form {
             Section("隐私") {
                 Label("完全离线分析", systemImage: "lock.shield")
-                Text("镜序不上传照片、缩略图、元数据或使用统计。")
+                Text("镜序在本机分析和渲染照片。启用 AI 助手连接后，所选照片的缩小预览与参数可交给 Codex，进入模型上下文。")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            if let connection = model.automationConnection {
+                AutomationConnectionSection(connection: connection)
             }
             Section("缓存") {
                 Button("清理缩略图缓存") { model.clearThumbnailCache() }

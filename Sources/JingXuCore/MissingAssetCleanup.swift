@@ -31,10 +31,14 @@ public enum MissingAssetProbe {
         let resolved = try BookmarkStore.resolve(source)
         guard !resolved.isStale else { throw CocoaError(.fileReadNoPermission) }
         let identity = try SourceIdentity.resolve(resolved.url)
-        if let volume = source.volumeIdentifier, volume != identity.volume { throw CocoaError(.fileReadUnknown) }
+        if let volume = source.volumeIdentifier, volume != identity.volume {
+            throw CocoaError(.fileReadUnknown, userInfo: [NSLocalizedDescriptionKey: "来源磁盘身份已变化，请重新授权并扫描来源"])
+        }
         if let json = source.directoryIdentityJSON {
             let saved = try JSONDecoder().decode(SourceIdentity.self, from: Data(json.utf8))
-            guard saved.matches(identity) else { throw CocoaError(.fileReadUnknown) }
+            guard saved.matches(identity) else {
+                throw CocoaError(.fileReadUnknown, userInfo: [NSLocalizedDescriptionKey: "来源目录身份已变化，请重新授权并扫描来源"])
+            }
         }
         return identity
     }

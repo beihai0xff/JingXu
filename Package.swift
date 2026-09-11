@@ -15,7 +15,9 @@ let package = Package(
         .executable(name: "JingXuCalibration", targets: ["JingXuCalibration"])
     ],
     dependencies: [
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.10.0")
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.10.0"),
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0")
     ],
     targets: [
         .target(
@@ -24,9 +26,16 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift")
             ]
         ),
+        .target(
+            name: "JingXuAutomation",
+            dependencies: ["JingXuCore", .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio")]
+        ),
         .executableTarget(
             name: "JingXuApp",
-            dependencies: ["JingXuCore"]
+            dependencies: ["JingXuCore", "JingXuAutomation"]
         ),
         .executableTarget(
             name: "JingXuCalibration",
@@ -34,7 +43,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "JingXuChecks",
-            dependencies: ["JingXuCore", .product(name: "GRDB", package: "GRDB.swift")],
+            dependencies: ["JingXuCore", "JingXuAutomation", .product(name: "GRDB", package: "GRDB.swift")],
             path: "Tests/JingXuChecks"
         )
     ]
