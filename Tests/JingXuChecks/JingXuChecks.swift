@@ -40,6 +40,15 @@ private struct TestTrash: TrashService {
 @main
 private enum JingXuChecks {
     static func main() async throws {
+        if let index = CommandLine.arguments.firstIndex(of: "--verify-legacy-copy"), CommandLine.arguments.count > index + 1 {
+            let url = URL(fileURLWithPath: CommandLine.arguments[index + 1])
+            guard url.lastPathComponent == "Catalog-copy.sqlite", !url.path.contains("/Library/Containers/") else {
+                throw ColorChecks.Failure(description: "只允许显式独立 Catalog-copy.sqlite 副本")
+            }
+            try await LegacyMigrationChecks.verifyCopy(url)
+            print("旧库副本迁移：全部原始记录一致，调色表和备份已验证")
+            return
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--color-file"), CommandLine.arguments.count > index + 2 {
             try await ColorChecks.verifyFile(URL(fileURLWithPath: CommandLine.arguments[index+1]), output: URL(fileURLWithPath: CommandLine.arguments[index+2]))
             return
@@ -106,6 +115,7 @@ private enum JingXuChecks {
             ("直方图统计、透明像素与取消", checkHistogram),
             ("来源注册、合并、备份与移除", checkSourceManagement),
             ("当前图库格式、旧库拒绝、锁、失败保护及恢复", CatalogFormatChecks.run),
+            ("旧 v4 图库迁移、WAL 备份、记录保留与恢复", LegacyMigrationChecks.run),
             ("基础调色、方向、透明度、导出精度和取消", ColorChecks.rendering),
             ("调色持久化、批量回滚、缓存、移动与合并", ColorChecks.persistence),
             ("成片导出、不覆盖、写入失败、取消及修订冻结", ColorChecks.exporting),

@@ -30,7 +30,11 @@ public actor CatalogStore: CatalogRepository {
     public let databasePath: String
     let dbPool: DatabasePool
 
-    public init(databaseURL: URL) throws {
+    public init(databaseURL: URL, lease: CatalogLease? = nil) throws {
+        // The app coordinator retains its lease for the session. Direct/test stores
+        // acquire one for opening/migration only, not for unrelated later readers.
+        let openingLease = try lease ?? CatalogLease(databaseURL: databaseURL)
+        defer { withExtendedLifetime(openingLease) {} }
         try FileManager.default.createDirectory(
             at: databaseURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -58,7 +62,7 @@ public actor CatalogStore: CatalogRepository {
         return try CatalogStore(databaseURL: url)
     }
 
-    private static func createCurrentSchema(_ writer: DatabasePool) throws {
+    static func createCurrentSchema(_ writer: any DatabaseWriter) throws {
         try writer.write { db in
             if try Int.fetchOne(db, sql: "PRAGMA user_version") == CatalogUpgradeCoordinator.schemaVersion { return }
             try db.create(table: "sourceRoots") { table in
@@ -180,6 +184,13 @@ public actor CatalogStore: CatalogRepository {
                 table.uniqueKey(["jobID", "assetID"])
             }
             try db.create(index: "qualityJobItems_pending", on: "qualityJobItems", columns: ["jobID", "state", "ordinal"])
+            try createColorTables(db)
+            try db.execute(sql: "PRAGMA user_version = \(CatalogUpgradeCoordinator.schemaVersion)")
+            try db.execute(sql: "PRAGMA application_id = \(CatalogUpgradeCoordinator.applicationID)")
+        }
+    }
+
+    static func createColorTables(_ db: Database) throws {
             try db.create(table: "colorEdits") { table in
                 table.column("assetID", .text).primaryKey().references("mediaAssets", onDelete: .cascade)
                 table.column("adjustmentsJSON", .text).notNull()
@@ -194,9 +205,6 @@ public actor CatalogStore: CatalogRepository {
                 table.column("patchJSON", .text).notNull()
                 table.column("updatedAt", .datetime).notNull()
             }
-            try db.execute(sql: "PRAGMA user_version = \(CatalogUpgradeCoordinator.schemaVersion)")
-            try db.execute(sql: "PRAGMA application_id = \(CatalogUpgradeCoordinator.applicationID)")
-        }
     }
 
     public func upsertSource(_ source: SourceRoot) throws {
