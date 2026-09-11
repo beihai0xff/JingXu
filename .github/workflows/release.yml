@@ -12,6 +12,8 @@ permissions:
 env:
   # Explicit release channel. Developer ID failures never fall back to ad-hoc.
   RELEASE_MODE: adhoc
+  # Match the toolchain used to resolve and validate Package.resolved locally.
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
 
 concurrency:
   group: jingxu-release-${{ github.ref }}
@@ -20,7 +22,7 @@ concurrency:
 jobs:
   build:
     if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -31,7 +33,7 @@ jobs:
 
   sign:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 90
     environment: release
     outputs:

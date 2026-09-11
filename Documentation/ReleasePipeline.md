@@ -14,6 +14,8 @@ zsh Scripts/build.sh release  # 完成同样检查，再签名、公证并生成
 
 省略参数等同于 `check`。三种模式使用相同的 arm64 编译参数和 `Package.resolved`，构建全部 target，直接执行已构建的 Release 版 `JingXuChecks`。两种打包模式共用应用组装、SwiftPM 资源复制、DMG 与 SHA-256 生成，仅签名、公证和安装说明不同。打包入口不推送标签或创建 Release；已有版本产物须先归档或使用新版本。
 
+CI 的构建和签名作业固定使用 `macos-26` 与 Xcode 26.6（`DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer`），与本机生成和验证锁文件的工具链一致。本地开发也使用 Xcode 26.6；`Package.swift` 的 6.1 声明是清单语言版本。Swift 6.1 与 6.3 对依赖 traits 的解析结果不同，不能混用锁文件，也不能在 CI 中临时开启自动解析绕过固定依赖检查。应用最低运行系统仍为 macOS 14。
+
 发布通道由工作流中的 `RELEASE_MODE` 显式指定，当前为 `adhoc`。它直接调用 `build.sh adhoc`，不读取证书或公证凭据。`release` 通道由 `Scripts/ci-package-app.sh` 准备、清理临时签名凭据，再调用 `build.sh release`。构建和打包逻辑只维护在 `build.sh`；正式签名失败不切换通道。
 
 ## 触发与执行顺序
