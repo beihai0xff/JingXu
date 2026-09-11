@@ -34,6 +34,7 @@ struct ContentView: View {
         .sheet(item: $model.archivePlan) { plan in
             VStack(alignment: .leading, spacing: 12) {
                 Text(plan.isBatchMove == true ? "移动所选照片" : "按日期重新归档").font(.title2)
+                Text(plan.isBatchMove == true ? "范围：已确认的所选照片及明确配套文件" : "范围：整个图库，不受当前目录或筛选影响").font(.callout)
                 Text("\(plan.count) 个文件 · \(ByteCountFormatter.string(fromByteCount: plan.bytes, countStyle: .file))")
                 Text("同一磁盘直接移动，不复制、不覆盖。原路径将失效，其他软件不会自动更新。视频保留原位。执行前备份图库；评分、标签和相册关系保留。")
                 ScrollView {
@@ -126,10 +127,6 @@ struct ContentView: View {
             Text(model.errorMessage ?? "")
         }
         .modifier(ColorWorkflowPresentation())
-        .onChange(of: model.sidebarSelection) { _, _ in
-            model.closePreview()
-            Task { await model.reloadAssets() }
-        }
         .onChange(of: model.searchText) { _, _ in model.closePreview() }
         .onChange(of: model.minimumRating) { _, _ in
             model.closePreview()
@@ -143,6 +140,7 @@ struct ContentView: View {
 
     private func photoPreview(_ item: AssetListItem) -> some View {
         VStack(spacing: 0) {
+            FolderScopeBar()
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
                     ZoomPreview(item: item, showsFilmstrip: $showsPreviewFilmstrip, showsInspector: $showsPreviewInspector)
@@ -172,7 +170,7 @@ struct ContentView: View {
     }
 
     private var sidebar: some View {
-        List(selection: $model.sidebarSelection) {
+        List(selection: Binding(get: { model.sidebarSelection }, set: { model.selectSidebar($0) })) {
             Section("图库") {
                 ForEach(SmartCollection.allCases) { collection in
                     Label(collection.displayName, systemImage: collection.systemImage)
@@ -181,18 +179,13 @@ struct ContentView: View {
             }
 
             Section("来源") {
-                ForEach(model.sources) { source in
-                    Label {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(source.name)
-                            if !source.isOnline { Text("离线").font(.caption).foregroundStyle(.secondary) }
-                        }
-                    } icon: {
-                        Image(systemName: source.isOnline ? "folder" : "externaldrive.badge.xmark")
-                    }
-                    .tag(SidebarDestination.source(source.id))
+                ForEach(model.visibleFolderRows) { row in
+                    FolderSidebarLabel(row: row)
+                    .tag(row.destination)
                     .contextMenu {
-                        Button("移除来源…", role: .destructive) { model.removeSource(source) }.disabled(model.isWorking)
+                        if row.depth == 0 {
+                            Button("移除来源…", role: .destructive) { model.removeSource(row.source) }.disabled(model.isWorking)
+                        }
                     }
                 }
                 Button("添加文件夹…") { model.chooseAndAddFolder() }
@@ -214,11 +207,13 @@ struct ContentView: View {
             }
         }
         .listStyle(.sidebar)
+        .disabled(!model.canChangeBrowseScope)
         .navigationTitle("镜序")
     }
 
     private var libraryGrid: some View {
         VStack(spacing: 0) {
+            FolderScopeBar()
             filterBar
             HStack {
                 Toggle("批量选择", isOn: $model.isBatchSelecting)
@@ -241,12 +236,15 @@ struct ContentView: View {
             .disabled(model.isWorking)
             .padding(8)
             Divider()
-            if model.assets.isEmpty {
+            if model.isLoadingAssets && model.assets.isEmpty {
+                ProgressView("正在载入当前范围…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.assets.isEmpty {
                 ContentUnavailableView {
-                    Label(model.hasUserFilters ? "当前筛选无匹配结果" : "当前范围暂无照片", systemImage: "photo.on.rectangle.angled")
+                    Label(model.directoryHasNoDirectFiles ? "此目录没有直接文件" : (model.hasUserFilters ? "当前筛选无匹配结果" : "当前范围暂无照片"), systemImage: "photo.on.rectangle.angled")
                 } description: {
-                    Text(model.hasUserFilters ? "照片可能被搜索、评分或旗标条件隐藏。" : "可添加照片文件夹、导入照片，或等待当前扫描完成。")
+                    Text(model.directoryHasNoDirectFiles ? "可开启包含子目录，查看下级文件夹中的已索引照片与视频。" : (model.hasUserFilters ? "照片可能被搜索、评分或旗标条件隐藏。" : "可添加照片文件夹、导入照片，或等待当前扫描完成。"))
                 } actions: {
+                    if model.directoryHasNoDirectFiles { Button("包含子目录") { model.setIncludeSubdirectories(true) } }
                     if model.hasUserFilters { Button("清除筛选") { model.clearFilters() } }
                     HStack {
                         Button("添加文件夹") { model.chooseAndAddFolder() }
@@ -485,7 +483,7 @@ private struct MissingAssetCleanupSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("清理失效索引").font(.title2)
-            Text("当前来源、相册和筛选范围内，确认缺失 \(plan.files.count) 项文件（含视频），不受网格显示上限限制。")
+            Text("当前来源、目录、相册和筛选范围内，确认缺失 \(plan.files.count) 项文件（含视频），不受网格显示上限限制。")
             Text("仅移除图库记录及对应评分、标签、调色、分析和相册成员关系，不操作硬盘文件。执行前备份图库并再次复核。离线或权限异常的项目保留。")
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {

@@ -450,8 +450,23 @@ public enum SmartCollection: String, CaseIterable, Sendable, Identifiable, Hasha
 }
 
 public struct AssetQuery: Sendable, Equatable {
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        let sameDirectory: Bool
+        switch (lhs.relativeDirectory, rhs.relativeDirectory) {
+        case (nil, nil): sameDirectory = true
+        case let (left?, right?): sameDirectory = left.utf8.elementsEqual(right.utf8)
+        default: sameDirectory = false
+        }
+        return sameDirectory && lhs.sourceID == rhs.sourceID && lhs.collection == rhs.collection &&
+            lhs.albumID == rhs.albumID && lhs.includeSubdirectories == rhs.includeSubdirectories &&
+            lhs.searchText == rhs.searchText && lhs.minimumRating == rhs.minimumRating &&
+            lhs.flag == rhs.flag && lhs.limit == rhs.limit && lhs.offset == rhs.offset
+    }
+
     public var collection: SmartCollection
     public var sourceID: String?
+    public var relativeDirectory: String?
+    public var includeSubdirectories: Bool
     public var albumID: String?
     public var searchText: String
     public var minimumRating: Int
@@ -462,6 +477,8 @@ public struct AssetQuery: Sendable, Equatable {
     public init(
         collection: SmartCollection = .all,
         sourceID: String? = nil,
+        relativeDirectory: String? = nil,
+        includeSubdirectories: Bool = true,
         albumID: String? = nil,
         searchText: String = "",
         minimumRating: Int = 0,
@@ -471,6 +488,8 @@ public struct AssetQuery: Sendable, Equatable {
     ) {
         self.collection = collection
         self.sourceID = sourceID
+        self.relativeDirectory = relativeDirectory
+        self.includeSubdirectories = includeSubdirectories
         self.albumID = albumID
         self.searchText = searchText
         self.minimumRating = min(max(minimumRating, 0), 5)
