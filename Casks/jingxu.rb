@@ -17,7 +17,8 @@ cask "jingxu" do
     Quit JingXu and finish or safely cancel catalog tasks before upgrading.
     This prerelease is ad-hoc signed and not notarized by Apple.
     Catalog data is kept outside the app; no catalog cleanup is performed.
-    JingXu 0.3.0 requires the new catalog format and does not migrate 0.2.x catalogs.
-    Keep the matching older app to open existing 0.2.x catalogs; back up before upgrading.
+    JingXu 0.4.1 can migrate complete legacy v4 catalogs after making a backup.
+    Unknown or incomplete catalog formats are rejected; back up before upgrading.
+    Downgrading the app alone does not safely downgrade its catalog.
   EOS
 end
