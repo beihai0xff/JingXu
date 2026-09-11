@@ -26,24 +26,48 @@ final class AppModel: ObservableObject {
     var assetRequestID = UUID()
     var folderRequestID = UUID()
     private let browsingDefaults: UserDefaults
-    @Published var selectedAssetID: String? { didSet { if oldValue != selectedAssetID { automationSelectionToken = UUID() } } }
-    @Published var batchSelection = Set<String>() { didSet { if oldValue != batchSelection { automationSelectionToken = UUID() } } }
+    @Published var photoSelection = PhotoSelectionState() { didSet { if oldValue != photoSelection { automationSelectionToken = UUID() } } }
+    var selectedAssetID: String? {
+        get { photoSelection.focusID }
+        set { photoSelection.focusID = newValue }
+    }
+    var selectedPhotoIDs: [String] { photoSelection.orderedIDs(in: assets.filter { $0.kind == .photo }.map(\.id)) }
     @Published var isBatchSelecting = false { didSet { if oldValue != isBatchSelecting { automationSelectionToken = UUID() } } }
     var automationSelectionToken = UUID()
     var automationOwnsOperation = false
     var automationDirectoryPanel: NSOpenPanel?
     @Published var automationConnection: AutomationConnection?
 
-    func toggleBatchSelection(_ item: AssetListItem) {
-        guard item.kind == .photo, !isWorking else { return }
-        if !batchSelection.insert(item.id).inserted { batchSelection.remove(item.id) }
-        selectAsset(item)
+    func clickAsset(_ item: AssetListItem, command: Bool, shift: Bool, count: Int) {
+        guard canChangeBrowseScope, NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil else { return }
+        let open = photoSelection.click(item.id, photoIDs: assets.filter { $0.kind == .photo }.map(\.id),
+                                        command: command, shift: shift, checkboxMode: isBatchSelecting, count: count)
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        if open { openPreview(item) }
     }
 
     func selectVisiblePhotos() {
-        guard !isWorking else { return }
-        batchSelection = Set(assets.filter { $0.kind == .photo }.map(\.id))
+        guard canChangeBrowseScope else { return }
+        photoSelection.selectAll(assets.filter { $0.kind == .photo }.map(\.id))
     }
+    func clearPhotoSelection() { guard canChangeBrowseScope else { return }; photoSelection.clear() }
+    func changeCheckboxMode(_ enabled: Bool) {
+        guard canChangeBrowseScope else { return }
+        isBatchSelecting = enabled
+        if !enabled {
+            if let item = selectedAsset { photoSelection.selectOnly(item.id, isPhoto: item.kind == .photo) }
+            else { photoSelection.clear() }
+        }
+    }
+    @Published var isShowingPhotoShare = false
+    @Published var shareDraft: [AssetListItem] = []
+    @Published var sharePreparationProgress = ""
+    let systemSharePresenter = SystemSharePresenter()
+    lazy var photoShareSession = PhotoShareSession(presenter: systemSharePresenter)
+    var photoShareCoordinator: PhotoShareCoordinator?
+    var sharePreparationTask: Task<Void, Never>?
+    private var shareObservation: AnyCancellable?
+    private var selectionQuery: AssetQuery?
     @Published var searchText = ""
     @Published var minimumRating = 0
     @Published var flagFilter: AssetFlag?
@@ -114,6 +138,7 @@ final class AppModel: ObservableObject {
             browsingDefaults = UserDefaults(suiteName: "app.jingxu.ui-test.\(id)")!
         } else { browsingDefaults = .standard }
         includeSubdirectories = browsingDefaults.object(forKey: "BrowseIncludesSubdirectories") as? Bool ?? true
+        shareObservation = photoShareSession.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         Task { await initializeCatalog() }
     }
 
@@ -144,6 +169,9 @@ final class AppModel: ObservableObject {
             self.thumbnailProvider = try DefaultThumbnailProvider(cacheDirectory: JingXuPaths.thumbnailCache())
             self.xmpExporter = DefaultXMPExporter(repository: store)
             self.colorExportCoordinator = ColorExportCoordinator(store: store)
+            self.photoShareCoordinator = PhotoShareCoordinator(store: store, cacheRoot: try JingXuPaths.applicationSupport().appendingPathComponent("Sharing"))
+            do { try await self.photoShareCoordinator?.cleanupExpired() }
+            catch { self.statusText = "分享缓存清理失败：\(error.localizedDescription)" }
             self.colorThumbnails = ColorThumbnailProvider(directory: try JingXuPaths.thumbnailCache())
             self.colorPresets = try await store.colorPresets()
             let testID = ProcessInfo.processInfo.environment["JINGXU_UI_TEST_ROOT"].map {
@@ -269,7 +297,9 @@ final class AppModel: ObservableObject {
             guard assetRequestID == request, currentQuery() == query, !Task.isCancelled else { return }
             assets = loaded
             matchingAssetCount = total
-            batchSelection.formIntersection(assets.filter { $0.kind == .photo }.map(\.id))
+            photoSelection.reconcile(visibleIDs: assets.map(\.id), photoIDs: assets.filter { $0.kind == .photo }.map(\.id),
+                                     resetAnchor: selectionQuery != query)
+            selectionQuery = query
             previewNavigation.refresh(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
             if previewAsset?.id == previewID {
                 previewAsset = refreshedPreview
@@ -328,12 +358,16 @@ final class AppModel: ObservableObject {
     }
 
     var canChangeBrowseScope: Bool {
-        !isStarting && !isSavingFlag && !automationOwnsOperation && canStartColorAction &&
-        errorMessage == nil && NSApp.modalWindow == nil && NSApp.keyWindow?.attachedSheet == nil
+        // SwiftUI's disabled state must only depend on observable model state.
+        // Clearing an alert can render before AppKit detaches its sheet; reading
+        // attachedSheet here would leave the sidebar disabled with no later update.
+        !isStarting && !isSavingFlag && !automationOwnsOperation && canInteractWithLibrary &&
+        !isShowingColorPresets && errorMessage == nil
     }
 
     func selectSidebar(_ destination: SidebarDestination?) {
-        guard let destination, destination != sidebarSelection, canChangeBrowseScope else { return }
+        guard let destination, destination != sidebarSelection, canChangeBrowseScope,
+              NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil else { return }
         transitionPreview {
             self.applyBrowseScope(destination)
             Task { await self.reloadAssets() }
@@ -341,7 +375,8 @@ final class AppModel: ObservableObject {
     }
 
     func setIncludeSubdirectories(_ value: Bool) {
-        guard selectedFolderID != nil, value != includeSubdirectories, canChangeBrowseScope else { return }
+        guard selectedFolderID != nil, value != includeSubdirectories, canChangeBrowseScope,
+              NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil else { return }
         transitionPreview {
             self.applyBrowseScope(self.sidebarSelection, includeSubdirectories: value)
             Task { await self.reloadAssets() }
@@ -359,7 +394,7 @@ final class AppModel: ObservableObject {
             browsingDefaults.set(value, forKey: "BrowseIncludesSubdirectories")
         }
         previewAsset = nil; previewNavigation = PreviewNavigation(photoIDs: [])
-        selectedAssetID = nil; batchSelection.removeAll()
+        photoSelection.clear(); selectionQuery = nil
         assets = []; matchingAssetCount = 0; isLoadingAssets = false
         statusText = "正在载入当前范围…"
     }
@@ -448,14 +483,14 @@ final class AppModel: ObservableObject {
     }
     /// The caller owns either the UI transition or the automation operation gate.
     func presentPreview(_ item: AssetListItem) {
-        selectedAssetID = item.id
+        photoSelection.selectOnly(item.id, isPhoto: item.kind == .photo)
         previewNavigation = PreviewNavigation(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
         previewAsset = item
         NSApp.mainWindow?.makeFirstResponder(nil)
     }
     func selectAsset(_ item: AssetListItem) {
         guard !automationOwnsOperation else { return }
-        selectedAssetID = item.id
+        photoSelection.selectOnly(item.id, isPhoto: item.kind == .photo)
         // A non-focusable SwiftUI grid cell otherwise leaves the search field editing.
         NSApp.keyWindow?.makeFirstResponder(nil)
     }
@@ -466,7 +501,7 @@ final class AppModel: ObservableObject {
         }
     }
     var previewNavigationEnabled: Bool {
-        previewAsset != nil && !automationOwnsOperation && !isPreviewTransitioning && !isDeleting && !isShowingImport && !isShowingAlbumCreator &&
+        previewAsset != nil && !isShowingPhotoShare && !automationOwnsOperation && !isPreviewTransitioning && !isDeleting && !isShowingImport && !isShowingAlbumCreator &&
         !isShowingColorPresets && !isShowingColorExport && colorBatchPlan == nil && colorExportPlan == nil &&
         deletionPlan == nil && sourceMergePlan == nil && qualityReanalysisPlan == nil && errorMessage == nil
     }
@@ -529,6 +564,7 @@ final class AppModel: ObservableObject {
     }
 
     func checkDeletionRecovery() async throws {
+        guard !photoShareSession.blocksFileChanges else { throw ColorEditError("原片分享尚未结束，请先完成分享或结束本次分享会话") }
         if try await archiveCoordinator?.hasPending() == true {
             throw NSError(domain: "JingXu", code: 4, userInfo: [NSLocalizedDescriptionKey: "有未完成的归档，请先使用恢复／撤销归档入口处理。"])
         }
@@ -606,6 +642,7 @@ final class AppModel: ObservableObject {
     }
 
     func chooseAndAddFolder() {
+        guard !fileOperationsBlockedByShare, !isWorking else { return }
         let panel = NSOpenPanel()
         panel.title = "选择要索引的照片文件夹"
         panel.prompt = "添加文件夹"
@@ -708,6 +745,7 @@ final class AppModel: ObservableObject {
     }
 
     func cancelCurrentOperation() {
+        if sharePreparationTask != nil { cancelPhotoShare(); return }
         if automationOwnsOperation { automationConnection?.cancelCurrentJob(); return }
         if isReanalyzing {
             Task { await reanalysisCoordinator?.requestCancel(); operationTask?.cancel() }
@@ -811,7 +849,7 @@ final class AppModel: ObservableObject {
         updateFlag(flag, assetID: selectedAssetID, advanceToNext: advanceToNext)
     }
     func updateFlag(_ flag: AssetFlag, assetID: String, advanceToNext: Bool = false) {
-        guard !isDeleting, !isSavingFlag, sourceMergePlan == nil, deletionPlan == nil, qualityReanalysisPlan == nil, let store else { return }
+        guard !isShowingPhotoShare, !isDeleting, !isSavingFlag, sourceMergePlan == nil, deletionPlan == nil, qualityReanalysisPlan == nil, let store else { return }
         let wasPreview = previewAsset != nil
         let query = currentQuery()
         var navigation = wasPreview ? previewNavigation : PreviewNavigation(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
@@ -964,6 +1002,7 @@ final class AppModel: ObservableObject {
     }
 
     func startOperation(_ work: @escaping @MainActor @Sendable () async -> Void) {
+        guard !photoShareSession.blocksFileChanges, !isShowingPhotoShare else { return }
         guard !isWorking, colorEditor == nil, !isPreviewTransitioning, colorBatchPlan == nil, colorExportPlan == nil, !isShowingColorPresets, !isShowingColorExport, archivePlan == nil, deletionPlan == nil, missingAssetPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
         isWorking = true
         operationTask = Task {
@@ -993,14 +1032,14 @@ final class AppModel: ObservableObject {
     }
 
     func prepareBatchMove() {
-        guard !isWorking, !batchSelection.isEmpty, let archiveCoordinator, let store else { return }
+        guard canStartColorAction, !selectedPhotoIDs.isEmpty, let archiveCoordinator, let store else { return }
         let panel = NSOpenPanel()
         panel.title = "选择移动目标目录（同一磁盘）"
         panel.message = "移动已选照片及明确关联的 XMP。RAW/JPEG 配对须全部选中。不会覆盖已有文件。"
         panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        let selected = batchSelection
+        let selected = Set(selectedPhotoIDs)
         startOperation {
             do {
                 guard !(try await store.qualityJobs()).contains(where: { $0.job.state != .completed && $0.job.state != .cancelled }) else {
@@ -1013,6 +1052,7 @@ final class AppModel: ObservableObject {
     }
 
     func confirmArchive() {
+        guard !fileOperationsBlockedByShare else { return }
         guard let plan = archivePlan, let store, let archiveCoordinator else { return }
         // The picker grants write access; never silently replace an existing root with a different folder.
         do {
@@ -1058,6 +1098,7 @@ final class AppModel: ObservableObject {
     }
 
     func resumeArchive(undo: Bool) {
+        guard !photoShareSession.blocksFileChanges, !isShowingPhotoShare else { return }
         guard !isWorking, colorEditor == nil, !isPreviewTransitioning, colorBatchPlan == nil, colorExportPlan == nil, !isShowingColorPresets, !isShowingColorExport, archivePlan == nil, let archiveCoordinator else { return }
         let alert = NSAlert()
         alert.messageText = undo ? "撤销最近一次归档？" : "继续未完成的归档？"

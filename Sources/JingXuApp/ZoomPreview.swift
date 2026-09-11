@@ -43,6 +43,9 @@ struct ZoomPreview: View {
                     if model.colorEditor == nil { model.beginColorEditing() } else { model.finishColorEditing() }
                 }.disabled(!model.canStartColorAction)
                 Button("导出成片…") { model.showColorExport() }.disabled(!model.canStartColorAction)
+                Button { model.showPhotoShare() } label: {
+                    Label("分享…", systemImage: "square.and.arrow.up").labelStyle(.iconOnly)
+                }.disabled(!model.canShowPhotoShare).help("分享当前照片")
                 if originalPreview?.isEmbedded == true {
                     Text("嵌入预览").font(.caption).foregroundStyle(.secondary)
                         .help("当前显示文件内嵌预览；100% 按原片尺寸显示，细节受嵌入预览分辨率限制")

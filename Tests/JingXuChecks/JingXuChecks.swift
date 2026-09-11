@@ -40,6 +40,19 @@ private struct TestTrash: TrashService {
 @main
 private enum JingXuChecks {
     static func main() async throws {
+        if CommandLine.arguments.contains("--sharing-ui-fixtures") {
+            print(try await PhotoShareChecks.uiFixtures().path)
+            return
+        }
+        if CommandLine.arguments.contains("--sharing-checks") {
+            try PhotoShareChecks.selection()
+            try await PhotoShareChecks.originals()
+            try await PhotoShareChecks.rendering()
+            try await PhotoShareChecks.failures()
+            try await PhotoShareChecks.lifecycle()
+            print("多选与系统分享专项校验通过")
+            return
+        }
         if CommandLine.arguments.contains("--folder-ui-fixtures") {
             print(try await FolderBrowsingChecks.uiFixtures().path)
             return
@@ -132,6 +145,11 @@ private enum JingXuChecks {
             ("基础调色、方向、透明度、导出精度和取消", ColorChecks.rendering),
             ("调色持久化、批量回滚、缓存、移动与合并", ColorChecks.persistence),
             ("成片导出、不覆盖、写入失败、取消及修订冻结", ColorChecks.exporting),
+            ("照片多选、范围、焦点、视频隔离及双击去重", { try PhotoShareChecks.selection() }),
+            ("原片分享顺序、去重、文件身份与来源权限", PhotoShareChecks.originals),
+            ("分享成片 JPEG/HEIC、方向、尺寸、GPS 与标注保留", PhotoShareChecks.rendering),
+            ("分享失败隔离、修订冻结、取消与缓存保护", PhotoShareChecks.failures),
+            ("系统分享会话、重复回调、退出保护与缓存回收", PhotoShareChecks.lifecycle),
             ("XMP 严格导入、稀疏参数及撤销历史", { try ColorChecks.presets() }),
             ("编辑会话自动保存、并发保存、失败重试及过期渲染", ColorChecks.editing),
             ("MCP 调色、预览、批量、导出、版本冲突与取消", AutomationChecks.run),

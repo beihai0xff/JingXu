@@ -32,8 +32,12 @@ struct JingXuApp: App {
             CommandGroup(after: .importExport) {
                 Button("添加照片文件夹…") { model.chooseAndAddFolder() }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
+                    .disabled(model.fileOperationsBlockedByShare)
                 Button("从相机卡导入…") { model.isShowingImport = true }.disabled(model.colorEditor != nil || !model.canStartColorAction)
                     .keyboardShortcut("i", modifiers: [.command, .shift])
+                Divider()
+                Button("分享照片…") { model.showPhotoShare() }.disabled(!model.canShowPhotoShare)
+                Button("结束本次分享会话…") { model.endPhotoShare() }.disabled(!model.photoShareSession.isActive)
                 Divider()
                 Button("照片调色") { model.beginColorEditing() }.disabled(model.previewAsset == nil || !model.canStartColorAction)
                 Button("复制调色参数") { model.copyColorAdjustments() }.keyboardShortcut("c", modifiers: [.command, .option]).disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
@@ -51,14 +55,15 @@ struct JingXuApp: App {
                 Button("取消淘汰标记（U）") { model.flagFromMenu(.none) }
                     .disabled(model.isDeleting || model.isSavingFlag)
                 Divider()
-                Button("重新分析当前范围…") { model.prepareQualityReanalysis() }.disabled(model.isWorking)
-                Button("重新分析全部旧结果…") { model.prepareQualityReanalysis(legacyOnly: true) }.disabled(model.isWorking)
+                Button("重新分析当前范围…") { model.prepareQualityReanalysis() }.disabled(model.isWorking || model.fileOperationsBlockedByShare)
+                Button("重新分析全部旧结果…") { model.prepareQualityReanalysis(legacyOnly: true) }.disabled(model.isWorking || model.fileOperationsBlockedByShare)
                 Button("暂停质量重算") { model.pauseQualityReanalysis() }.disabled(!model.isReanalyzing)
-                Button("继续质量重算") { model.resumeQualityReanalysis() }.disabled(model.isWorking || model.resumableQualityJob == nil)
+                Button("继续质量重算") { model.resumeQualityReanalysis() }.disabled(model.isWorking || model.resumableQualityJob == nil || model.fileOperationsBlockedByShare)
                 Divider()
-                Button("整理重复来源…") { model.prepareSourceMerge() }.disabled(model.isWorking)
+                Button("整理重复来源…") { model.prepareSourceMerge() }.disabled(model.isWorking || model.fileOperationsBlockedByShare)
                 Button("重新扫描整个来源…") { model.rescanSelectedSource() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
+                    .disabled(model.fileOperationsBlockedByShare)
             }
         }
 
