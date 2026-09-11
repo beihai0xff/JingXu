@@ -1,6 +1,11 @@
 import Foundation
 import GRDB
 
+public enum CatalogAnnotationError: LocalizedError {
+    case assetMissing
+    public var errorDescription: String? { "照片已不在图库中，无法保存标注" }
+}
+
 public protocol CatalogRepository: Sendable {
     func registerSource(at url: URL) async throws -> SourceRoot
     func upsertSource(_ source: SourceRoot) async throws
@@ -13,7 +18,9 @@ public protocol CatalogRepository: Sendable {
     func assets(sourceID: String) async throws -> [MediaAsset]
     func assets(_ query: AssetQuery) async throws -> [AssetListItem]
     func annotation(for assetID: String) async throws -> UserAnnotation
-    func saveAnnotation(_ annotation: UserAnnotation) async throws
+    @discardableResult func setRating(_ rating: Int, for assetID: String) async throws -> UserAnnotation
+    @discardableResult func setFlag(_ flag: AssetFlag, for assetID: String) async throws -> UserAnnotation
+    @discardableResult func setKeywords(_ keywords: [String], for assetID: String) async throws -> UserAnnotation
     func saveAnalysis(_ analysis: AnalysisResult) async throws
     func saveComputedAnalysis(_ analysis: AnalysisResult, expectedAsset: MediaAsset, fileURL: URL) async throws
     func recordAnalysisFailure(assetID: String, reason: String, fingerprint: AnalysisFingerprint) async throws
@@ -51,6 +58,11 @@ public actor CatalogStore: CatalogRepository {
         dbPool = try DatabasePool(path: databaseURL.path, configuration: configuration)
         try Self.createCurrentSchema(dbPool)
         try CatalogUpgradeCoordinator.validate(dbPool)
+        // Rebuildable indexes apply to new, current and successfully upgraded catalogs.
+        try dbPool.write { db in
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS mediaAssets_browseOrder ON mediaAssets(COALESCE(capturedAt, modifiedAt) DESC, fileName ASC, id ASC)")
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS mediaAssets_sourceBrowseOrder ON mediaAssets(sourceID, COALESCE(capturedAt, modifiedAt) DESC, fileName ASC, id ASC)")
+        }
         try Data().write(to: databaseURL.appendingPathExtension("initialized"), options: .atomic)
     }
 
@@ -546,7 +558,13 @@ public actor CatalogStore: CatalogRepository {
     private static func assetQuerySQL(_ query: AssetQuery, rejectedOnly: Bool, photosOnly: Bool = false,
                                      legacyOnly: Bool = false, projection: String? = nil, assetID: String? = nil,
                                      paginated: Bool = true) throws -> (String, StatementArguments) {
-        var joins = "LEFT JOIN annotations an ON an.assetID = a.id LEFT JOIN analysisResults ar ON ar.assetID = a.id LEFT JOIN colorEdits ce ON ce.assetID = a.id"
+        let hasSearch = !query.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let needsAnnotation = projection == nil || rejectedOnly || query.collection == .rejected || hasSearch || query.minimumRating > 0 || query.flag != nil
+        let needsAnalysis = projection == nil || legacyOnly || query.collection == .review
+        var joins = ""
+        if needsAnnotation { joins += " LEFT JOIN annotations an ON an.assetID = a.id" }
+        if needsAnalysis { joins += " LEFT JOIN analysisResults ar ON ar.assetID = a.id" }
+        if projection == nil { joins += " LEFT JOIN colorEdits ce ON ce.assetID = a.id" }
         var conditions: [String] = []
         var arguments: StatementArguments = []
         if rejectedOnly { conditions.append("a.kind = 'photo' AND an.flag = 'rejected'") }
@@ -599,7 +617,7 @@ public actor CatalogStore: CatalogRepository {
             conditions.append("an.flag = 'rejected'")
         }
 
-        if !query.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if hasSearch {
             let pattern = "%\(query.searchText)%"
             conditions.append("(a.fileName LIKE ? OR a.cameraModel LIKE ? OR a.lens LIKE ? OR an.keywordsJSON LIKE ?)")
             arguments += [pattern, pattern, pattern, pattern]
@@ -632,7 +650,7 @@ public actor CatalogStore: CatalogRepository {
             FROM mediaAssets a
             \(joins)
             \(whereClause)
-            \(paginated ? "ORDER BY COALESCE(a.capturedAt, a.modifiedAt) DESC, a.fileName ASC LIMIT ? OFFSET ?" : "")
+            \(paginated ? "ORDER BY COALESCE(a.capturedAt, a.modifiedAt) DESC, a.fileName ASC, a.id ASC LIMIT ? OFFSET ?" : "")
             """
         return (sql, arguments)
     }
@@ -643,11 +661,27 @@ public actor CatalogStore: CatalogRepository {
         }
     }
 
-    public func saveAnnotation(_ annotation: UserAnnotation) throws {
-        var value = annotation
-        value.rating = min(max(value.rating, 0), 5)
-        value.updatedAt = Date()
-        try dbPool.write { db in try value.save(db) }
+    @discardableResult public func setRating(_ rating: Int, for assetID: String) throws -> UserAnnotation {
+        try updateAnnotation(for: assetID) { $0.rating = min(max(rating, 0), 5) }
+    }
+
+    @discardableResult public func setFlag(_ flag: AssetFlag, for assetID: String) throws -> UserAnnotation {
+        try updateAnnotation(for: assetID) { $0.flag = flag }
+    }
+
+    @discardableResult public func setKeywords(_ keywords: [String], for assetID: String) throws -> UserAnnotation {
+        try updateAnnotation(for: assetID) { $0.keywords = keywords }
+    }
+
+    private func updateAnnotation(for assetID: String, change: (inout UserAnnotation) -> Void) throws -> UserAnnotation {
+        try dbPool.write { db in
+            guard try MediaAsset.fetchOne(db, key: assetID) != nil else { throw CatalogAnnotationError.assetMissing }
+            var value = try UserAnnotation.fetchOne(db, key: assetID) ?? UserAnnotation(assetID: assetID)
+            change(&value)
+            value.updatedAt = Date()
+            try value.save(db)
+            return value
+        }
     }
 
     public func saveAnalysis(_ analysis: AnalysisResult) throws {

@@ -28,7 +28,7 @@ enum BatchMoveChecks {
         let one = try await store.assets(sourceID: source.id).first { $0.fileName == "one.jpg" }!
         var annotation = try await store.annotation(for: one.id)
         annotation.rating = 5; annotation.keywords = ["preserve"]
-        try await store.saveAnnotation(annotation)
+        try await store.seedAnnotation(annotation)
         let coordinator = ArchiveCoordinator(store: store, journalURL: root.appendingPathComponent("archive.json"))
         let pair = try await store.assets(sourceID: source.id).first { $0.fileName == "pair.arw" }!
         let partial = try await coordinator.prepare(selectedIDs: [pair.id], destination: target)

@@ -96,7 +96,7 @@ enum FolderBrowsingChecks {
         }
         let photo = items.first { $0.relativePath == "旅行/a.jpg" }!
         let other = items.first { $0.relativePath == "旅行精选/d.jpg" }!
-        for item in [photo, other] { try await store.saveAnnotation(UserAnnotation(assetID: item.id, rating: 5, flag: .rejected, keywords: ["入选"])) }
+        for item in [photo, other] { try await store.seedAnnotation(UserAnnotation(assetID: item.id, rating: 5, flag: .rejected, keywords: ["入选"])) }
         let album = Album(name: "选片"); try await store.saveAlbum(album)
         for item in [photo, other] { try await store.add(assetID: item.id, toAlbum: album.id) }
         let selected = AssetQuery(sourceID: source.id, relativeDirectory: "旅行", includeSubdirectories: false,
@@ -125,7 +125,7 @@ enum FolderBrowsingChecks {
         let large = (0..<2_005).map { asset(source, "旅行/missing-\($0).jpg") }
         let excluded = asset(source, "旅行精选/keep.jpg")
         _ = try await store.upsertAssets(large + [excluded])
-        for value in large + [excluded] { try await store.saveAnnotation(UserAnnotation(assetID: value.id, flag: .rejected)) }
+        for value in large + [excluded] { try await store.seedAnnotation(UserAnnotation(assetID: value.id, flag: .rejected)) }
         let query = AssetQuery(sourceID: source.id, relativeDirectory: "旅行", limit: 2000)
         try check(try await store.assets(query).count == 2000, "网格显示上限改变")
         try check(try await store.matchingAssetCount(query) == 2005, "目录计数被网格截断")

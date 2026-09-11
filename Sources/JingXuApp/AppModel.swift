@@ -78,6 +78,7 @@ final class AppModel: ObservableObject {
     @Published var isShowingImport = false
     @Published var isShowingAlbumCreator = false
     @Published var importProgress: ImportProgress?
+    @Published var lastScanReport: ScanReport?
     @Published var scanProgress: ScanProgress?
     @Published var analysisProgress: AnalysisProgress?
     @Published var qualityReanalysisPlan: QualityReanalysisPlan?
@@ -656,6 +657,7 @@ final class AppModel: ObservableObject {
     func addFolder(_ url: URL) {
         guard let store, let scanner, let analysisCoordinator else { return }
         startOperation {
+            self.lastScanReport = nil
             do {
                 let source = try await store.registerSource(at: url)
                 let report = try await scanner.scan(source: source) { [weak self] progress in
@@ -664,7 +666,7 @@ final class AppModel: ObservableObject {
                         self?.statusText = "正在索引 \(progress.processed)/\(progress.discovered)：\(progress.currentFile)"
                     }
                 }
-                await MainActor.run { self.scanProgress = nil }
+                await MainActor.run { self.scanProgress = nil; self.lastScanReport = report }
                 try await analysisCoordinator.analyzePending(sourceID: report.sourceID) { [weak self] progress in
                     await MainActor.run {
                         self?.analysisProgress = progress
@@ -687,6 +689,7 @@ final class AppModel: ObservableObject {
         guard let importer, let analysisCoordinator else { return }
         isShowingImport = false
         startOperation {
+            self.lastScanReport = nil
             do {
                 let report = try await importer.importMedia(from: source, to: destination, batchName: batchName) { [weak self] progress in
                     await MainActor.run {
@@ -694,7 +697,7 @@ final class AppModel: ObservableObject {
                         self?.statusText = "正在导入 \(progress.completedFiles + progress.skippedFiles)/\(progress.totalFiles)：\(progress.currentFile)"
                     }
                 }
-                await MainActor.run { self.importProgress = nil }
+                await MainActor.run { self.importProgress = nil; self.lastScanReport = report.scanReport }
                 if let sourceID = report.scanReport?.sourceID {
                     try await analysisCoordinator.analyzePending(sourceID: sourceID) { [weak self] progress in
                         await MainActor.run {
@@ -727,16 +730,20 @@ final class AppModel: ObservableObject {
     private func addFolderFromExistingSource(_ source: SourceRoot) {
         guard let scanner, let analysisCoordinator else { return }
         startOperation {
+            self.lastScanReport = nil
             do {
                 let report = try await scanner.scan(source: source) { [weak self] progress in
                     await MainActor.run { self?.scanProgress = progress }
                 }
-                await MainActor.run { self.scanProgress = nil }
+                await MainActor.run { self.scanProgress = nil; self.lastScanReport = report }
                 try await analysisCoordinator.analyzePending(sourceID: report.sourceID) { [weak self] progress in
                     await MainActor.run { self?.analysisProgress = progress }
                 }
                 await MainActor.run { self.analysisProgress = nil }
                 await self.reloadAll()
+            } catch is CancellationError {
+                await Task { await self.reloadAll() }.value
+                self.statusText = "操作已取消"
             } catch {
                 await Task { await self.reloadAll() }.value
                 await MainActor.run { self.errorMessage = "重新扫描失败：\(error.localizedDescription)" }
@@ -835,9 +842,7 @@ final class AppModel: ObservableObject {
         guard let selectedAssetID = previewAsset?.id ?? selectedAssetID, let store else { return }
         Task {
             do {
-                var annotation = try await store.annotation(for: selectedAssetID)
-                annotation.rating = rating
-                try await store.saveAnnotation(annotation)
+                try await store.setRating(rating, for: selectedAssetID)
                 await reloadAssets()
             } catch { errorMessage = "保存评分失败：\(error.localizedDescription)" }
         }
@@ -858,9 +863,7 @@ final class AppModel: ObservableObject {
             defer { isSavingFlag = false }
             do {
                 guard let asset = try await store.asset(id: assetID), asset.kind == .photo, !isDeleting else { return }
-                var annotation = try await store.annotation(for: assetID)
-                annotation.flag = flag
-                try await store.saveAnnotation(annotation)
+                try await store.setFlag(flag, for: assetID)
                 let stillOnTarget = (previewAsset?.id ?? selectedAssetID) == assetID
                 await reloadAssets()
                 statusText = "\(asset.fileName)：\(flag.displayName)"
@@ -890,9 +893,7 @@ final class AppModel: ObservableObject {
         guard let selectedAssetID = previewAsset?.id ?? selectedAssetID, let store else { return }
         Task {
             do {
-                var annotation = try await store.annotation(for: selectedAssetID)
-                annotation.keywords = keywords
-                try await store.saveAnnotation(annotation)
+                try await store.setKeywords(keywords, for: selectedAssetID)
                 await reloadAssets()
             } catch { errorMessage = "保存标签失败：\(error.localizedDescription)" }
         }

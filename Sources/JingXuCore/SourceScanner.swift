@@ -13,17 +13,30 @@ public struct ScanProgress: Sendable, Equatable {
     }
 }
 
+public struct ScanFailure: Sendable, Equatable {
+    public enum Stage: String, Sendable { case directory = "读取目录", file = "读取文件", metadata = "解析元数据" }
+    public var path: String
+    public var stage: Stage
+    public var reason: String
+}
+
 public struct ScanReport: Sendable, Equatable {
     public var sourceID: String
-    public var assetIDs: [String]
-    public var skippedFiles: Int
-    public var failedFiles: Int
+    public var assetIDs: [String] = []
+    public var discoveredFiles = 0
+    public var unchangedFiles = 0
+    public var skippedFiles = 0
+    public var failedFiles = 0
+    public var failedDirectories = 0
+    /// Counts remain complete; only the first 30 details are retained for presentation.
+    public var failures: [ScanFailure] = []
+    public var isPartial: Bool { failedFiles > 0 || failedDirectories > 0 }
 
-    public init(sourceID: String, assetIDs: [String], skippedFiles: Int, failedFiles: Int) {
-        self.sourceID = sourceID
-        self.assetIDs = assetIDs
-        self.skippedFiles = skippedFiles
-        self.failedFiles = failedFiles
+    public init(sourceID: String) { self.sourceID = sourceID }
+
+    mutating func record(path: String, stage: ScanFailure.Stage, reason: String) {
+        if stage == .directory { failedDirectories += 1 } else { failedFiles += 1 }
+        if failures.count < 30 { failures.append(ScanFailure(path: path, stage: stage, reason: reason)) }
     }
 }
 
@@ -43,46 +56,59 @@ public struct DefaultSourceScanner: SourceScanner {
     }
 
     public func scan(source: SourceRoot, progress: ScanProgressHandler? = nil) async throws -> ScanReport {
-        var mutableSource = source
-        let resolved = try BookmarkStore.resolve(source)
+        guard var mutableSource = try await repository.source(id: source.id) else {
+            throw NSError(domain: "JingXu.Scan", code: 1, userInfo: [NSLocalizedDescriptionKey: "来源已不在图库中，无法扫描"])
+        }
+        let resolved = try BookmarkStore.resolve(mutableSource)
         let root = resolved.url
         let didAccess = root.startAccessingSecurityScopedResource()
         defer { if didAccess { root.stopAccessingSecurityScopedResource() } }
 
-        guard FileManager.default.fileExists(atPath: root.path) else {
-            mutableSource.isOnline = false
-            try await repository.upsertSource(mutableSource)
-            throw CocoaError(.fileNoSuchFile)
+        try Task.checkCancellation()
+        do {
+            _ = try root.checkResourceIsReachable()
+        } catch {
+            let failure = error as NSError
+            // Permission and identity failures are not evidence that a source is offline.
+            if failure.domain == NSCocoaErrorDomain && [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(failure.code) {
+                mutableSource.isOnline = false
+                try await repository.upsertSource(mutableSource)
+            }
+            throw error
         }
 
-        let files = mediaFiles(under: root)
+        let (files, enumerationReport) = try mediaFiles(under: root, sourceID: source.id)
+        var report = enumerationReport
         let existingAssets = try await repository.assets(sourceID: source.id)
         let existingByPath = Dictionary(uniqueKeysWithValues: existingAssets.map { ($0.relativePath, $0) })
-        var assetIDs: [String] = []
         var pendingAssets: [MediaAsset] = []
-        var skipped = 0
-        var failed = 0
 
-        for (index, fileURL) in files.enumerated() {
+        for (index, discoveredURL) in files.enumerated() {
             try Task.checkCancellation()
+            var fileURL = discoveredURL
             guard let kind = MediaSupport.kind(for: fileURL) else {
-                skipped += 1
+                report.skippedFiles += 1
                 continue
             }
             await progress?(ScanProgress(discovered: files.count, processed: index, currentFile: fileURL.lastPathComponent))
+            try Task.checkCancellation()
+            // Enumeration can cache attributes; reread before deciding that a file is unchanged.
+            fileURL.removeAllCachedResourceValues()
             do {
                 let values = try fileURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
                 let relativePath = FileIdentity.relativePath(of: fileURL, under: root)
                 let fileSize = Int64(values.fileSize ?? 0)
                 let modifiedAt = values.contentModificationDate ?? Date.distantPast
                 let fileIdentifier = FileIdentity.resourceIdentifier(for: fileURL)
-                if let existing = existingByPath[relativePath],
+                if let existing = existingByPath[relativePath], existing.metadataError == nil,
                    existing.fileIdentifier == fileIdentifier,
                    existing.fileSize == fileSize,
                    abs(existing.modifiedAt.timeIntervalSince(modifiedAt)) < 0.001 {
+                    report.unchangedFiles += 1
                     continue
                 }
                 let metadata = await metadataExtractor.extract(from: fileURL, kind: kind)
+                try Task.checkCancellation()
                 let pairKey = fileURL.deletingPathExtension().lastPathComponent.lowercased()
                 let asset = MediaAsset(
                     sourceID: source.id,
@@ -107,26 +133,32 @@ public struct DefaultSourceScanner: SourceScanner {
                     metadataError: metadata.errorMessage
                 )
                 pendingAssets.append(asset)
-                if pendingAssets.count >= 200 {
-                    let stored = try await repository.upsertAssets(pendingAssets)
-                    assetIDs.append(contentsOf: stored.map(\.id))
-                    pendingAssets.removeAll(keepingCapacity: true)
+                if let reason = metadata.errorMessage {
+                    report.record(path: relativePath, stage: .metadata, reason: reason)
                 }
-                if metadata.errorMessage != nil { failed += 1 }
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                failed += 1
+                report.record(path: FileIdentity.relativePath(of: fileURL, under: root), stage: .file, reason: error.localizedDescription)
+            }
+            // Database errors must escape: do not treat a failed batch as one bad photo.
+            try Task.checkCancellation()
+            if pendingAssets.count >= 200 {
+                let stored = try await repository.upsertAssets(pendingAssets)
+                report.assetIDs.append(contentsOf: stored.map(\.id))
+                pendingAssets.removeAll(keepingCapacity: true)
             }
         }
 
+        try Task.checkCancellation()
         if !pendingAssets.isEmpty {
             let stored = try await repository.upsertAssets(pendingAssets)
-            assetIDs.append(contentsOf: stored.map(\.id))
+            report.assetIDs.append(contentsOf: stored.map(\.id))
         }
 
+        try Task.checkCancellation()
         mutableSource.isOnline = true
-        mutableSource.lastScanAt = Date()
+        if !report.isPartial { mutableSource.lastScanAt = Date() }
         if let identity = try? SourceIdentity.resolve(root), let data = try? JSONEncoder().encode(identity) {
             mutableSource.volumeIdentifier = identity.volume
             mutableSource.directoryIdentityJSON = String(decoding: data, as: UTF8.self)
@@ -136,24 +168,42 @@ public struct DefaultSourceScanner: SourceScanner {
         }
         try await repository.upsertSource(mutableSource)
         await progress?(ScanProgress(discovered: files.count, processed: files.count, currentFile: ""))
-        return ScanReport(sourceID: source.id, assetIDs: assetIDs, skippedFiles: skipped, failedFiles: failed)
+        return report
     }
 
-    private func mediaFiles(under root: URL) -> [URL] {
+    private func mediaFiles(under root: URL, sourceID: String) throws -> ([URL], ScanReport) {
         let keys: [URLResourceKey] = [.isRegularFileKey, .isHiddenKey]
+        var report = ScanReport(sourceID: sourceID)
+        var rootError: Error?
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: keys,
             options: [.skipsHiddenFiles, .skipsPackageDescendants],
-            errorHandler: { _, _ in true }
-        ) else { return [] }
+            errorHandler: { url, error in
+                if url.standardizedFileURL == root.standardizedFileURL {
+                    rootError = error
+                    return false
+                }
+                report.record(path: FileIdentity.relativePath(of: url, under: root), stage: .directory, reason: error.localizedDescription)
+                return true
+            }
+        ) else { throw CocoaError(.fileReadUnknown) }
 
         var result: [URL] = []
         for case let url as URL in enumerator {
-            let values = try? url.resourceValues(forKeys: Set(keys))
-            guard values?.isRegularFile == true, values?.isHidden != true else { continue }
-            if MediaSupport.kind(for: url) != nil { result.append(url) }
+            try Task.checkCancellation()
+            do {
+                let values = try url.resourceValues(forKeys: Set(keys))
+                guard values.isRegularFile == true, values.isHidden != true else { continue }
+                if MediaSupport.kind(for: url) != nil { result.append(url) }
+                else { report.skippedFiles += 1 }
+            } catch {
+                report.record(path: FileIdentity.relativePath(of: url, under: root), stage: .file, reason: error.localizedDescription)
+            }
         }
-        return result.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        try Task.checkCancellation()
+        if let rootError { throw rootError }
+        report.discoveredFiles = result.count
+        return (result.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }, report)
     }
 }
