@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var showsScanReport = false
     @State private var keywordDraft = ""
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showsPreviewFilmstrip = true
@@ -59,7 +60,7 @@ struct ContentView: View {
                 }
             }.padding(20).frame(width: 760, height: 520)
         }
-        .background(FlagKeyboardHandler(enabled: !model.isShowingPhotoShare && !model.isDeleting && model.archivePlan == nil && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), requiresCanvasFocus: model.colorEditor != nil, navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
+        .background(FlagKeyboardHandler(enabled: !showsScanReport && !model.isShowingPhotoShare && !model.isDeleting && model.archivePlan == nil && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), requiresCanvasFocus: model.colorEditor != nil, navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
             model.updateFlag(flag, advanceToNext: flag == .rejected)
         })
         .sheet(item: $model.missingAssetPlan) { plan in
@@ -333,6 +334,12 @@ struct ContentView: View {
 
     private var statusBar: some View {
         HStack {
+            if let report = model.lastScanReport {
+                Button(report.isPartial ? "扫描有遗漏" : "扫描结果") { showsScanReport = true }
+                    .foregroundStyle(report.isPartial ? Color.orange : Color.secondary)
+                    .buttonStyle(.borderless)
+                    .popover(isPresented: $showsScanReport) { ScanReportView(report: report) }
+            }
             if model.isWorking { ProgressView().controlSize(.small) }
             Text(model.statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             Spacer()

@@ -124,6 +124,9 @@ private enum JingXuChecks {
             ("目录命名与清理", checkImportNaming),
             ("文件路径与 SHA-256", checkFileIdentityAndHash),
             ("目录持久化、筛选与标注", checkCatalog),
+            ("标注字段并发、规范化、失败回滚与不存在照片", AnnotationChecks.run),
+            ("扫描目录权限、部分失败、取消与数据库中断", ScanChecks.run),
+            ("排序索引补齐、稳定顺序与计数筛选一致", BrowseQueryChecks.run),
             ("来源目录树、精确路径、计数、筛选与最近上级", FolderBrowsingChecks.run),
             ("目录超过 2000 项的清理和重算范围隔离", FolderBrowsingChecks.completeScope),
             ("稳定资源身份与相册", checkStableIdentityAndAlbum),
@@ -251,7 +254,7 @@ private enum JingXuChecks {
         annotation.rating = 4
         annotation.flag = .rejected
         annotation.keywords = ["旅行", " 夜景 ", "旅行", ""]
-        try await store.saveAnnotation(annotation)
+        try await store.seedAnnotation(annotation)
 
         let all = try await store.assets(AssetQuery())
         let rawResults = try await store.assets(AssetQuery(collection: .raw))
@@ -272,7 +275,7 @@ private enum JingXuChecks {
         try require(rejected.map(\.id) == [stored.id], "淘汰集合范围错误")
 
         annotation.flag = .none
-        try await store.saveAnnotation(annotation)
+        try await store.seedAnnotation(annotation)
         let cleared = try await store.annotation(for: stored.id)
         let rejectedAfterClear = try await store.assets(AssetQuery(flag: .rejected))
         let unmarkedAfterClear = try await store.assets(AssetQuery(flag: AssetFlag.none))
@@ -378,7 +381,7 @@ private enum JingXuChecks {
         // A remount or same-size replacement can change file identity without changing its timestamp.
         guard let jpegID = assets.first(where: { $0.fileName == "IMG_0001.JPG" })?.id,
               let jpeg = try await store.asset(id: jpegID) else { throw CheckFailure(description: "缺少 JPEG") }
-        try await store.saveAnnotation(UserAnnotation(assetID: jpeg.id, rating: 4, flag: .none, keywords: ["保留"]))
+        try await store.seedAnnotation(UserAnnotation(assetID: jpeg.id, rating: 4, flag: .none, keywords: ["保留"]))
         let jpegURL = library.appendingPathComponent(jpeg.fileName)
         try FileManager.default.moveItem(at: jpegURL, to: workspace.appendingPathComponent("original.jpg"))
         try Data("jpeg".utf8).write(to: jpegURL)
@@ -461,6 +464,24 @@ private enum JingXuChecks {
         }
         _ = try await store.upsertAssets(assets)
 
+        for (name, query, budget) in [
+            ("全部", AssetQuery(limit: 2000), Duration.milliseconds(100)),
+            ("来源", AssetQuery(sourceID: source.id, limit: 2000), Duration.milliseconds(100)),
+            ("搜索", AssetQuery(searchText: "Camera A", limit: 2000), Duration.milliseconds(500))
+        ] {
+            var samples: [Duration] = []
+            for run in 0..<6 {
+                let begin = ContinuousClock.now
+                let page = try await store.assets(query)
+                let count = try await store.matchingAssetCount(query)
+                let elapsed = begin.duration(to: .now)
+                try require(page.count == 2000 && count == (name == "搜索" ? 50_000 : 100_000), "性能检查查询范围不完整")
+                if run > 0 { samples.append(elapsed) }
+            }
+            let median = samples.sorted()[2]
+            try require(median < budget, "\(name)首批＋计数中位数超过预算：\(median)")
+            print("  10 万条 \(name)首批＋计数（预热后 5 次中位数）：\(median)")
+        }
         let start = ContinuousClock.now
         let firstPage = try await store.assets(AssetQuery(searchText: "Camera A", limit: 2_000))
         let elapsed = start.duration(to: .now)
@@ -501,7 +522,7 @@ private enum JingXuChecks {
         let album = Album(name: "test")
         try await store.saveAlbum(album)
         try await store.add(assetID: removed.id, toAlbum: album.id)
-        try await store.saveAnnotation(UserAnnotation(assetID: removed.id, rating: 5, keywords: ["keep backup"]))
+        try await store.seedAnnotation(UserAnnotation(assetID: removed.id, rating: 5, keywords: ["keep backup"]))
         let plan = try await store.prepareMissingAssetCleanup(AssetQuery(limit: 2_000))
         try require(plan.files.count == 2_005, "失效索引范围受显示上限影响或未识别 ENOENT")
         let albumPlan = try await store.prepareMissingAssetCleanup(AssetQuery(albumID: album.id))
@@ -588,7 +609,7 @@ private enum JingXuChecks {
             many.append(MediaAsset(sourceID: source.id, relativePath: "many\(i).jpg", fileIdentifier: nil, fileName: "many\(i).jpg", uniformType: nil, kind: .photo, fileSize: 1, modifiedAt: Date()))
         }
         let saved = try await store.upsertAssets(many)
-        for asset in saved { try await store.saveAnnotation(UserAnnotation(assetID: asset.id, flag: .rejected)) }
+        for asset in saved { try await store.seedAnnotation(UserAnnotation(assetID: asset.id, flag: .rejected)) }
         let journal = root.appendingPathComponent("journal.json")
         let trashDir = root.appendingPathComponent("trash")
         try FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
@@ -612,13 +633,13 @@ private enum JingXuChecks {
             try Data("original".utf8).write(to: url)
             let date = try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate!
             let asset = try await store.upsertAsset(MediaAsset(sourceID: source.id, relativePath: name, fileIdentifier: FileIdentity.resourceIdentifier(for: url), fileName: name, uniformType: nil, kind: name == "video.mov" ? .video : .photo, fileSize: 8, modifiedAt: date))
-            try await store.saveAnnotation(UserAnnotation(assetID: asset.id, flag: name == "pair.raw" ? .none : .rejected))
+            try await store.seedAnnotation(UserAnnotation(assetID: asset.id, flag: name == "pair.raw" ? .none : .rejected))
             files.append(asset)
         }
         let plan = try await coordinator.prepare(AssetQuery())
         try require(plan.files.count == 5, "视频或未标记配对文件被列入删除")
         try Data("replacement contents".utf8).write(to: root.appendingPathComponent("changed.jpg"), options: .atomic)
-        try await store.saveAnnotation(UserAnnotation(assetID: files[3].id))
+        try await store.seedAnnotation(UserAnnotation(assetID: files[3].id))
         try FileManager.default.moveItem(at: root.appendingPathComponent("missing.jpg"), to: root.appendingPathComponent("offline.jpg"))
         let report = try await coordinator.execute(plan)
         try require(report.deleted == 1 && report.skipped == 3 && report.failures.count == 1, "部分失败统计错误：\(report)")
@@ -646,7 +667,7 @@ private enum JingXuChecks {
         try Data("duplicate".utf8).write(to: duplicateURL)
         let stamp = try duplicateURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate!
         let duplicate = try await store.upsertAsset(MediaAsset(sourceID: source.id, relativePath: "duplicate.jpg", fileIdentifier: FileIdentity.resourceIdentifier(for: duplicateURL), fileName: "duplicate.jpg", uniformType: nil, kind: .photo, fileSize: 9, modifiedAt: stamp))
-        try await store.saveAnnotation(UserAnnotation(assetID: duplicate.id, rating: 4, flag: .rejected, keywords: ["删除测试"]))
+        try await store.seedAnnotation(UserAnnotation(assetID: duplicate.id, rating: 4, flag: .rejected, keywords: ["删除测试"]))
         try await store.add(assetID: duplicate.id, toAlbum: album.id)
         let stableDuplicate = try await store.asset(id: duplicate.id)!
         let duplicateReport = try await coordinator.execute(DeletionPlan(files: [stableDuplicate, stableDuplicate]))
@@ -778,9 +799,9 @@ private enum JingXuChecks {
         let modified = Date(timeIntervalSince1970: 1000)
         let first = try await store.upsertAsset(MediaAsset(sourceID: original.id, relativePath: "one.jpg", fileIdentifier: "same-id", fileName: "one.jpg", uniformType: nil, kind: .photo, fileSize: 8, modifiedAt: modified))
         let second = try await store.upsertAsset(MediaAsset(sourceID: duplicate.id, relativePath: "one.jpg", fileIdentifier: "same-id", fileName: "one.jpg", uniformType: nil, kind: .photo, fileSize: 8, modifiedAt: modified))
-        try await store.saveAnnotation(UserAnnotation(assetID: first.id, rating: 2, flag: .none, keywords: ["A"]))
+        try await store.seedAnnotation(UserAnnotation(assetID: first.id, rating: 2, flag: .none, keywords: ["A"]))
         try await Task.sleep(for: .milliseconds(10))
-        try await store.saveAnnotation(UserAnnotation(assetID: second.id, rating: 5, flag: .rejected, keywords: ["B"]))
+        try await store.seedAnnotation(UserAnnotation(assetID: second.id, rating: 5, flag: .rejected, keywords: ["B"]))
         let album = Album(name: "保留成员")
         try await store.saveAlbum(album)
         try await store.add(assetID: second.id, toAlbum: album.id)

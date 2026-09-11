@@ -148,7 +148,7 @@ enum PhotoShareChecks {
         var adjustment = ColorAdjustments(); adjustment.exposure = 0.5
         let saved = try await store.saveColorAdjustments(adjustment, snapshot: base)
         var annotation = try await store.annotation(for: ids[0]); annotation.rating = 4; annotation.keywords = ["私人测试"]
-        try await store.saveAnnotation(annotation)
+        try await store.seedAnnotation(annotation)
         annotation = try await store.annotation(for: ids[0])
         let beforeCount = try await store.matchingAssetCount(AssetQuery())
         let full = try await coordinator.prepare(coordinator.plan(assetIDs: ids, mode: .jpeg))

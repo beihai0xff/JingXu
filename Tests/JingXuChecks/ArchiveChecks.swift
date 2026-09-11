@@ -38,7 +38,7 @@ enum ArchiveChecks {
         try Data("existing target".utf8).write(to: occupied)
         var annotation = try await store.annotation(for: originals[0].id)
         annotation.rating = 5; annotation.flag = .rejected; annotation.keywords = ["保留关键词"]
-        try await store.saveAnnotation(annotation)
+        try await store.seedAnnotation(annotation)
         let album = Album(name: "归档前相册")
         try await store.saveAlbum(album)
         try await store.add(assetID: originals[0].id, toAlbum: album.id)
