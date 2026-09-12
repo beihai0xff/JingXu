@@ -69,7 +69,7 @@ brew upgrade --cask beihai0xff/jingxu/jingxu
 
 ### 安全导入与本地图库
 
-- **从相机卡或文件夹导入**：复制后进行 SHA-256 校验，重复文件跳过，同名文件自动避让，永不删除来源文件。
+- **从相机卡或文件夹导入**：预检并确认清单后复制，SHA-256 校验、RAW/JPEG 与配套 XMP 成组避让，重复文件跳过；保留失败结果并可重新预检重试，永不删除来源文件。[安全导入](Documentation/SafeImport.md)
 - **直接添加已有照片文件夹**：在原位置建立索引，无需再复制一份照片；支持增量扫描，外接磁盘离线时保留来源记录。
 - **按目录浏览**：在来源目录树中逐层展开，点击文件夹查看；默认包含子目录，也可只看当前层。目录计数与离线索引保留，切换目录不清除搜索和评分筛选。[目录浏览说明](Documentation/FolderBrowsing.md)
 - **多格式浏览**：支持系统可解码的 RAW、JPEG、HEIC、PNG、TIFF，以及视频索引和预览；自动关联同名 RAW + JPEG。
@@ -149,6 +149,7 @@ zsh Scripts/build.sh check
 
 - [Agent 开发指南](AGENTS.md)：模块入口、实现约定、数据安全与验证方法。
 - [Homebrew 安装与更新](Documentation/Homebrew.md)：接管手动安装、更新渠道与限制。
+- [缓存与后台任务](Documentation/BackgroundWork.md)：索引后浏览、分析进度与缩略图回收。
 - [日期归档](Documentation/DateArchive.md) / [批量移动](Documentation/BatchMove.md)：操作范围、配套文件、恢复与撤销。
 - [质量分析 v2](Documentation/QualityAnalysisV2.md)：诊断边界、重算与人工校准。
 - [打包与发布](Documentation/ReleasePipeline.md) / [发布检查清单](Packaging/ReleaseChecklist.md)：维护者构建和发布流程。

@@ -47,9 +47,9 @@ struct ImportSheet: View {
             HStack {
                 Spacer()
                 Button("取消") { dismiss() }
-                Button("开始导入") {
+                Button("预检导入清单") {
                     guard let sourceURL, let destinationURL else { return }
-                    model.importMedia(from: sourceURL, to: destinationURL, batchName: batchName)
+                    model.prepareImport(from: sourceURL, to: destinationURL, batchName: batchName)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(sourceURL == nil || destinationURL == nil)

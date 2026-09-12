@@ -9,10 +9,10 @@ extension AppModel {
         return selectedPhotoIDs
     }
     var canStartColorAction: Bool {
-        canInteractWithLibrary && !photoShareSession.blocksFileChanges
+        canInteractWithLibrary && !isWorking && !photoShareSession.blocksFileChanges
     }
     var canInteractWithLibrary: Bool {
-        !isShowingPhotoShare && !isWorking && !isPreviewTransitioning && colorBatchPlan == nil && colorExportPlan == nil &&
+        !isShowingPhotoShare && (!isWorking || isAnalyzingNewAssets) && importPlan == nil && !isShowingImportReport && !isPreviewTransitioning && colorBatchPlan == nil && colorExportPlan == nil &&
         archivePlan == nil && deletionPlan == nil && missingAssetPlan == nil && sourceMergePlan == nil && qualityReanalysisPlan == nil &&
         !isShowingImport && !isShowingAlbumCreator && !isShowingColorExport
     }

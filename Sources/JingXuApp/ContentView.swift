@@ -32,6 +32,10 @@ struct ContentView: View {
             }
         }
         .toolbar { toolbar }
+        .sheet(item: $model.importPlan) { plan in ImportPlanView(plan: plan).environmentObject(model) }
+        .sheet(isPresented: $model.isShowingImportReport) {
+            if let report = model.lastImportReport { ImportResultView(report: report).environmentObject(model) }
+        }
         .modifier(PhotoSharePresentation(model: model, session: model.photoShareSession))
         .sheet(item: $model.archivePlan) { plan in
             VStack(alignment: .leading, spacing: 12) {
@@ -60,7 +64,7 @@ struct ContentView: View {
                 }
             }.padding(20).frame(width: 760, height: 520)
         }
-        .background(FlagKeyboardHandler(enabled: !showsScanReport && !model.isShowingPhotoShare && !model.isDeleting && model.archivePlan == nil && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), requiresCanvasFocus: model.colorEditor != nil, navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
+        .background(FlagKeyboardHandler(enabled: !showsScanReport && model.importPlan == nil && !model.isShowingImportReport && !model.isShowingPhotoShare && !model.isDeleting && model.archivePlan == nil && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), requiresCanvasFocus: model.colorEditor != nil, navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
             model.updateFlag(flag, advanceToNext: flag == .rejected)
         })
         .sheet(item: $model.missingAssetPlan) { plan in
@@ -334,6 +338,11 @@ struct ContentView: View {
 
     private var statusBar: some View {
         HStack {
+            if let report = model.lastImportReport {
+                Button(report.outcome.rawValue) { model.isShowingImportReport = true }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(report.outcome == .completed ? Color.secondary : Color.orange)
+            }
             if let report = model.lastScanReport {
                 Button(report.isPartial ? "扫描有遗漏" : "扫描结果") { showsScanReport = true }
                     .foregroundStyle(report.isPartial ? Color.orange : Color.secondary)

@@ -13,14 +13,14 @@ public struct ScanProgress: Sendable, Equatable {
     }
 }
 
-public struct ScanFailure: Sendable, Equatable {
-    public enum Stage: String, Sendable { case directory = "读取目录", file = "读取文件", metadata = "解析元数据" }
+public struct ScanFailure: Codable, Sendable, Equatable {
+    public enum Stage: String, Codable, Sendable { case directory = "读取目录", file = "读取文件", metadata = "解析元数据" }
     public var path: String
     public var stage: Stage
     public var reason: String
 }
 
-public struct ScanReport: Sendable, Equatable {
+public struct ScanReport: Codable, Sendable, Equatable {
     public var sourceID: String
     public var assetIDs: [String] = []
     public var discoveredFiles = 0
@@ -30,13 +30,14 @@ public struct ScanReport: Sendable, Equatable {
     public var failedDirectories = 0
     /// Counts remain complete; only the first 30 details are retained for presentation.
     public var failures: [ScanFailure] = []
+    private var detailLimit: Int
     public var isPartial: Bool { failedFiles > 0 || failedDirectories > 0 }
 
-    public init(sourceID: String) { self.sourceID = sourceID }
+    public init(sourceID: String, detailLimit: Int = 30) { self.sourceID = sourceID; self.detailLimit = detailLimit }
 
     mutating func record(path: String, stage: ScanFailure.Stage, reason: String) {
         if stage == .directory { failedDirectories += 1 } else { failedFiles += 1 }
-        if failures.count < 30 { failures.append(ScanFailure(path: path, stage: stage, reason: reason)) }
+        if failures.count < detailLimit { failures.append(ScanFailure(path: path, stage: stage, reason: reason)) }
     }
 }
 
@@ -49,10 +50,12 @@ public protocol SourceScanner: Sendable {
 public struct DefaultSourceScanner: SourceScanner {
     private let repository: any CatalogRepository
     private let metadataExtractor: any MetadataExtractor
+    private let failureDetailLimit: Int
 
-    public init(repository: any CatalogRepository, metadataExtractor: any MetadataExtractor = DefaultMetadataExtractor()) {
+    public init(repository: any CatalogRepository, metadataExtractor: any MetadataExtractor = DefaultMetadataExtractor(), failureDetailLimit: Int = 30) {
         self.repository = repository
         self.metadataExtractor = metadataExtractor
+        self.failureDetailLimit = failureDetailLimit
     }
 
     public func scan(source: SourceRoot, progress: ScanProgressHandler? = nil) async throws -> ScanReport {
@@ -173,7 +176,7 @@ public struct DefaultSourceScanner: SourceScanner {
 
     private func mediaFiles(under root: URL, sourceID: String) throws -> ([URL], ScanReport) {
         let keys: [URLResourceKey] = [.isRegularFileKey, .isHiddenKey]
-        var report = ScanReport(sourceID: sourceID)
+        var report = ScanReport(sourceID: sourceID, detailLimit: failureDetailLimit)
         var rootError: Error?
         guard let enumerator = FileManager.default.enumerator(
             at: root,
