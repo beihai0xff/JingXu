@@ -36,18 +36,18 @@ enum BrowseQueryChecks {
         let album = Album(id: "album", name: "相册")
         try await store.saveAlbum(album)
         for id in ["id-0", "id-1"] { try await store.add(assetID: id, toAlbum: album.id) }
-        let stable = try await store.assets(AssetQuery(limit: 100)).filter { $0.fileName == "same.jpg" }.map(\.id)
+        let stable = try await store.assets(BrowseQuery()).filter { $0.fileName == "same.jpg" }.map(\.id)
         try ColorChecks.check(stable == ["id-0", "id-1", "id-2"], "同日期同名照片顺序不稳定")
         for collection in [SmartCollection.all, .recent, .photos, .videos, .raw, .review, .rejected] {
-            for query in [AssetQuery(collection: collection), AssetQuery(collection: collection, searchText: "needle"),
-                          AssetQuery(collection: collection, minimumRating: 3), AssetQuery(collection: collection, flag: AssetFlag.none),
-                          AssetQuery(collection: collection, flag: .rejected), AssetQuery(collection: collection, sourceID: source.id, relativeDirectory: "a"),
-                          AssetQuery(collection: collection, albumID: album.id)] {
+            for query in [BrowseQuery(collection: collection), BrowseQuery(collection: collection, searchText: "needle"),
+                          BrowseQuery(collection: collection, minimumRating: 3), BrowseQuery(collection: collection, flag: AssetFlag.none),
+                          BrowseQuery(collection: collection, flag: .rejected), BrowseQuery(collection: collection, sourceID: source.id, relativeDirectory: "a"),
+                          BrowseQuery(collection: collection, albumID: album.id)] {
                 let page = try await store.assets(query)
                 let total = try await store.matchingAssetCount(query)
                 try ColorChecks.check(total == page.count, "精简计数改变了筛选结果：\(query)")
-                var paged = query; paged.limit = 1; paged.offset = 1
-                try ColorChecks.check(try await store.matchingAssetCount(paged) == total, "完整计数受分页影响")
+                let paged = try await store.browsePage(query, limit: 1, count: true)
+                try ColorChecks.check(paged.total == total && paged.items.count == min(1, total), "分页混入其他范围或截断完整计数")
             }
         }
         let db = try DatabaseQueue(path: url.path)
@@ -58,7 +58,7 @@ enum BrowseQueryChecks {
         // Current-format catalogs need no migration/version bump to restore derived indexes.
         for _ in 0..<2 {
             let reopened = try CatalogStore(databaseURL: url)
-            _ = try await reopened.assets(AssetQuery())
+            _ = try await reopened.assets(BrowseQuery())
             let reader = try DatabaseQueue(path: url.path)
             try await reader.read { db in
                 try assertIndexes(db)

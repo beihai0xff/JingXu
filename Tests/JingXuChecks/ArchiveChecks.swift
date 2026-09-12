@@ -71,7 +71,7 @@ enum ArchiveChecks {
         let kept = try await store.annotation(for: moved.id)
         try check(kept.rating == 5 && kept.flag == .rejected)
         try check(kept.keywords == ["保留关键词"])
-        try check(try await store.assets(AssetQuery(albumID: album.id)).map(\.id) == [moved.id])
+        try check(try await store.assets(BrowseQuery(albumID: album.id)).map(\.id) == [moved.id])
         try check(try await store.analysis(for: moved.id)?.suggestionState == .ignored)
         try check(abs(moved.importedAt.timeIntervalSince(originals[0].importedAt)) < 0.001)
         try check(FileManager.default.fileExists(atPath: photos.appendingPathComponent("movie.mov").path))

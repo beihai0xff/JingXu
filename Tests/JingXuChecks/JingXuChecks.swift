@@ -122,6 +122,10 @@ private enum JingXuChecks {
                 output: URL(fileURLWithPath: CommandLine.arguments[index+2]))
             return
         }
+        if CommandLine.arguments.contains("--workflow-ui-fixtures") {
+            print(try await WorkflowChecks.uiFixtures().path)
+            return
+        }
         if CommandLine.arguments.contains("--ui-fixtures") {
             let root = try temporaryWorkspace()
             try writeSolidJPEG(to: root.appendingPathComponent("light.jpg"), gray: 220)
@@ -130,6 +134,10 @@ private enum JingXuChecks {
             return
         }
         let checks: [(String, () async throws -> Void)] = [
+            ("XMP 固定清单、不覆盖竞争、身份变化与取消", WorkflowChecks.xmp),
+            ("批量标注、字段撤销、相册与事务失败", WorkflowChecks.annotations),
+            ("十万项游标分页、跨页目标与字面搜索", WorkflowChecks.pagination),
+            ("缩略图请求合并与独立取消", WorkflowChecks.coalescing),
             ("直接归档、标注保留、备份失败、回退与重启恢复", ArchiveChecks.run),
             ("跨来源批量移动、重名、标注保留、撤销与中断恢复", BatchMoveChecks.run),
             ("归档超过 2000 项、取消、提交前中断与撤销冲突", ArchiveChecks.scaleAndRecovery),
@@ -183,7 +191,7 @@ private enum JingXuChecks {
         for (name, check) in checks {
             do {
                 try await check()
-                print("✓ \(name)")
+                try FileHandle.standardOutput.write(contentsOf: Data("✓ \(name)\n".utf8))
             } catch {
                 try? FileHandle.standardError.write(contentsOf: Data("✗ \(name)：\(error)\n".utf8))
                 throw error
@@ -275,9 +283,9 @@ private enum JingXuChecks {
         annotation.keywords = ["旅行", " 夜景 ", "旅行", ""]
         try await store.seedAnnotation(annotation)
 
-        let all = try await store.assets(AssetQuery())
-        let rawResults = try await store.assets(AssetQuery(collection: .raw))
-        let filtered = try await store.assets(AssetQuery(searchText: "Alpha", minimumRating: 4, flag: .rejected))
+        let all = try await store.assets(BrowseQuery())
+        let rawResults = try await store.assets(BrowseQuery(collection: .raw))
+        let filtered = try await store.assets(BrowseQuery(searchText: "Alpha", minimumRating: 4, flag: .rejected))
         try require(all.count == 1, "目录未返回已保存资源")
         try require(all.first?.keywords == ["夜景", "旅行"], "关键词未规范化")
         try require(rawResults.first?.fileName == "IMG_0001.ARW", "RAW 筛选失败")
@@ -288,16 +296,16 @@ private enum JingXuChecks {
             fileName: "unmarked.jpg", uniformType: "public.jpeg", kind: .photo,
             fileSize: 100, modifiedAt: Date()
         ))
-        let unmarkedResults = try await store.assets(AssetQuery(flag: AssetFlag.none))
+        let unmarkedResults = try await store.assets(BrowseQuery(flag: AssetFlag.none))
         try require(unmarkedResults.map(\.id) == [unmarked.id], "未标记筛选应包含尚无标注的照片并排除淘汰照片")
-        let rejected = try await store.assets(AssetQuery(collection: .rejected))
+        let rejected = try await store.assets(BrowseQuery(collection: .rejected))
         try require(rejected.map(\.id) == [stored.id], "淘汰集合范围错误")
 
         annotation.flag = .none
         try await store.seedAnnotation(annotation)
         let cleared = try await store.annotation(for: stored.id)
-        let rejectedAfterClear = try await store.assets(AssetQuery(flag: .rejected))
-        let unmarkedAfterClear = try await store.assets(AssetQuery(flag: AssetFlag.none))
+        let rejectedAfterClear = try await store.assets(BrowseQuery(flag: .rejected))
+        let unmarkedAfterClear = try await store.assets(BrowseQuery(flag: AssetFlag.none))
         try require(cleared.flag == .none && cleared.rating == 4 && cleared.keywords == ["夜景", "旅行"], "取消淘汰未保存或修改了其他标注")
         try require(rejectedAfterClear.isEmpty && Set(unmarkedAfterClear.map(\.id)) == [stored.id, unmarked.id], "取消淘汰后筛选未更新")
     }
@@ -334,8 +342,8 @@ private enum JingXuChecks {
             highlightClipping: 0,
             issues: [.blurry]
         ))
-        let albumAssets = try await store.assets(AssetQuery(albumID: album.id))
-        let reviewAssets = try await store.assets(AssetQuery(collection: .review))
+        let albumAssets = try await store.assets(BrowseQuery(albumID: album.id))
+        let reviewAssets = try await store.assets(BrowseQuery(collection: .review))
         try require(albumAssets.count == 1, "相册成员关系失败")
         try require(reviewAssets.isEmpty && albumAssets.first?.qualityStatus == .legacy, "旧版建议不应进入新版待审核")
     }
@@ -389,7 +397,7 @@ private enum JingXuChecks {
         let scanner = DefaultSourceScanner(repository: store, metadataExtractor: StubMetadataExtractor())
         let first = try await scanner.scan(source: source, progress: nil)
         let second = try await scanner.scan(source: source, progress: nil)
-        let assets = try await store.assets(AssetQuery())
+        let assets = try await store.assets(BrowseQuery())
         var pairKeys: Set<String> = []
         for id in first.assetIDs {
             if let pairKey = try await store.asset(id: id)?.rawPairKey { pairKeys.insert(pairKey) }
@@ -487,9 +495,9 @@ private enum JingXuChecks {
         _ = try await store.upsertAssets(assets)
 
         for (name, query, budget) in [
-            ("全部", AssetQuery(limit: 2000), Duration.milliseconds(100)),
-            ("来源", AssetQuery(sourceID: source.id, limit: 2000), Duration.milliseconds(100)),
-            ("搜索", AssetQuery(searchText: "Camera A", limit: 2000), Duration.milliseconds(500))
+            ("全部", BrowseQuery(), Duration.milliseconds(100)),
+            ("来源", BrowseQuery(sourceID: source.id), Duration.milliseconds(100)),
+            ("搜索", BrowseQuery(searchText: "Camera A"), Duration.milliseconds(500))
         ] {
             var samples: [Duration] = []
             for run in 0..<6 {
@@ -505,7 +513,7 @@ private enum JingXuChecks {
             print("  10 万条 \(name)首批＋计数（预热后 5 次中位数）：\(median)")
         }
         let start = ContinuousClock.now
-        let firstPage = try await store.assets(AssetQuery(searchText: "Camera A", limit: 2_000))
+        let firstPage = try await store.assets(BrowseQuery(searchText: "Camera A"))
         let elapsed = start.duration(to: .now)
         try require(firstPage.count == 2_000, "10 万条目录未返回完整首批结果")
         try require(elapsed < .milliseconds(500), "10 万条目录筛选超过 500ms：\(elapsed)")
@@ -514,7 +522,7 @@ private enum JingXuChecks {
         let treeElapsed = treeStart.duration(to: .now)
         try require(tree.first?.recursiveCount == 100_000 && tree.first?.children.count == 100, "10 万条目录树不完整")
         let folderStart = ContinuousClock.now
-        let query = AssetQuery(sourceID: source.id, relativeDirectory: "0042", searchText: "Camera A", limit: 2000)
+        let query = BrowseQuery(sourceID: source.id, relativeDirectory: "0042", searchText: "Camera A")
         let folderPage = try await store.assets(query)
         let folderCount = try await store.matchingAssetCount(query)
         let folderElapsed = folderStart.duration(to: .now)
@@ -545,11 +553,11 @@ private enum JingXuChecks {
         try await store.saveAlbum(album)
         try await store.add(assetID: removed.id, toAlbum: album.id)
         try await store.seedAnnotation(UserAnnotation(assetID: removed.id, rating: 5, keywords: ["keep backup"]))
-        let plan = try await store.prepareMissingAssetCleanup(AssetQuery(limit: 2_000))
+        let plan = try await store.prepareMissingAssetCleanup(BrowseQuery())
         try require(plan.files.count == 2_005, "失效索引范围受显示上限影响或未识别 ENOENT")
-        let albumPlan = try await store.prepareMissingAssetCleanup(AssetQuery(albumID: album.id))
+        let albumPlan = try await store.prepareMissingAssetCleanup(BrowseQuery(albumID: album.id))
         try require(albumPlan.files.map(\.id) == [removed.id], "失效索引相册筛选泄漏")
-        let empty = try await store.prepareMissingAssetCleanup(AssetQuery(searchText: "not-matching"))
+        let empty = try await store.prepareMissingAssetCleanup(BrowseQuery(searchText: "not-matching"))
         try require(empty.files.isEmpty, "失效索引搜索隔离失败")
         let backup = root.appendingPathComponent("backup.sqlite")
         try Data([1, 2, 3]).write(to: folder.appendingPathComponent(restored.relativePath))
@@ -572,14 +580,14 @@ private enum JingXuChecks {
         try require(afterBackupFailure.count == 2_005, "备份失败修改了图库")
         var offline = source; offline.isOnline = false
         try await store.upsertSource(offline)
-        let offlinePlan = try await store.prepareMissingAssetCleanup(AssetQuery())
+        let offlinePlan = try await store.prepareMissingAssetCleanup(BrowseQuery())
         try require(offlinePlan.files.isEmpty && !offlinePlan.warnings.isEmpty, "离线来源被当作缺失")
         let offlineReport = try await store.cleanupMissingAssets(albumPlan, backupURL: root.appendingPathComponent("offline.sqlite"))
         try require(offlineReport.removedIDs.isEmpty, "确认后离线仍清理了索引")
         try await store.upsertSource(source)
         let movedFolder = root.appendingPathComponent("disconnected")
         try FileManager.default.moveItem(at: folder, to: movedFolder)
-        let disconnected = try await store.prepareMissingAssetCleanup(AssetQuery())
+        let disconnected = try await store.prepareMissingAssetCleanup(BrowseQuery())
         try require(disconnected.files.isEmpty && !disconnected.warnings.isEmpty, "来源目录消失被视为文件删除")
         try FileManager.default.moveItem(at: movedFolder, to: folder)
         let cancelled = Task {
@@ -636,16 +644,16 @@ private enum JingXuChecks {
         let trashDir = root.appendingPathComponent("trash")
         try FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
         let coordinator = DeletionCoordinator(store: store, journalURL: journal, trash: TestTrash(directory: trashDir))
-        let all = try await coordinator.prepare(AssetQuery(limit: 2_000))
+        let all = try await coordinator.prepare(BrowseQuery())
         try require(all.files.count == 2_005, "删除候选被显示上限截断")
-        let excluded = try await coordinator.prepare(AssetQuery(searchText: "absent"))
+        let excluded = try await coordinator.prepare(BrowseQuery(searchText: "absent"))
         try require(excluded.files.isEmpty, "搜索范围泄漏")
-        let unmarked = try await coordinator.prepare(AssetQuery(flag: AssetFlag.none))
+        let unmarked = try await coordinator.prepare(BrowseQuery(flag: AssetFlag.none))
         try require(unmarked.files.isEmpty, "未标记筛选进入淘汰清理")
         let album = Album(name: "隔离")
         try await store.saveAlbum(album)
         try await store.add(assetID: saved[0].id, toAlbum: album.id)
-        let albumPlan = try await coordinator.prepare(AssetQuery(albumID: album.id))
+        let albumPlan = try await coordinator.prepare(BrowseQuery(albumID: album.id))
         try require(albumPlan.files.count == 1, "相册范围泄漏")
         try await store.removeAssetRecords(saved.map(\.id))
 
@@ -658,7 +666,7 @@ private enum JingXuChecks {
             try await store.seedAnnotation(UserAnnotation(assetID: asset.id, flag: name == "pair.raw" ? .none : .rejected))
             files.append(asset)
         }
-        let plan = try await coordinator.prepare(AssetQuery())
+        let plan = try await coordinator.prepare(BrowseQuery())
         try require(plan.files.count == 5, "视频或未标记配对文件被列入删除")
         try Data("replacement contents".utf8).write(to: root.appendingPathComponent("changed.jpg"), options: .atomic)
         try await store.seedAnnotation(UserAnnotation(assetID: files[3].id))
@@ -695,7 +703,7 @@ private enum JingXuChecks {
         let duplicateReport = try await coordinator.execute(DeletionPlan(files: [stableDuplicate, stableDuplicate]))
         try require(duplicateReport.deleted == 1 && duplicateReport.skipped == 1, "重复路径被多次处理")
         let cleanedAnnotation = try await store.annotation(for: duplicate.id)
-        let cleanedAlbum = try await store.assets(AssetQuery(albumID: album.id))
+        let cleanedAlbum = try await store.assets(BrowseQuery(albumID: album.id))
         try require(cleanedAnnotation.rating == 0 && cleanedAnnotation.keywords.isEmpty && cleanedAlbum.isEmpty, "关联数据未级联清理")
     }
 
@@ -846,7 +854,7 @@ private enum JingXuChecks {
         try require(report.mergedGroups == 1 && report.skipped.isEmpty, "来源未合并")
         let merged = try await store.annotation(for: first.id)
         try require(merged.rating == 5 && merged.flag == .rejected && merged.keywords == ["A", "B"], "标注合并规则错误")
-        let members = try await store.assets(AssetQuery(albumID: album.id))
+        let members = try await store.assets(BrowseQuery(albumID: album.id))
         try require(members.count == 1 && members[0].id == first.id, "相册关系未迁移")
         let backupStore = try CatalogStore(databaseURL: backup)
         let backupSource = try await backupStore.source(id: duplicate.id)

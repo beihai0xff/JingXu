@@ -14,13 +14,18 @@ enum SidebarDestination: Hashable {
 
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var sources: [SourceRoot] = []
+    @Published var sources: [SourceRoot] = [] { didSet { if oldValue != sources { automationSelectionToken = UUID() } } }
     @Published var albums: [Album] = []
-    @Published var assets: [AssetListItem] = [] { didSet { if oldValue.map(\.id) != assets.map(\.id) { automationSelectionToken = UUID() } } }
-    @Published private(set) var sidebarSelection: SidebarDestination? = .smart(.all)
+    @Published var assets: [AssetListItem] = [] {
+        didSet {
+            let previous = Dictionary(uniqueKeysWithValues: oldValue.map { ($0.id, $0.fileVersion) })
+            if assets.contains(where: { previous[$0.id] != nil && previous[$0.id] != $0.fileVersion }) { automationSelectionToken = UUID() }
+        }
+    }
+    @Published var sidebarSelection: SidebarDestination? = .smart(.all)
     @Published var folderRoots: [CatalogFolderNode] = []
     @Published var expandedFolders = Set<CatalogFolderID>()
-    @Published private(set) var includeSubdirectories: Bool
+    @Published var includeSubdirectories: Bool
     @Published var matchingAssetCount = 0
     @Published var isLoadingAssets = false
     var assetRequestID = UUID()
@@ -31,7 +36,7 @@ final class AppModel: ObservableObject {
         get { photoSelection.focusID }
         set { photoSelection.focusID = newValue }
     }
-    var selectedPhotoIDs: [String] { photoSelection.orderedIDs(in: assets.filter { $0.kind == .photo }.map(\.id)) }
+    var selectedPhotoIDs: [String] { photoSelection.selectedIDs.sorted() }
     @Published var isBatchSelecting = false { didSet { if oldValue != isBatchSelecting { automationSelectionToken = UUID() } } }
     var automationSelectionToken = UUID()
     var automationOwnsOperation = false
@@ -40,24 +45,32 @@ final class AppModel: ObservableObject {
 
     func clickAsset(_ item: AssetListItem, command: Bool, shift: Bool, count: Int) {
         guard canChangeBrowseScope, NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil else { return }
+        if keywordDraft != keywordSaved {
+            transitionPreview { self.clickAsset(item, command: command, shift: shift, count: count) }
+            return
+        }
         let open = photoSelection.click(item.id, photoIDs: assets.filter { $0.kind == .photo }.map(\.id),
                                         command: command, shift: shift, checkboxMode: isBatchSelecting, count: count)
         NSApp.keyWindow?.makeFirstResponder(nil)
         if open { openPreview(item) }
+        syncKeywordDraft()
     }
 
     func selectVisiblePhotos() {
         guard canChangeBrowseScope else { return }
-        photoSelection.selectAll(assets.filter { $0.kind == .photo }.map(\.id))
+        transitionPreview {
+            self.photoSelection.selectAll(self.assets.filter { $0.kind == .photo }.map(\.id))
+            self.syncKeywordDraft()
+        }
     }
-    func clearPhotoSelection() { guard canChangeBrowseScope else { return }; photoSelection.clear() }
+    func clearPhotoSelection() {
+        guard canChangeBrowseScope else { return }
+        transitionPreview { self.photoSelection.clear(); self.syncKeywordDraft() }
+    }
     func changeCheckboxMode(_ enabled: Bool) {
         guard canChangeBrowseScope else { return }
         isBatchSelecting = enabled
-        if !enabled {
-            if let item = selectedAsset { photoSelection.selectOnly(item.id, isPhoto: item.kind == .photo) }
-            else { photoSelection.clear() }
-        }
+
     }
     @Published var isShowingPhotoShare = false
     @Published var shareDraft: [AssetListItem] = []
@@ -67,13 +80,51 @@ final class AppModel: ObservableObject {
     var photoShareCoordinator: PhotoShareCoordinator?
     var sharePreparationTask: Task<Void, Never>?
     private var shareObservation: AnyCancellable?
-    private var selectionQuery: AssetQuery?
+    var appliedQuery = BrowseQuery()
+    var pendingQuery: BrowseQuery?
+    var pendingDestination: SidebarDestination?
+    var browseTask: Task<Void, Never>?
+    var searchTask: Task<Void, Never>?
+    @Published var browseError: String?
+    var retryBrowseAction: (@MainActor () -> Void)?
+    @Published var hasPreviousPage = false
+    @Published var hasNextPage = false
+    @Published var resultsChanged = false
+    @Published var previewItems: [AssetListItem] = []
+    @Published var previewHasPrevious = false
+    @Published var previewHasNext = false
+    @Published var comparisonReference: AssetListItem?
+    var comparisonReturnQuery: BrowseQuery?
+    var comparisonPrefetchTask: Task<Void, Never>?
+    var prefetchedComparison: PreviewImage?
+    var prefetchedComparisonKey: String?
+    var comparisonPrefetchGeneration = UUID()
+    @Published var isPreparingSelection = false
+    @Published var operationResults: [String] = []
+    @Published var gridColumns = 1
+    @Published var keywordDraft = ""
+    var keywordTargetID: String?
+    var keywordSaved = ""
+    @Published var isShowingKeywords = false
+    @Published var isSavingAnnotation = false
+    let annotationUndoManager = UndoManager()
+    var undoTask: Task<Void, Never>?
+    var keywordSaveTask: Task<Bool, Never>?
+    @Published var thumbnailReloadID = UUID()
+
     @Published var searchText = ""
     @Published var minimumRating = 0
     @Published var flagFilter: AssetFlag?
     @Published var gridSize: CGFloat = 170
     @Published var isWorking = false
-    @Published var statusText = "准备就绪"
+    @Published var statusText = "准备就绪" {
+        didSet {
+            if !isWorking && !statusText.isEmpty && operationResults.first != statusText {
+                operationResults.insert(statusText, at: 0)
+                if operationResults.count > 20 { operationResults.removeLast() }
+            }
+        }
+    }
     @Published var errorMessage: String?
     @Published var isShowingImport = false
     @Published var isShowingAlbumCreator = false
@@ -90,7 +141,6 @@ final class AppModel: ObservableObject {
     @Published var archivePending = false
     private var archiveCoordinator: ArchiveCoordinator?
     @Published var isDeleting = false
-    @Published private(set) var isSavingFlag = false
     @Published var sourceMergePlan: SourceMergePlan?
     private let histogramProvider = HistogramProvider()
     private var deletionCoordinator: DeletionCoordinator?
@@ -107,7 +157,6 @@ final class AppModel: ObservableObject {
     var colorThumbnails: ColorThumbnailProvider?
     var colorEditorObservation: AnyCancellable?
     @Published var previewAsset: AssetListItem? { didSet { if oldValue?.id != previewAsset?.id { automationSelectionToken = UUID() } } }
-    private var previewNavigation = PreviewNavigation(photoIDs: [])
 
     let volumeMonitor = VolumeMonitor()
 
@@ -118,6 +167,7 @@ final class AppModel: ObservableObject {
     private var reanalysisCoordinator: QualityReanalysisCoordinator?
     var thumbnailProvider: DefaultThumbnailProvider?
     private var xmpExporter: DefaultXMPExporter?
+    @Published var xmpPlan: XMPExportPlan?
     @Published var importPlan: ImportPlan?
     @Published var lastImportReport: ImportReport?
     @Published var isShowingImportReport = false
@@ -144,6 +194,8 @@ final class AppModel: ObservableObject {
         } else { browsingDefaults = .standard }
         includeSubdirectories = browsingDefaults.object(forKey: "BrowseIncludesSubdirectories") as? Bool ?? true
         shareObservation = photoShareSession.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        annotationUndoManager.levelsOfUndo = 50
+        annotationUndoManager.groupsByEvent = false
         Task { await initializeCatalog() }
     }
 
@@ -286,63 +338,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func reloadAssets() async {
-        guard let store else { return }
-        let query = currentQuery()
-        let request = UUID(); assetRequestID = request
-        isLoadingAssets = true
-        defer { if assetRequestID == request { isLoadingAssets = false } }
-        do {
-            async let page = store.assets(query)
-            async let count = store.matchingAssetCount(query)
-            let (loaded, total) = try await (page, count)
-            let previewID = previewAsset?.id
-            let refreshedPreview: AssetListItem?
-            if let previewID {
-                if let item = loaded.first(where: { $0.id == previewID }) { refreshedPreview = item }
-                else { refreshedPreview = try await store.assetListItem(id: previewID) }
-            } else { refreshedPreview = nil }
-            guard assetRequestID == request, currentQuery() == query, !Task.isCancelled else { return }
-            assets = loaded
-            matchingAssetCount = total
-            photoSelection.reconcile(visibleIDs: assets.map(\.id), photoIDs: assets.filter { $0.kind == .photo }.map(\.id),
-                                     resetAnchor: selectionQuery != query)
-            selectionQuery = query
-            previewNavigation.refresh(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
-            if previewAsset?.id == previewID {
-                previewAsset = refreshedPreview
-                if let id = refreshedPreview?.id, assets.contains(where: { $0.id == id }) { selectedAssetID = id }
-            }
-            if let selectedAssetID, !assets.contains(where: { $0.id == selectedAssetID }) {
-                self.selectedAssetID = nil
-            }
-            statusText = "匹配 \(total) 项，已显示 \(assets.count) 项\(total > assets.count ? "（最多 2,000 项）" : "")"
-        } catch {
-            guard assetRequestID == request, currentQuery() == query, !Task.isCancelled else { return }
-            errorMessage = "载入照片失败：\(error.localizedDescription)"
-        }
-    }
-
-    private func currentQuery() -> AssetQuery {
-        var query = AssetQuery(
-            searchText: searchText,
-            minimumRating: minimumRating,
-            flag: flagFilter,
-            limit: 2_000
-        )
-        switch sidebarSelection {
-        case .smart(let collection): query.collection = collection
-        case .source(let id):
-            query.sourceID = id; query.relativeDirectory = ""; query.includeSubdirectories = includeSubdirectories
-        case .folder(let folder):
-            query.sourceID = folder.sourceID; query.relativeDirectory = folder.relativeDirectory
-            query.includeSubdirectories = includeSubdirectories
-        case .album(let id): query.albumID = id
-        case nil: break
-        }
-        return query
-    }
-
     var selectedFolderID: CatalogFolderID? {
         switch sidebarSelection {
         case .source(let id): CatalogFolderID(sourceID: id)
@@ -369,7 +364,7 @@ final class AppModel: ObservableObject {
         // SwiftUI's disabled state must only depend on observable model state.
         // Clearing an alert can render before AppKit detaches its sheet; reading
         // attachedSheet here would leave the sidebar disabled with no later update.
-        !isStarting && !isSavingFlag && !automationOwnsOperation && canInteractWithLibrary &&
+        !isStarting && !isSavingAnnotation && !isPreparingSelection && !isLoadingAssets && !automationOwnsOperation && canInteractWithLibrary &&
         !isShowingColorPresets && errorMessage == nil
     }
 
@@ -394,17 +389,8 @@ final class AppModel: ObservableObject {
     /// Called only after a successful preview-save transition, or by a completed
     /// catalog operation which already owns the operation gate and has no editor.
     func applyBrowseScope(_ destination: SidebarDestination?, includeSubdirectories value: Bool? = nil) {
-        assetRequestID = UUID()
-        automationSelectionToken = UUID()
-        sidebarSelection = destination
-        if let value {
-            includeSubdirectories = value
-            browsingDefaults.set(value, forKey: "BrowseIncludesSubdirectories")
-        }
-        previewAsset = nil; previewNavigation = PreviewNavigation(photoIDs: [])
-        photoSelection.clear(); selectionQuery = nil
-        assets = []; matchingAssetCount = 0; isLoadingAssets = false
-        statusText = "正在载入当前范围…"
+        pendingDestination = destination
+        pendingQuery = draftQuery(destination: destination, includeSubdirectories: value)
     }
 
     private func reconcileFolderSelection() {
@@ -433,6 +419,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func persistBrowsePreference() { browsingDefaults.set(includeSubdirectories, forKey: "BrowseIncludesSubdirectories") }
+
     func confirmMissingAssetCleanup(_ plan: MissingAssetPlan) {
         missingAssetPlan = nil
         guard let store else { return }
@@ -440,8 +428,9 @@ final class AppModel: ObservableObject {
             self.isDeleting = true
             defer { self.isDeleting = false }
             do {
+                self.annotationUndoManager.removeAllActions()
                 let report = try await store.cleanupMissingAssets(plan, backupURL: self.backupURL())
-                if let id = self.previewAsset?.id, report.removedIDs.contains(id) { self.closePreview() }
+                if let id = self.previewAsset?.id, report.removedIDs.contains(id) { self.dismissPreview() }
                 if let id = self.selectedAssetID, report.removedIDs.contains(id) { self.selectedAssetID = nil }
                 do { try await self.thumbnailProvider?.invalidate(assetIDs: report.removedIDs) }
                 catch { self.errorMessage = "索引已清理，但缩略图缓存清理失败：\(error.localizedDescription)" }
@@ -464,11 +453,12 @@ final class AppModel: ObservableObject {
     func confirmDeletion(_ plan: DeletionPlan) {
         deletionPlan = nil
         guard let deletionCoordinator else { return }
-        closePreview()
         startOperation {
+            self.dismissPreview()
             self.isDeleting = true
             defer { self.isDeleting = false }
             do {
+                self.annotationUndoManager.removeAllActions()
                 let report = try await deletionCoordinator.execute(plan) { done, total in
                     await MainActor.run { self.statusText = "正在移到废纸篓 \(done)/\(total)" }
                 }
@@ -489,59 +479,67 @@ final class AppModel: ObservableObject {
             self.presentPreview(item)
         }
     }
-    /// The caller owns either the UI transition or the automation operation gate.
     func presentPreview(_ item: AssetListItem) {
-        photoSelection.selectOnly(item.id, isPhoto: item.kind == .photo)
-        previewNavigation = PreviewNavigation(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
         previewAsset = item
+        previewItems = assets.filter { $0.kind == .photo }
+        previewHasPrevious = hasPreviousPage; previewHasNext = hasNextPage
         NSApp.mainWindow?.makeFirstResponder(nil)
+        Task { await refreshPreviewWindow() }
     }
     func selectAsset(_ item: AssetListItem) {
         guard !automationOwnsOperation else { return }
         photoSelection.selectOnly(item.id, isPhoto: item.kind == .photo)
-        // A non-focusable SwiftUI grid cell otherwise leaves the search field editing.
         NSApp.keyWindow?.makeFirstResponder(nil)
     }
     func closePreview() {
         transitionPreview {
-            self.previewAsset = nil
-            self.previewNavigation = PreviewNavigation(photoIDs: [])
+            let anchor = self.previewAsset.map(BrowseCursor.init)
+            self.dismissPreview()
+            if let anchor { Task { await self.loadBrowsePage(cursor: anchor, inclusive: true); self.syncKeywordDraft() } }
         }
+    }
+    /// Used after drafts have drained. File operations refresh the grid themselves.
+    func dismissPreview() {
+        comparisonReference = nil; clearComparisonPrefetch(); previewAsset = nil; previewItems = []
+        previewHasPrevious = false; previewHasNext = false
     }
     var previewNavigationEnabled: Bool {
-        previewAsset != nil && !isShowingPhotoShare && !automationOwnsOperation && !isPreviewTransitioning && !isDeleting && !isShowingImport && !isShowingAlbumCreator &&
+        previewAsset != nil && !isPreparingSelection && canInteractWithLibrary && !isLoadingAssets && !isSavingAnnotation && !isShowingPhotoShare && !automationOwnsOperation && !isPreviewTransitioning && !isDeleting && !isShowingImport && !isShowingAlbumCreator &&
         !isShowingColorPresets && !isShowingColorExport && colorBatchPlan == nil && colorExportPlan == nil &&
-        deletionPlan == nil && sourceMergePlan == nil && qualityReanalysisPlan == nil && errorMessage == nil
+        deletionPlan == nil && sourceMergePlan == nil && qualityReanalysisPlan == nil && xmpPlan == nil && errorMessage == nil
     }
     func canNavigatePreview(_ direction: Int) -> Bool {
-        guard previewNavigationEnabled, let id = previewAsset?.id else { return false }
-        return previewNavigation.neighbor(of: id, direction: direction) != nil
+        guard previewNavigationEnabled, let item = previewAsset else { return false }
+        let navigation = PreviewNavigation(photoIDs: previewItems.map(\.id))
+        return navigation.neighbor(of: item.id, direction: direction) != nil || (direction < 0 ? previewHasPrevious : previewHasNext)
     }
     func navigatePreview(_ direction: Int) {
-        guard previewNavigationEnabled, let current = previewAsset?.id,
-              let id = previewNavigation.neighbor(of: current, direction: direction) else { return }
-        selectPreview(id: id)
-    }
-    var previewFilmstrip: [AssetListItem] {
-        guard let current = previewAsset else { return [] }
-        var available = Dictionary(assets.filter { $0.kind == .photo }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        available[current.id] = current
-        return previewNavigation.filmstripIDs(currentID: current.id).compactMap { available[$0] }
-    }
-    func selectPreview(id: String) {
-        guard previewNavigationEnabled, let current = previewAsset,
-              previewNavigation.filmstripIDs(currentID: current.id).contains(id),
-              let item = assets.first(where: { $0.id == id && $0.kind == .photo }) else { return }
+        guard previewNavigationEnabled, let item = previewAsset, let store else { return }
         transitionPreview {
-            self.selectAsset(item)
-            self.previewAsset = item
+            self.isPreviewTransitioning = true
+            Task {
+                defer { self.isPreviewTransitioning = false }
+                do {
+                    let cursor = BrowseCursor(item)
+                    let page = try await store.browsePage(self.appliedQuery, cursor: cursor, reverse: direction < 0, photosOnly: true, limit: 2)
+                    var candidates = direction < 0 ? Array(page.items.reversed()) : page.items
+                    if candidates.first?.id == self.comparisonReference?.id { candidates.removeFirst() }
+                    if let next = candidates.first { self.previewAsset = next; await self.refreshPreviewWindow() }
+                    else { self.statusText = "已到当前范围边界" }
+                } catch { self.errorMessage = "切图失败：\(error.localizedDescription)" }
+            }
         }
+    }
+    var previewFilmstrip: [AssetListItem] { previewItems }
+    func selectPreview(id: String) {
+        guard previewNavigationEnabled, let item = previewItems.first(where: { $0.id == id }), id != comparisonReference?.id else { return }
+        transitionPreview { self.previewAsset = item; Task { await self.refreshPreviewWindow() } }
     }
     func flagFromMenu(_ flag: AssetFlag) {
         guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil,
               !isShowingImport, !isShowingAlbumCreator else { return }
         guard NSApp.keyWindow?.title == "镜序" else { return }
-        updateFlag(flag, advanceToNext: flag == .rejected)
+        updateFlag(flag, advanceToNext: flag == .rejected && annotationTargetIDs.count == 1)
     }
     func loadOriginal(_ item: AssetListItem) async throws -> PreviewImage {
         guard let store, let asset = try await store.asset(id: item.id),
@@ -565,10 +563,10 @@ final class AppModel: ObservableObject {
         return try await histogramProvider.histogram(asset: asset, url: root.appendingPathComponent(asset.relativePath))
     }
 
-    var hasUserFilters: Bool { !searchText.isEmpty || minimumRating > 0 || flagFilter != nil }
+    var hasUserFilters: Bool { !appliedQuery.searchText.isEmpty || appliedQuery.minimumRating > 0 || appliedQuery.flag != nil }
     func clearFilters() {
         searchText = ""; minimumRating = 0; flagFilter = nil
-        Task { await reloadAssets() }
+        requestFilters()
     }
 
     func checkDeletionRecovery() async throws {
@@ -595,7 +593,8 @@ final class AppModel: ObservableObject {
                 alert.addButton(withTitle: "取消"); alert.addButton(withTitle: "移除来源")
                 guard alert.runModal() == .alertSecondButtonReturn else { return }
                 try await self.checkDeletionRecovery()
-                self.closePreview()
+                self.dismissPreview()
+                self.annotationUndoManager.removeAllActions()
                 let ids = try await store.removeSource(id: source.id, backupURL: self.backupURL())
                 try await self.thumbnailProvider?.invalidate(assetIDs: ids)
                 if self.selectedFolderID?.sourceID == source.id { self.applyBrowseScope(.smart(.all)) }
@@ -616,6 +615,7 @@ final class AppModel: ObservableObject {
             guard alert.runModal() == .alertSecondButtonReturn else { return }
             do {
                 try await self.checkDeletionRecovery()
+                self.annotationUndoManager.removeAllActions()
                 try await store.deleteAlbum(id: album.id)
                 if self.sidebarSelection == .album(album.id) { self.applyBrowseScope(.smart(.all)) }
                 await self.reloadAll()
@@ -639,7 +639,8 @@ final class AppModel: ObservableObject {
             defer { self.isDeleting = false }
             do {
                 try await self.checkDeletionRecovery()
-                self.closePreview()
+                self.dismissPreview()
+                self.annotationUndoManager.removeAllActions()
                 let report = try await store.mergeSources(plan, backupURL: self.backupURL())
                 try await self.thumbnailProvider?.invalidate(assetIDs: report.invalidatedIDs)
                 self.applyBrowseScope(.smart(.all))
@@ -650,7 +651,7 @@ final class AppModel: ObservableObject {
     }
 
     func chooseAndAddFolder() {
-        guard !fileOperationsBlockedByShare, !isWorking else { return }
+        guard operationBlockReason(.files) == nil else { return }
         let panel = NSOpenPanel()
         panel.title = "选择要索引的照片文件夹"
         panel.prompt = "添加文件夹"
@@ -730,7 +731,7 @@ final class AppModel: ObservableObject {
 
     func prepareQualityReanalysis(legacyOnly: Bool = false, assetID: String? = nil) {
         guard let store else { return }
-        let query = legacyOnly ? AssetQuery() : currentQuery()
+        let query = legacyOnly ? BrowseQuery() : currentQuery()
         startOperation {
             do {
                 if try await store.qualityJobs().contains(where: { $0.isResumable }) {
@@ -804,68 +805,6 @@ final class AppModel: ObservableObject {
         await reloadAssets()
     }
 
-    func updateRating(_ rating: Int) {
-        guard !isDeleting else { return }
-        guard let selectedAssetID = previewAsset?.id ?? selectedAssetID, let store else { return }
-        Task {
-            do {
-                try await store.setRating(rating, for: selectedAssetID)
-                await reloadAssets()
-            } catch { errorMessage = "保存评分失败：\(error.localizedDescription)" }
-        }
-    }
-
-    func updateFlag(_ flag: AssetFlag, advanceToNext: Bool = false) {
-        guard colorEditor == nil, !isPreviewTransitioning, !isShowingColorPresets, !isShowingColorExport, colorBatchPlan == nil, colorExportPlan == nil else { return }
-        guard let selectedAssetID = previewAsset?.id ?? selectedAssetID else { return }
-        updateFlag(flag, assetID: selectedAssetID, advanceToNext: advanceToNext)
-    }
-    func updateFlag(_ flag: AssetFlag, assetID: String, advanceToNext: Bool = false) {
-        guard !isShowingPhotoShare, !isDeleting, !isSavingFlag, sourceMergePlan == nil, deletionPlan == nil, qualityReanalysisPlan == nil, let store else { return }
-        let wasPreview = previewAsset != nil
-        let query = currentQuery()
-        var navigation = wasPreview ? previewNavigation : PreviewNavigation(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
-        isSavingFlag = true
-        Task {
-            defer { isSavingFlag = false }
-            do {
-                guard let asset = try await store.asset(id: assetID), asset.kind == .photo, !isDeleting else { return }
-                try await store.setFlag(flag, for: assetID)
-                let stillOnTarget = (previewAsset?.id ?? selectedAssetID) == assetID
-                await reloadAssets()
-                statusText = "\(asset.fileName)：\(flag.displayName)"
-                // Reload may hide the rejected photo. Keep its original position as
-                // the anchor, but never take over a later user selection or filter.
-                guard advanceToNext, stillOnTarget, currentQuery() == query,
-                      errorMessage == nil, !isDeleting,
-                      NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil,
-                      wasPreview == (previewAsset != nil) else { return }
-                if wasPreview {
-                    guard previewAsset?.id == assetID else { return }
-                } else {
-                    guard selectedAssetID == assetID ||
-                            (selectedAssetID == nil && !assets.contains(where: { $0.id == assetID })) else { return }
-                }
-                navigation.refresh(photoIDs: assets.filter { $0.kind == .photo }.map(\.id))
-                guard let nextID = navigation.neighbor(of: assetID, direction: 1),
-                      let next = assets.first(where: { $0.id == nextID }) else { return }
-                if wasPreview { selectPreview(id: nextID) }
-                else { selectAsset(next) }
-            } catch { errorMessage = "保存旗标失败：\(error.localizedDescription)" }
-        }
-    }
-
-    func updateKeywords(_ keywords: [String]) {
-        guard !isDeleting else { return }
-        guard let selectedAssetID = previewAsset?.id ?? selectedAssetID, let store else { return }
-        Task {
-            do {
-                try await store.setKeywords(keywords, for: selectedAssetID)
-                await reloadAssets()
-            } catch { errorMessage = "保存标签失败：\(error.localizedDescription)" }
-        }
-    }
-
     func resolveSuggestion(accepted: Bool, assetID: String) {
         guard !isDeleting else { return }
         guard let store else { return }
@@ -893,67 +832,53 @@ final class AppModel: ObservableObject {
     }
 
     func addSelectedAsset(to album: Album) {
-        guard let selectedAssetID, let store else { return }
-        Task {
-            do {
-                try await store.add(assetID: selectedAssetID, toAlbum: album.id)
-                statusText = "已添加到“\(album.name)”"
-            } catch { errorMessage = "添加到相册失败：\(error.localizedDescription)" }
-        }
+        applyAnnotation(.init(albumID: album.id), title: "添加到相册")
     }
 
     func exportSelectedXMP() {
-        guard colorEditor == nil, !isShowingColorPresets, !isShowingColorExport, let selectedAssetID, let xmpExporter else { return }
+        guard colorEditor == nil, !colorTargetIDs.isEmpty, let xmpExporter else { return }
+        let ids = colorTargetIDs
+        startOperation { [self] in
+            do { xmpPlan = try await xmpExporter.prepare(assetIDs: ids) }
+            catch { errorMessage = "XMP 预检失败：\(error.localizedDescription)" }
+        }
+    }
+    func confirmXMP() {
+        guard let plan = xmpPlan, let xmpExporter else { return }
+        xmpPlan = nil
         startOperation { [self] in
             do {
-                let report = try await xmpExporter.export(assetIDs: [selectedAssetID], conflictPolicy: .skip)
-                if !report.skipped.isEmpty {
-                    errorMessage = "XMP 已存在，未覆盖。可在检查器中确认替换。"
-                } else if let failure = report.failed.values.first {
-                    errorMessage = "XMP 导出失败：\(failure)"
-                } else {
-                    statusText = "XMP 已导出"
-                }
+                let report = try await xmpExporter.execute(plan)
+                statusText = report.summary
+                if !report.failed.isEmpty { errorMessage = report.summary + "\n" + report.failed.joined(separator: "\n") }
             } catch { errorMessage = "XMP 导出失败：\(error.localizedDescription)" }
         }
     }
 
-    func replaceSelectedXMP() {
-        guard colorEditor == nil, !isShowingColorPresets, !isShowingColorExport, let selectedAssetID, let xmpExporter else { return }
-        startOperation { [self] in
-            do {
-                let report = try await xmpExporter.export(assetIDs: [selectedAssetID], conflictPolicy: .replace)
-                statusText = report.written.isEmpty ? "没有写入 XMP" : "XMP 已替换"
-            } catch { errorMessage = "XMP 导出失败：\(error.localizedDescription)" }
-        }
-    }
-
-    func thumbnail(for item: AssetListItem, pixelSize: Int) async -> NSImage? {
+    func thumbnail(for item: AssetListItem, pixelSize: Int, scale: CGFloat = 2) async throws -> NSImage {
         guard let store, let thumbnailProvider,
-              let asset = try? await store.asset(id: item.id),
-              let source = try? await store.source(id: asset.sourceID) else { return nil }
-        do {
-            if item.colorRevision > 0, let colorThumbnails {
-                let snapshot = try await store.colorSnapshot(assetID: item.id)
-                return NSImage(data: try await colorThumbnails.thumbnail(snapshot, pixelSize: pixelSize, scale: NSScreen.main?.backingScaleFactor ?? 2))
-            }
-            let root = try BookmarkStore.resolve(source).url
-            let didAccess = root.startAccessingSecurityScopedResource()
-            defer { if didAccess { root.stopAccessingSecurityScopedResource() } }
-            let data = try await thumbnailProvider.thumbnailData(
-                for: asset.id,
-                url: root.appendingPathComponent(asset.relativePath),
-                pixelSize: pixelSize,
-                scale: NSScreen.main?.backingScaleFactor ?? 2
-            )
-            return NSImage(data: data)
-        } catch {
-            return nil
+              let asset = try await store.asset(id: item.id),
+              let source = try await store.source(id: asset.sourceID) else { throw ColorEditError("照片或来源已不存在，请重新扫描") }
+        guard source.isOnline else { throw ColorEditError("来源离线，请连接磁盘后重试") }
+        let data: Data
+        if item.colorRevision > 0, let colorThumbnails {
+            let snapshot = try await store.colorSnapshot(assetID: item.id)
+            data = try await colorThumbnails.thumbnail(snapshot, pixelSize: pixelSize, scale: scale)
+        } else {
+            let root = try BookmarkStore.resolve(source)
+            guard !root.isStale else { throw ColorEditError("来源授权已失效，请重新授权") }
+            let lease = PreviewAccessLease(url: root.url)
+            defer { withExtendedLifetime(lease) {} }
+            data = try await thumbnailProvider.thumbnailData(for: asset.id,
+                url: root.url.appendingPathComponent(asset.relativePath), pixelSize: pixelSize, scale: scale)
         }
+        try Task.checkCancellation()
+        guard let image = NSImage(data: data) else { throw ColorEditError("无法解码缩略图") }
+        return image
     }
 
-    func revealSelectedInFinder() {
-        guard let selectedAssetID, let store else { return }
+    func revealSelectedInFinder(assetID: String? = nil) {
+        guard let selectedAssetID = assetID ?? previewAsset?.id ?? selectedAssetID, let store else { return }
         Task {
             guard let asset = try? await store.asset(id: selectedAssetID),
                   let source = try? await store.source(id: asset.sourceID),
@@ -966,25 +891,28 @@ final class AppModel: ObservableObject {
         Task {
             do {
                 try await thumbnailProvider?.clearDiskCache()
+                thumbnailReloadID = UUID()
                 statusText = "缩略图缓存已清理，将按需重建"
             } catch { errorMessage = "清理缓存失败：\(error.localizedDescription)" }
         }
     }
 
     func startOperation(_ work: @escaping @MainActor @Sendable () async -> Void) {
-        guard !photoShareSession.blocksFileChanges, !isShowingPhotoShare else { return }
-        guard !isWorking, importPlan == nil, !isShowingImportReport, colorEditor == nil, !isPreviewTransitioning, colorBatchPlan == nil, colorExportPlan == nil, !isShowingColorPresets, !isShowingColorExport, archivePlan == nil, deletionPlan == nil, missingAssetPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
+        guard operationBlockReason(.files) == nil else { return }
+        guard xmpPlan == nil, !isWorking, importPlan == nil, !isShowingImportReport, colorEditor == nil, !isPreviewTransitioning, colorBatchPlan == nil, colorExportPlan == nil, !isShowingColorPresets, !isShowingColorExport, archivePlan == nil, deletionPlan == nil, missingAssetPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
         isWorking = true
         operationTask = Task {
+            defer {
+                isWorking = false
+                if operationResults.first != statusText { operationResults.insert(statusText, at: 0); operationResults = Array(operationResults.prefix(20)) }
+                importProgress = nil; scanProgress = nil; analysisProgress = nil
+            }
             do {
+                guard await flushKeywords() else { return }
                 try await checkDeletionRecovery()
                 try Task.checkCancellation()
                 await work()
             } catch { errorMessage = "后台操作未开始：\(error.localizedDescription)" }
-            isWorking = false
-            importProgress = nil
-            scanProgress = nil
-            analysisProgress = nil
         }
     }
 
@@ -1057,6 +985,7 @@ final class AppModel: ObservableObject {
                 for source in Dictionary(grouping: authorized.groups, by: { $0.source.id }).values.compactMap({ $0.first?.source }) {
                     try await store.upsertSource(source)
                 }
+                self.annotationUndoManager.removeAllActions()
                 let report = try await archiveCoordinator.execute(authorized, backupURL: self.backupURL())
                 self.statusText = report.summary
                 if !report.warnings.isEmpty { self.errorMessage = report.summary }
@@ -1068,8 +997,8 @@ final class AppModel: ObservableObject {
     }
 
     func resumeArchive(undo: Bool) {
-        guard !photoShareSession.blocksFileChanges, !isShowingPhotoShare else { return }
-        guard !isWorking, importPlan == nil, !isShowingImportReport, colorEditor == nil, !isPreviewTransitioning, colorBatchPlan == nil, colorExportPlan == nil, !isShowingColorPresets, !isShowingColorExport, archivePlan == nil, let archiveCoordinator else { return }
+        guard operationBlockReason(.files) == nil else { return }
+        guard xmpPlan == nil, !isWorking, importPlan == nil, !isShowingImportReport, colorEditor == nil, !isPreviewTransitioning, colorBatchPlan == nil, colorExportPlan == nil, !isShowingColorPresets, !isShowingColorExport, archivePlan == nil, let archiveCoordinator else { return }
         let alert = NSAlert()
         alert.messageText = undo ? "撤销最近一次归档？" : "继续未完成的归档？"
         alert.informativeText = "会根据日志复核文件并移动，绝不覆盖。冲突将保留并报告。"

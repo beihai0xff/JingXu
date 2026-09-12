@@ -1,6 +1,15 @@
 import AppKit
 import CoreGraphics
 
+public struct CanvasTransform: Sendable, Equatable {
+    public var fitted: Bool
+    public var physicalZoom: CGFloat
+    public var center: CGPoint
+    public init(fitted: Bool = true, physicalZoom: CGFloat = 1, center: CGPoint = CGPoint(x: 0.5, y: 0.5)) {
+        self.fitted = fitted; self.physicalZoom = physicalZoom; self.center = center
+    }
+}
+
 /// Coordinates are display points; scale is points per original image pixel.
 public enum PreviewGeometry {
     public static func fit(image: CGSize, viewport: CGSize) -> CGFloat {
@@ -51,6 +60,7 @@ public enum PreviewCanvasRenderer {
 @MainActor
 public final class PreviewCanvasView: NSView {
     public var onExit: (() -> Void)?
+    public var onTransformChange: ((CanvasTransform) -> Void)?
     public private(set) var image: CGImage?
     public private(set) var scale: CGFloat = 1
     public private(set) var pan = CGPoint.zero
@@ -66,6 +76,23 @@ public final class PreviewCanvasView: NSView {
     private var imageSize: CGSize { nativeSize }
     public var displayedImageRect: CGRect {
         PreviewGeometry.imageRect(image: imageSize, viewport: bounds.size, scale: scale, pan: pan)
+    }
+
+    public var transform: CanvasTransform {
+        CanvasTransform(fitted: fitted, physicalZoom: scale * (window?.backingScaleFactor ?? 2),
+            center: CGPoint(x: 0.5 - pan.x / max(1, imageSize.width * scale),
+                            y: 0.5 - pan.y / max(1, imageSize.height * scale)))
+    }
+    public func applyTransform(_ value: CanvasTransform) {
+        guard image != nil else { return }
+        fitted = value.fitted; actual = !value.fitted && value.physicalZoom == 1
+        if fitted { pan = .zero; updateFit() }
+        else {
+            scale = PreviewScale.bounded(value.physicalZoom / (window?.backingScaleFactor ?? 2))
+            pan = PreviewGeometry.clampedPan(CGPoint(x: (0.5 - value.center.x) * imageSize.width * scale,
+                y: (0.5 - value.center.y) * imageSize.height * scale), image: imageSize, viewport: bounds.size, scale: scale)
+        }
+        needsDisplay = true
     }
 
     public func clearImage() {
@@ -107,6 +134,7 @@ public final class PreviewCanvasView: NSView {
         guard image != nil else { return }
         if action == "fit" {
             fitted = true; actual = false; pan = .zero; updateFit(); needsDisplay = true
+            onTransformChange?(transform)
             return
         }
         let factor = backingScale ?? window?.backingScaleFactor ?? 2
@@ -114,6 +142,7 @@ public final class PreviewCanvasView: NSView {
             PreviewScale.bounded(scale * (action == "in" ? 1.5 : 1 / 1.5))
         zoom(to: target, anchor: CGPoint(x: bounds.midX, y: bounds.midY))
         actual = action == "actual"
+        onTransformChange?(transform)
     }
 
     private func zoom(to value: CGFloat, anchor: CGPoint) {
@@ -130,6 +159,7 @@ public final class PreviewCanvasView: NSView {
     public override func magnify(with event: NSEvent) {
         guard image != nil else { return }
         zoom(to: scale * max(0.1, 1 + event.magnification), anchor: convert(event.locationInWindow, from: nil))
+        onTransformChange?(transform)
     }
 
     public override func mouseDown(with event: NSEvent) {
@@ -143,6 +173,7 @@ public final class PreviewCanvasView: NSView {
         pan = PreviewGeometry.clampedPan(CGPoint(x: initialPan.x + location.x - dragAnchor.x,
             y: initialPan.y + location.y - dragAnchor.y), image: imageSize, viewport: bounds.size, scale: scale)
         needsDisplay = true
+        onTransformChange?(transform)
     }
 
     public override func scrollWheel(with event: NSEvent) {
@@ -150,6 +181,7 @@ public final class PreviewCanvasView: NSView {
         pan = PreviewGeometry.clampedPan(CGPoint(x: pan.x + event.scrollingDeltaX * multiplier,
             y: pan.y - event.scrollingDeltaY * multiplier), image: imageSize, viewport: bounds.size, scale: scale)
         needsDisplay = true
+        onTransformChange?(transform)
     }
 
     public override func keyDown(with event: NSEvent) {

@@ -39,21 +39,10 @@ private struct FilmstripCell: View {
     @EnvironmentObject private var model: AppModel
     let item: AssetListItem
     let selected: Bool
-    @State private var thumbnail: NSImage?
-    @State private var loading = true
 
     var body: some View {
-        ZStack(alignment: .center) {
-            Color.black
-            if let thumbnail {
-                FittedThumbnail(image: thumbnail)
-            } else if loading {
-                ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                Image(systemName: "photo.badge.exclamationmark")
-                    .foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }.frame(width: 72, height: 48).clipped()
+        PhotoThumbnail(item: item, size: 72, compact: true)
+            .frame(width: 72, height: 48).clipped()
         .overlay(alignment: .topTrailing) {
             if item.flag == .rejected {
                 Image(systemName: "xmark")
@@ -76,13 +65,5 @@ private struct FilmstripCell: View {
         .background(selected ? Color.accentColor.opacity(0.22) : Color.clear)
         .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: selected ? 2 : 1))
         .contentShape(Rectangle())
-        .task(id: "\(item.id)-\(item.fileVersion)-\(item.colorRevision)") {
-            thumbnail = nil
-            loading = true
-            let result = await model.thumbnail(for: item, pixelSize: 192)
-            guard !Task.isCancelled else { return }
-            thumbnail = result; loading = false
-        }
-        .onDisappear { thumbnail = nil }
     }
 }

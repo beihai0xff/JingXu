@@ -51,7 +51,7 @@ public actor DeletionCoordinator {
         self.store = store; self.journalURL = journalURL; self.trash = trash
     }
 
-    public func prepare(_ query: AssetQuery) async throws -> DeletionPlan {
+    public func prepare(_ query: BrowseQuery) async throws -> DeletionPlan {
         var plan = DeletionPlan(files: try await store.deletionCandidates(query))
         for sourceID in Set(plan.files.map(\.sourceID)) {
             if let source = try await store.source(id: sourceID) {

@@ -16,14 +16,19 @@ public struct PhotoSelectionState: Equatable, Sendable {
         selectedIDs = isPhoto ? [id] : []; focusID = id; anchorID = isPhoto ? id : nil
     }
     public mutating func selectAll(_ photoIDs: [String]) {
-        selectedIDs = Set(photoIDs)
+        selectedIDs.formUnion(photoIDs)
         if !selectedIDs.contains(focusID ?? "") { focusID = photoIDs.first }
         anchorID = focusID
     }
     public mutating func reconcile(visibleIDs: [String], photoIDs: [String], resetAnchor: Bool = false) {
-        selectedIDs.formIntersection(photoIDs)
+        selectedIDs.subtract(Set(visibleIDs).subtracting(photoIDs))
         if let focusID, !visibleIDs.contains(focusID) { self.focusID = nil }
         if resetAnchor || !photoIDs.contains(anchorID ?? "") { anchorID = nil }
+    }
+
+    public mutating func retain(validIDs: Set<String>) {
+        selectedIDs.formIntersection(validIDs)
+        if let anchorID, !validIDs.contains(anchorID) { self.anchorID = nil }
     }
 
     /// Returns true only when this event should open the single-photo viewer.
@@ -47,7 +52,10 @@ public struct PhotoSelectionState: Equatable, Sendable {
         } else if command || checkboxMode {
             if !selectedIDs.insert(id).inserted { selectedIDs.remove(id) }
             anchorID = id
-        } else { selectedIDs = [id]; anchorID = id }
+        } else {
+            if !selectedIDs.contains(id) || selectedIDs.count <= 1 { selectedIDs = [id] }
+            anchorID = id
+        }
         focusID = id
         return false
     }

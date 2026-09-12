@@ -54,7 +54,7 @@ extension AppModel {
         try await analysisCoordinator.analyzePending(sourceID: sourceID) { [weak self] value in
             await MainActor.run { self?.analysisProgress = value }
             if await refresh.shouldRefresh(completed: value.completed, total: value.total) {
-                await self?.reloadAssets()
+                await self?.refreshAnalysisResults()
             }
             await MainActor.run { self?.statusText = "正在分析 \(value.completed)/\(value.total)：\(value.currentFile)" }
         }

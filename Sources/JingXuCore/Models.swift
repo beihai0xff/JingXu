@@ -369,6 +369,7 @@ public struct AssetListItem: Identifiable, Sendable, Equatable, FetchableRecord,
     public var colorRevision: Int = 0
     public var isColorEdited: Bool = false
     public var fileVersion: String = ""
+    public var browseDate: Date
     public var sourceID: String
     public var relativePath: String
     public var fileName: String
@@ -449,7 +450,7 @@ public enum SmartCollection: String, CaseIterable, Sendable, Identifiable, Hasha
     }
 }
 
-public struct AssetQuery: Sendable, Equatable {
+public struct BrowseQuery: Sendable, Equatable {
     public static func == (lhs: Self, rhs: Self) -> Bool {
         let sameDirectory: Bool
         switch (lhs.relativeDirectory, rhs.relativeDirectory) {
@@ -460,7 +461,7 @@ public struct AssetQuery: Sendable, Equatable {
         return sameDirectory && lhs.sourceID == rhs.sourceID && lhs.collection == rhs.collection &&
             lhs.albumID == rhs.albumID && lhs.includeSubdirectories == rhs.includeSubdirectories &&
             lhs.searchText == rhs.searchText && lhs.minimumRating == rhs.minimumRating &&
-            lhs.flag == rhs.flag && lhs.limit == rhs.limit && lhs.offset == rhs.offset
+            lhs.flag == rhs.flag && lhs.similarGroupID == rhs.similarGroupID
     }
 
     public var collection: SmartCollection
@@ -471,8 +472,7 @@ public struct AssetQuery: Sendable, Equatable {
     public var searchText: String
     public var minimumRating: Int
     public var flag: AssetFlag?
-    public var limit: Int
-    public var offset: Int
+    public var similarGroupID: String?
 
     public init(
         collection: SmartCollection = .all,
@@ -483,8 +483,7 @@ public struct AssetQuery: Sendable, Equatable {
         searchText: String = "",
         minimumRating: Int = 0,
         flag: AssetFlag? = nil,
-        limit: Int = 500,
-        offset: Int = 0
+        similarGroupID: String? = nil
     ) {
         self.collection = collection
         self.sourceID = sourceID
@@ -494,7 +493,6 @@ public struct AssetQuery: Sendable, Equatable {
         self.searchText = searchText
         self.minimumRating = min(max(minimumRating, 0), 5)
         self.flag = flag
-        self.limit = max(1, limit)
-        self.offset = max(0, offset)
+        self.similarGroupID = similarGroupID
     }
 }

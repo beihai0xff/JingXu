@@ -67,7 +67,7 @@ enum BatchMoveChecks {
         let folderID = CatalogFolderID(sourceID: source.id, relativeDirectory: "selected")
         let movedTree = try await store.folderTree()
         try ArchiveChecks.check(movedTree.first { $0.id.sourceID == source.id }?.node(folderID)?.directCount == 2)
-        try ArchiveChecks.check(try await store.assets(AssetQuery(sourceID: source.id, relativeDirectory: "selected")).count == 2)
+        try ArchiveChecks.check(try await store.assets(BrowseQuery(sourceID: source.id, relativeDirectory: "selected")).count == 2)
         let withinUndo = try await coordinator.resume(undo: true)
         try ArchiveChecks.check(withinUndo.completed == 2 && withinUndo.warnings.isEmpty)
         let undoneTree = try await store.folderTree()

@@ -134,14 +134,14 @@ enum QualityV2Checks {
         try check(try await store.analysisCandidates(legacyOnly: true) == [first.id], "全部旧结果范围包含了尚未分析资源")
         let pending = try await store.assetIDsNeedingAnalysis(sourceID: source.id, algorithmVersion: 2)
         try check(!pending.contains(first.id) && pending.count == 4, "普通扫描偷偷升级了旧结果")
-        try check(try await store.assets(AssetQuery(collection: .review)).isEmpty, "旧版进入黄色建议")
+        try check(try await store.assets(BrowseQuery(collection: .review)).isEmpty, "旧版进入黄色建议")
         let analyzer = DefaultQualityAnalyzer(featureExtractor: { _ in throw CocoaError(.featureUnsupported) })
         let computed = try await analyzer.analyze(assetID: first.id, at: firstURL)
         try check(computed.diagnostic!.scales[0].width == 40 && computed.diagnostic!.scales[0].height == 80, "质量预览未正确应用 EXIF 方向")
         try check(computed.diagnostic?.featurePrintFailure != nil && computed.diagnostic?.exposure.validPixels == 3200, "Vision 失败丢失质量统计")
         var warning = computed; warning.assessmentStatus = .suspectedBlur; warning.issues = [.blurry]
         try await store.saveAnalysis(warning) // Explicit fixture; production defaults cannot produce this until calibrated.
-        try check(try await store.assets(AssetQuery(collection: .review)).count == 1, "新版待审核筛选失败")
+        try check(try await store.assets(BrowseQuery(collection: .review)).count == 1, "新版待审核筛选失败")
         let album = Album(name: "keep")
         try await store.saveAlbum(album); try await store.add(assetID: first.id, toAlbum: album.id)
         try await store.seedAnnotation(UserAnnotation(assetID: first.id, rating: 5, flag: .rejected, keywords: ["keep"]))
@@ -149,15 +149,15 @@ enum QualityV2Checks {
         _ = try await store.saveQualityReview(assetID: first.id, state: .ignored)
         try await store.saveComputedAnalysis(computed, expectedAsset: first, fileURL: firstURL)
         try check(try await store.analysis(for: first.id)?.suggestionState == .ignored, "重算覆盖了最新人工审核")
-        try check(try await store.assets(AssetQuery(collection: .review)).isEmpty, "忽略后警告未消失")
+        try check(try await store.assets(BrowseQuery(collection: .review)).isEmpty, "忽略后警告未消失")
         async let reviewSafe: Void = store.saveComputedAnalysis(computed, expectedAsset: first, fileURL: firstURL)
         async let annotationSafe: Void = store.seedAnnotation(UserAnnotation(assetID: first.id, rating: 4, flag: .rejected, keywords: ["concurrent"]))
         _ = try await (reviewSafe, annotationSafe)
         let annotation = try await store.annotation(for: first.id)
         try check(annotation.rating == 4 && annotation.flag == .rejected && annotation.keywords == ["concurrent"], "计算修改了并发标注")
-        try check(try await store.assets(AssetQuery(albumID: album.id)).count == 1, "重算改变相册成员")
+        try check(try await store.assets(BrowseQuery(albumID: album.id)).count == 1, "重算改变相册成员")
         try await store.saveSimilarGroup("burst", assetIDs: [first.id])
-        try check(try await store.assets(AssetQuery(collection: .review)).isEmpty, "连拍进入质量问题计数")
+        try check(try await store.assets(BrowseQuery(collection: .review)).isEmpty, "连拍进入质量问题计数")
         try Data("replacement".utf8).write(to: firstURL, options: .atomic)
         do { try await store.saveComputedAnalysis(computed, expectedAsset: first, fileURL: firstURL); throw Failure(description: "替换文件仍提交旧结果") }
         catch is QualityAnalysisError {}
@@ -205,7 +205,7 @@ enum QualityV2Checks {
             many.append(MediaAsset(sourceID: source.id, relativePath: "scope-\(i).jpg", fileIdentifier: nil, fileName: "scope-\(i).jpg", uniformType: nil, kind: .photo, fileSize: 1, modifiedAt: Date()))
         }
         _ = try await store.upsertAssets(many)
-        try check(try await store.analysisCandidates(AssetQuery(sourceID: source.id, searchText: "scope-", limit: 1)).count == 2005, "完整重算范围仍被网格截断")
-        try check(try await store.analysisCandidates(AssetQuery(albumID: album.id, flag: .rejected)).count == 1, "相册和旗标筛选隔离失败")
+        try check(try await store.analysisCandidates(BrowseQuery(sourceID: source.id, searchText: "scope-")).count == 2005, "完整重算范围仍被网格截断")
+        try check(try await store.analysisCandidates(BrowseQuery(albumID: album.id, flag: .rejected)).count == 1, "相册和旗标筛选隔离失败")
     }
 }

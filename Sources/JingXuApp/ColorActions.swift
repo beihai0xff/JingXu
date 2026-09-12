@@ -9,10 +9,10 @@ extension AppModel {
         return selectedPhotoIDs
     }
     var canStartColorAction: Bool {
-        canInteractWithLibrary && !isWorking && !photoShareSession.blocksFileChanges
+        canInteractWithLibrary && !isWorking && !isLoadingAssets && !isSavingAnnotation && !isPreparingSelection && !photoShareSession.blocksFileChanges
     }
     var canInteractWithLibrary: Bool {
-        !isShowingPhotoShare && (!isWorking || isAnalyzingNewAssets) && importPlan == nil && !isShowingImportReport && !isPreviewTransitioning && colorBatchPlan == nil && colorExportPlan == nil &&
+        xmpPlan == nil && !isShowingKeywords && !isShowingPhotoShare && (!isWorking || isAnalyzingNewAssets) && importPlan == nil && !isShowingImportReport && !isPreviewTransitioning && colorBatchPlan == nil && colorExportPlan == nil &&
         archivePlan == nil && deletionPlan == nil && missingAssetPlan == nil && sourceMergePlan == nil && qualityReanalysisPlan == nil &&
         !isShowingImport && !isShowingAlbumCreator && !isShowingColorExport
     }
@@ -28,20 +28,23 @@ extension AppModel {
     }
     /// Navigation remains synchronous for browsing, but editing must drain pending writes first.
     func transitionPreview(_ action: @escaping @MainActor () -> Void) {
-        guard !isPreviewTransitioning, !automationOwnsOperation else { return }
-        guard let editor = colorEditor else { action(); return }
+        guard !isPreviewTransitioning, (!isSavingAnnotation || keywordSaveTask != nil), !automationOwnsOperation else { return }
+        if colorEditor == nil && keywordDraft == keywordSaved && keywordSaveTask == nil { action(); return }
         isPreviewTransitioning = true
         Task {
-            guard await editor.flush() else { isPreviewTransitioning = false; return }
-            editor.dispose(); colorEditor = nil; colorEditorObservation = nil
-            action()
+            guard await flushKeywords() else { isPreviewTransitioning = false; return }
+            if let editor = colorEditor {
+                guard await editor.flush() else { isPreviewTransitioning = false; return }
+                editor.dispose(); colorEditor = nil; colorEditorObservation = nil
+            }
             isPreviewTransitioning = false
+            action()
         }
     }
     func finishColorEditing() { transitionPreview {} }
     func makeColorSession(_ snapshot: ColorEditSnapshot) throws -> ColorEditSession {
         guard let store else { throw ColorEditError("图库未打开") }
-        return try ColorEditSession(store: store, snapshot: snapshot) { [weak self] in await self?.reloadAssets() }
+        return try ColorEditSession(store: store, snapshot: snapshot) { [weak self] in await self?.refreshChangedAssets(ids: [snapshot.asset.id]) }
     }
     func attachColorSession(_ session: ColorEditSession) {
         colorEditor = session
