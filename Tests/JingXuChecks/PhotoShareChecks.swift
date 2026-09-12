@@ -52,7 +52,9 @@ enum PhotoShareChecks {
         s.click("a", photoIDs: photos, shift: true)
         try check(s.orderedIDs(in: photos) == ["a", "b", "c"], "锚点失效未使用有效焦点")
         s.reconcile(visibleIDs: ["b", "video"], photoIDs: ["b"])
-        try check(s.selectedIDs == ["b"] && s.focusID == nil && s.anchorID == nil, "筛选后保留了失效选择或锚点")
+        try check(s.selectedIDs == ["a", "b", "c"] && s.focusID == nil, "翻页丢失了显式选择")
+        s.retain(validIDs: ["b"])
+        try check(s.selectedIDs == ["b"] && s.anchorID == nil, "已失效照片仍在选择中")
         s.click("b", photoIDs: photos, checkboxMode: true)
         let afterFirst = s
         try check(!s.click("b", photoIDs: photos, checkboxMode: true, count: 2) && s == afterFirst, "勾选模式双击重复切换")
@@ -150,7 +152,7 @@ enum PhotoShareChecks {
         var annotation = try await store.annotation(for: ids[0]); annotation.rating = 4; annotation.keywords = ["私人测试"]
         try await store.seedAnnotation(annotation)
         annotation = try await store.annotation(for: ids[0])
-        let beforeCount = try await store.matchingAssetCount(AssetQuery())
+        let beforeCount = try await store.matchingAssetCount(BrowseQuery())
         let full = try await coordinator.prepare(coordinator.plan(assetIDs: ids, mode: .jpeg))
         try check(full.files.count == 2 && full.issues.isEmpty, "JPEG/HEIC 成片准备失败：\(full.issues)")
         try check(full.files.map { $0.url.lastPathComponent } == ["same-调色.jpg", "same-调色-2.jpg"], "同名成片覆盖或未统一编号")
@@ -177,7 +179,7 @@ enum PhotoShareChecks {
         try check(try originals.map { try FileHasher.sha256(of: $0) } == hashes, "分享修改原片")
         try check(try await store.annotation(for: ids[0]) == annotation, "分享改变标注")
         try check(try await store.colorSnapshot(assetID: ids[0]).record == saved.record, "分享改变调色记录")
-        try check(try await store.matchingAssetCount(AssetQuery()) == beforeCount + 1, "分享缓存被加入图库")
+        try check(try await store.matchingAssetCount(BrowseQuery()) == beforeCount + 1, "分享缓存被加入图库")
         for ready in [full, small, tinyReady] {
             try await coordinator.finish(id: ready.id, cacheDirectory: ready.cacheDirectory, handedToSystem: false)
             try check(!FileManager.default.fileExists(atPath: ready.cacheDirectory!.path), "未交付成片没有立即清理")

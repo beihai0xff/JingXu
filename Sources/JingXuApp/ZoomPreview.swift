@@ -7,6 +7,7 @@ struct ZoomPreview: View {
     let item: AssetListItem
     @Binding var showsFilmstrip: Bool
     @Binding var showsInspector: Bool
+    @Environment(\.displayScale) private var displayScale
     @State private var image: CGImage?
     @State private var imageAssetID: String?
     @State private var nativeSize = CGSize.zero
@@ -28,12 +29,15 @@ struct ZoomPreview: View {
                 Button { model.navigatePreview(-1) } label: {
                     Label("上一张", systemImage: "chevron.left").labelStyle(.iconOnly)
                 }.disabled(!model.canNavigatePreview(-1)).help("上一张（←）")
-                Text("\((model.previewFilmstrip.firstIndex { $0.id == item.id } ?? 0) + 1) / \(model.previewFilmstrip.count)")
+                Text(item.fileName).lineLimit(1)
                     .monospacedDigit().font(.caption).foregroundStyle(.secondary)
                     .help(item.fileName)
                 Button { model.navigatePreview(1) } label: {
                     Label("下一张", systemImage: "chevron.right").labelStyle(.iconOnly)
                 }.disabled(!model.canNavigatePreview(1)).help("下一张（→）")
+                Menu("\(item.rating) 星") {
+                    ForEach(0...5, id: \.self) { value in Button(value == 0 ? "无评分" : "\(value) 星") { model.updateRating(value) } }
+                }.help("0–5 评分；Shift 加数字评分并下一张")
                 if item.flag == .rejected {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.red).accessibilityLabel("已淘汰").help("已淘汰（U 取消）")
@@ -108,7 +112,7 @@ struct ZoomPreview: View {
             isLoading = true; loadError = nil
             if imageAssetID != item.id {
                 image = nil; originalPreview = nil; nativeSize = .zero; imageAssetID = item.id
-                let placeholder = await model.thumbnail(for: item, pixelSize: 1024)
+                let placeholder = try? await model.thumbnail(for: item, pixelSize: 1024, scale: displayScale)
                 guard !Task.isCancelled, loadGeneration == generation else { return }
                 image = placeholder?.cgImage(forProposedRect: nil, context: nil, hints: nil)
                 nativeSize = image.map { CGSize(width: $0.width, height: $0.height) } ?? .zero

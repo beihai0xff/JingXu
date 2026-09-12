@@ -25,7 +25,7 @@ struct QualityInspector: View {
                             }
                             Text("指标未校准为准确率；不判断主体是否合焦。")
                         }
-                        Text("算法 v\(item.algorithmVersion ?? 2) · \(summary.parameterVersion)")
+                        DisclosureGroup("算法信息") { Text("算法 v\(item.algorithmVersion ?? 2) · \(summary.parameterVersion)") }
                         if let reason = summary.featurePrintFailure { Text(reason) }
                     }
                     if item.hasPendingQualityWarning {
@@ -57,8 +57,13 @@ struct QualityInspector: View {
             }
             if item.similarGroupID != nil || item.issues.contains(.similarBurst) {
                 GroupBox("相似连拍") {
+                    VStack(alignment: .leading, spacing: 8) {
                     Label("属于相似连拍，仅作整理参考，不计入质量问题。", systemImage: "square.stack.3d.up")
                         .font(.caption).foregroundStyle(.secondary)
+                    if let id = item.similarGroupID {
+                        Button("查看这一组") { model.compareSimilarGroup(id) }.disabled(model.operationBlockReason(.browse) != nil)
+                    }
+                    }
                 }
             }
         }

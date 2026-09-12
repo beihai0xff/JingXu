@@ -92,6 +92,16 @@ enum PreviewCanvasChecks {
         canvas.perform("fit")
         canvas.setFrameSize(CGSize(width: 400, height: 300))
         try check(abs(canvas.displayedImageRect.height - 300) < 0.001, "调整窗口未重新适应")
+        let other = PreviewCanvasView(frame: CGRect(x: 0, y: 0, width: 600, height: 400))
+        other.setImage(image, assetID: "other", nativeSize: CGSize(width: 6000, height: 4000))
+        let pose = CanvasTransform(fitted: false, physicalZoom: 2, center: CGPoint(x: 0.6, y: 0.4))
+        canvas.applyTransform(pose); other.applyTransform(pose)
+        try check(abs(canvas.transform.center.x - other.transform.center.x) < 0.001 &&
+                  abs(canvas.transform.center.y - other.transform.center.y) < 0.001, "不同比例照片的联动中心不一致")
+        try check(canvas.transform.physicalZoom == other.transform.physicalZoom, "双图物理像素缩放不一致")
+        other.applyTransform(CanvasTransform())
+        try check(other.fitted && other.pan == .zero, "比较视图恢复适应失败")
+        other.clearImage()
         canvas.clearImage()
         try check(canvas.image == nil, "关闭预览未释放图片引用")
         let empty = try SRGBPixels(capture(canvas)).rgba

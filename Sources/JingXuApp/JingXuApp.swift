@@ -29,10 +29,14 @@ struct JingXuApp: App {
                 .onAppear { applicationDelegate.model = model }
         }
         .commands {
+            CommandGroup(replacing: .undoRedo) {
+                Button("撤销") { model.performUndo() }.keyboardShortcut("z", modifiers: .command)
+                Button("重做") { model.performUndo(redo: true) }.keyboardShortcut("z", modifiers: [.command, .shift])
+            }
             CommandGroup(after: .importExport) {
                 Button("添加照片文件夹…") { model.chooseAndAddFolder() }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
-                    .disabled(model.fileOperationsBlockedByShare)
+                    .disabled(model.operationBlockReason(.files) != nil)
                 Button("从相机卡导入…") { model.isShowingImport = true }.disabled(model.colorEditor != nil || !model.canStartColorAction)
                     .keyboardShortcut("i", modifiers: [.command, .shift])
                 Divider()
@@ -43,27 +47,25 @@ struct JingXuApp: App {
                 Button("复制调色参数") { model.copyColorAdjustments() }.keyboardShortcut("c", modifiers: [.command, .option]).disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
                 Button("预设与调色…") { model.showColorPresets() }.disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
                 Button("导出成片…") { model.showColorExport() }.keyboardShortcut("e", modifiers: [.command, .shift]).disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
-                Button("撤销调色") { model.colorEditor?.undo() }.keyboardShortcut("z", modifiers: [.command, .option]).disabled(model.colorEditor?.history.canUndo != true || model.isPreviewTransitioning)
-                Button("重做调色") { model.colorEditor?.redo() }.keyboardShortcut("z", modifiers: [.command, .option, .shift]).disabled(model.colorEditor?.history.canRedo != true || model.isPreviewTransitioning)
                 Divider()
-                Button("导出所选 XMP") { model.exportSelectedXMP() }
-                    .disabled(model.selectedAssetID == nil)
+                Button("导出新 XMP…") { model.exportSelectedXMP() }
+                    .disabled(model.colorTargetIDs.isEmpty || model.operationBlockReason(.files) != nil)
             }
             CommandGroup(after: .sidebar) {
-                Button("淘汰并下一张（Delete）") { model.flagFromMenu(.rejected) }
-                    .disabled(model.isDeleting || model.isSavingFlag)
+                Button(model.annotationTargetIDs.count > 1 ? "淘汰所选照片（Delete）" : "淘汰并下一张（Delete）") { model.flagFromMenu(.rejected) }
+                    .disabled(model.annotationTargetIDs.isEmpty || model.operationBlockReason(.annotation) != nil || model.colorEditor != nil)
                 Button("取消淘汰标记（U）") { model.flagFromMenu(.none) }
-                    .disabled(model.isDeleting || model.isSavingFlag)
+                    .disabled(model.annotationTargetIDs.isEmpty || model.operationBlockReason(.annotation) != nil || model.colorEditor != nil)
                 Divider()
                 Button("重新分析当前范围…") { model.prepareQualityReanalysis() }.disabled(model.isWorking || model.fileOperationsBlockedByShare)
                 Button("重新分析全部旧结果…") { model.prepareQualityReanalysis(legacyOnly: true) }.disabled(model.isWorking || model.fileOperationsBlockedByShare)
                 Button("暂停质量重算") { model.pauseQualityReanalysis() }.disabled(!model.isReanalyzing)
                 Button("继续质量重算") { model.resumeQualityReanalysis() }.disabled(model.isWorking || model.resumableQualityJob == nil || model.fileOperationsBlockedByShare)
                 Divider()
-                Button("整理重复来源…") { model.prepareSourceMerge() }.disabled(model.isWorking || model.fileOperationsBlockedByShare)
+                Button("整理重复来源…") { model.prepareSourceMerge() }.disabled(model.operationBlockReason(.files) != nil)
                 Button("重新扫描整个来源…") { model.rescanSelectedSource() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
-                    .disabled(model.fileOperationsBlockedByShare)
+                    .disabled(model.selectedFolderID == nil || model.operationBlockReason(.files) != nil)
             }
         }
 

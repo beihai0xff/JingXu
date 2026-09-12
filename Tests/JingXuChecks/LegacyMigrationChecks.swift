@@ -23,7 +23,7 @@ enum LegacyMigrationChecks {
         let coordinator = CatalogUpgradeCoordinator(databaseURL: url)
         let store = try await coordinator.open()
         try ColorChecks.check(try snapshot(url) == before, "迁移改变了原始记录")
-        _ = try await store.assets(AssetQuery())
+        _ = try await store.assets(BrowseQuery())
         let backups = try FileManager.default.contentsOfDirectory(at: CatalogUpgradeCoordinator.backupDirectory(for: url), includingPropertiesForKeys: nil)
         try ColorChecks.check(!backups.isEmpty, "缺少迁移备份")
         var config = Configuration(); config.readonly = true

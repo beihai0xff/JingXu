@@ -3,20 +3,23 @@ import JingXuCore
 
 extension AppModel {
     var canShowPhotoShare: Bool {
-        canStartColorAction && !isStarting && !isSavingFlag && !isShowingColorPresets &&
+        canStartColorAction && !isStarting && !isSavingAnnotation && !isShowingColorPresets &&
         !automationOwnsOperation && errorMessage == nil && !photoShareSession.isActive && !colorTargetIDs.isEmpty
     }
     var fileOperationsBlockedByShare: Bool { isShowingPhotoShare || photoShareSession.blocksFileChanges }
 
     func showPhotoShare() {
         guard canShowPhotoShare, NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil else { return }
-        if let previewAsset { shareDraft = [previewAsset] }
-        else {
-            let ids = Set(selectedPhotoIDs)
-            shareDraft = assets.filter { ids.contains($0.id) && $0.kind == .photo }
+        isPreparingSelection = true
+        Task {
+            defer { isPreparingSelection = false }
+            do {
+                guard await flushKeywords() else { return }
+                shareDraft = try await resolveColorTargets()
+                guard !shareDraft.isEmpty else { return }
+                sharePreparationProgress = ""; isShowingPhotoShare = true
+            } catch { errorMessage = "读取分享范围失败：\(error.localizedDescription)" }
         }
-        guard !shareDraft.isEmpty else { return }
-        sharePreparationProgress = ""; isShowingPhotoShare = true
     }
 
     func preparePhotoShare(mode: PhotoShareMode, maximumDimension: Int?) {

@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 public actor ColorThumbnailProvider {
     private let cache: ThumbnailCache
+    private let requests = ThumbnailRequests()
     public init(cache: ThumbnailCache) { self.cache = cache }
     public func thumbnail(_ snapshot: ColorEditSnapshot, pixelSize: Int, scale: CGFloat = 1) async throws -> Data {
         let access = try ColorSourceAccess(snapshot)
@@ -12,6 +13,7 @@ public actor ColorThumbnailProvider {
         let key = ThumbnailCache.Key(assetID: snapshot.asset.id, kind: "color", revision: snapshot.revision, fingerprint: access.fingerprint, pixelSize: size)
         let (ticket, cached) = await cache.lookup(key)
         if let cached { try access.revalidate(); return cached }
+        return try await requests.data(key: "\(snapshot.asset.id)-\(snapshot.revision)-\(access.fingerprint.identifier ?? "")-\(access.fingerprint.size)-\(access.fingerprint.modifiedAt.timeIntervalSince1970)-\(size)") { [cache] in
         let result = try await ColorImageRenderer.shared.render(snapshot, adjustments: snapshot.adjustments, maximumDimension: size)
         try Task.checkCancellation()
         let data = NSMutableData()
@@ -21,5 +23,6 @@ public actor ColorThumbnailProvider {
         try access.revalidate()
         await cache.store(data as Data, for: key, ticket: ticket)
         return data as Data
+        }
     }
 }

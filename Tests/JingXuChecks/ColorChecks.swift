@@ -223,7 +223,7 @@ enum ColorChecks {
         let aligned = try await store.prepareSourceMerge()
         let combined = try await store.mergeSources(aligned, backupURL: root.appendingPathComponent("merge-equal.sqlite"))
         try check(combined.mergedGroups == 1, "相同调色未允许来源合并")
-        let mergedAsset = try await store.assets(AssetQuery()).first { $0.fileName == first.asset.fileName }!
+        let mergedAsset = try await store.assets(BrowseQuery()).first { $0.fileName == first.asset.fileName }!
         let mergedSnapshot = try await store.colorSnapshot(assetID: mergedAsset.id)
         try check(try mergedSnapshot.adjustments == a, "合并相同调整丢失参数")
         let path = pictures.appendingPathComponent(first.asset.fileName)

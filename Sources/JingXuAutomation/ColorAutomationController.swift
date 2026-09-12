@@ -20,7 +20,7 @@ public struct AutomationSelection: Sendable {
 }
 
 @MainActor public protocol ColorAutomationHost: AnyObject {
-    var automationSelection: AutomationSelection { get }
+    var automationSelection: AutomationSelection { get async throws }
     var automationEditor: ColorEditSession? { get }
     var automationBusy: Bool { get }
     func automationBeginOperation() async throws
@@ -98,8 +98,8 @@ public struct AutomationSelection: Sendable {
         guard enabled, let host else { throw ColorEditError("镜序 AI 连接已关闭") }
         return host
     }
-    private func scope(_ arguments: [String: Value]) throws -> AutomationSelection {
-        let selection = try requireHost().automationSelection
+    private func scope(_ arguments: [String: Value]) async throws -> AutomationSelection {
+        let selection = try await requireHost().automationSelection
         guard selection.token == (try arguments.requiredString("selectionToken")), !selection.photos.isEmpty else {
             throw ColorEditError("选择已变化或为空，请重新读取 get_context")
         }
@@ -132,15 +132,15 @@ public struct AutomationSelection: Sendable {
         return SHA256.hash(data: try encoder.encode(value)).map { String(format: "%02x", $0) }.joined()
     }
     private func current(_ args: [String: Value]) async throws -> ColorEditSnapshot {
-        let selected = try scope(args), id = try args.requiredString("assetID")
+        let selected = try await scope(args), id = try args.requiredString("assetID")
         guard selected.currentID == id, selected.photos.contains(where: { $0.id == id }) else { throw ColorEditError("只能调整当前照片；批量请选择 prepare_batch") }
         let snapshot = try await store.colorSnapshot(assetID: id)
-        _ = try scope(args)
+        _ = try await scope(args)
         guard try version(snapshot) == args.requiredString("editVersion") else { throw ColorEditError("照片、来源或调整已变化，请重新读取 get_context") }
         return snapshot
     }
     private func context() async throws -> CallTool.Result {
-        let host = try requireHost(), selected = host.automationSelection
+        let host = try requireHost(), selected = try await host.automationSelection
         var photos: [Value] = []
         for photo in selected.photos {
             let snapshot = try await store.colorSnapshot(assetID: photo.id)
@@ -163,7 +163,7 @@ public struct AutomationSelection: Sendable {
                 "canUndo": .bool(editor?.history.canUndo ?? false), "canRedo": .bool(editor?.history.canRedo ?? false),
                 "saveError": editor?.saveError.map(Value.string) ?? .null]
         }
-        guard host.automationSelection.token == selected.token else { throw ColorEditError("选择已变化，请重读上下文") }
+        guard try await host.automationSelection.token == selected.token else { throw ColorEditError("选择已变化，请重读上下文") }
         return AutomationTools.reply(value)
     }
 
@@ -175,7 +175,7 @@ public struct AutomationSelection: Sendable {
         case "get_context": return try await context()
         case "get_preview":
             guard !active, !host.automationBusy else { throw ColorEditError("镜序正在操作，请稍后读取预览") }
-            let selected = try scope(args), id = try args.requiredString("assetID")
+            let selected = try await scope(args), id = try args.requiredString("assetID")
             guard selected.photos.contains(where: { $0.id == id }) else { throw ColorEditError("照片不在当前选择范围") }
             let snapshot = try await store.colorSnapshot(assetID: id)
             guard try version(snapshot) == args.requiredString("editVersion") else { throw ColorEditError("照片、来源或调整已变化，请重读上下文") }
@@ -183,11 +183,11 @@ public struct AutomationSelection: Sendable {
             let values = try original ? ColorAdjustments() : (host.automationEditor?.snapshot.asset.id == id ? host.automationEditor!.adjustments : snapshot.adjustments)
             let result = try await ColorImageRenderer.shared.render(snapshot, adjustments: values, maximumDimension: 2048)
             try await store.validateColorSnapshot(snapshot)
-            _ = try scope(args)
+            _ = try await scope(args)
             guard try version(snapshot) == args.requiredString("editVersion"), enabled else { throw ColorEditError("渲染期间调整已变化，请重新读取预览") }
             // Encode the CGImage only: never copy EXIF, GPS, thumbnails or source metadata.
             let data = try await Self.encodePreview(result)
-            _ = try scope(args)
+            _ = try await scope(args)
             guard enabled, try version(snapshot) == args.requiredString("editVersion") else { throw ColorEditError("预览已过期") }
             let histogram = result.histogram
             return AutomationTools.reply(["assetID": .string(id), "editVersion": .string(try version(snapshot)), "original": .bool(original),
@@ -238,12 +238,12 @@ public struct AutomationSelection: Sendable {
             directories[id] = Directory(owner: client, url: url, identity: try SourceIdentity.resolve(url), lease: lease)
             return AutomationTools.reply(["directoryID": .string(id), "path": .string(url.path)])
         case "prepare_batch", "prepare_export":
-            _ = try scope(args)
+            _ = try await scope(args)
             try await acquire()
             do {
-                _ = try scope(args)
+                _ = try await scope(args)
                 try await host.automationFinishEditor()
-                let selected = try scope(args)
+                let selected = try await scope(args)
                 let ids = selected.photos.map(\.id)
                 let operation: @MainActor () async throws -> Operation
                 if name == "prepare_batch" {
@@ -269,7 +269,7 @@ public struct AutomationSelection: Sendable {
                 return try startJob(client: client) { job in
                     let operation = try await operation()
                     try Task.checkCancellation()
-                    guard self.host?.automationSelection.token == selected.token else { throw ColorEditError("准备期间选择已变化，请重新准备") }
+                    guard try await self.host?.automationSelection.token == selected.token else { throw ColorEditError("准备期间选择已变化，请重新准备") }
                     let presentation = try self.makePlan(operation, owner: client, scope: selected.token)
                     job.result = presentation
                 }
@@ -278,10 +278,10 @@ public struct AutomationSelection: Sendable {
             let id = try args.requiredString("planID")
             guard var plan = plans[id], plan.owner == client else { throw ColorEditError("清单不存在或已失效") }
             if let jobID = plan.jobID { return AutomationTools.reply(["jobID": .string(jobID)]) }
-            guard host.automationSelection.token == plan.scope else { throw ColorEditError("选择已变化，请重新生成清单") }
+            guard try await host.automationSelection.token == plan.scope else { throw ColorEditError("选择已变化，请重新生成清单") }
             try await acquire()
             do {
-                guard host.automationSelection.token == plan.scope else { throw ColorEditError("选择已变化") }
+                guard try await host.automationSelection.token == plan.scope else { throw ColorEditError("选择已变化") }
                 // A manual draft must never be discarded by a batch commit.
                 try await host.automationFinishEditor()
                 let operation = plan.operation
@@ -316,7 +316,7 @@ public struct AutomationSelection: Sendable {
         case "undo_batch":
             let id = try args.requiredString("jobID")
             guard let job = jobs[id], job.owner == client, job.status == "completed", let undo = job.undo else { throw ColorEditError("该任务没有可撤销的批量调色") }
-            return AutomationTools.reply(try makePlan(.batch(undo), owner: client, scope: host.automationSelection.token))
+            return AutomationTools.reply(try makePlan(.batch(undo), owner: client, scope: try await host.automationSelection.token))
         default: throw ColorEditError("未知工具")
         }
     }

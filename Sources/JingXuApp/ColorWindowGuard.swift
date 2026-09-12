@@ -16,7 +16,9 @@ final class ColorApplicationDelegate: NSObject, NSApplicationDelegate {
             }
             await model.automationConnection?.shutdown(preservePreference: true)
             let editor = model.colorEditor
-            let saved = await editor?.flush() ?? true
+            let keywordSaved = await model.flushKeywords()
+            let colorSaved = await editor?.flush() ?? true
+            let saved = keywordSaved && colorSaved
             if saved { editor?.dispose() }
             model.isPreviewTransitioning = false; terminating = false
             sender.reply(toApplicationShouldTerminate: saved)
@@ -56,7 +58,7 @@ struct ColorWindowGuard: NSViewRepresentable {
         }
         func windowShouldClose(_ sender: NSWindow) -> Bool {
             if closing { return original?.windowShouldClose?(sender) ?? true }
-            guard let model, model.colorEditor != nil else { return original?.windowShouldClose?(sender) ?? true }
+            guard let model, model.colorEditor != nil || model.keywordDraft != model.keywordSaved else { return original?.windowShouldClose?(sender) ?? true }
             model.transitionPreview {
                 self.closing = true
                 sender.performClose(nil)

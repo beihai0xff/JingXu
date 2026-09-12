@@ -4,7 +4,6 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var showsScanReport = false
-    @State private var keywordDraft = ""
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showsPreviewFilmstrip = true
     @State private var showsPreviewInspector = false
@@ -16,7 +15,8 @@ struct ContentView: View {
     var body: some View {
         Group {
             if let item = model.previewAsset {
-                photoPreview(item)
+                if model.comparisonReference != nil { ComparisonView().environmentObject(model) }
+                else { photoPreview(item) }
             } else {
                 NavigationSplitView(columnVisibility: $columnVisibility) {
                     sidebar
@@ -32,6 +32,23 @@ struct ContentView: View {
             }
         }
         .toolbar { toolbar }
+        .sheet(item: $model.xmpPlan) { plan in
+            VStack(alignment: .leading, spacing: 14) {
+                Text("导出新 XMP").font(.title2)
+                Text("写入 \(plan.items.count) 项，跳过 \(plan.skipped.count) 项，失败 \(plan.failed.count) 项。已有文件始终保留。")
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(plan.items) { Text($0.destination.path).font(.caption) }
+                        ForEach(Array((plan.skipped + plan.failed).enumerated()), id: \.offset) { Text($0.element).font(.caption).foregroundStyle(.orange) }
+                    }.textSelection(.enabled)
+                }
+                HStack {
+                    Spacer()
+                    Button("取消") { model.xmpPlan = nil }.keyboardShortcut(.cancelAction)
+                    Button("确认创建") { model.confirmXMP() }.disabled(plan.items.isEmpty)
+                }
+            }.padding(24).frame(width: 680, height: 450)
+        }
         .sheet(item: $model.importPlan) { plan in ImportPlanView(plan: plan).environmentObject(model) }
         .sheet(isPresented: $model.isShowingImportReport) {
             if let report = model.lastImportReport { ImportResultView(report: report).environmentObject(model) }
@@ -64,8 +81,8 @@ struct ContentView: View {
                 }
             }.padding(20).frame(width: 760, height: 520)
         }
-        .background(FlagKeyboardHandler(enabled: !showsScanReport && model.importPlan == nil && !model.isShowingImportReport && !model.isShowingPhotoShare && !model.isDeleting && model.archivePlan == nil && !model.isShowingImport && !model.isShowingAlbumCreator && model.deletionPlan == nil && model.missingAssetPlan == nil && model.sourceMergePlan == nil && model.qualityReanalysisPlan == nil && model.errorMessage == nil && (model.previewAsset != nil || model.selectedAsset?.kind == .photo), requiresCanvasFocus: model.colorEditor != nil, navigate: model.previewNavigationEnabled ? { model.navigatePreview($0) } : nil) { flag in
-            model.updateFlag(flag, advanceToNext: flag == .rejected)
+        .background(LibraryKeyboardHandler(enabled: !showsScanReport && !model.isShowingKeywords && model.operationBlockReason(.annotation) == nil, requiresCanvasFocus: model.colorEditor != nil) { code, text, shift, command in
+            model.handleLibraryKey(code: code, text: text, shift: shift, command: command)
         })
         .sheet(item: $model.missingAssetPlan) { plan in
             MissingAssetCleanupSheet(plan: plan).environmentObject(model)
@@ -133,15 +150,8 @@ struct ContentView: View {
             Text(model.errorMessage ?? "")
         }
         .modifier(ColorWorkflowPresentation())
-        .onChange(of: model.searchText) { _, _ in model.closePreview() }
-        .onChange(of: model.minimumRating) { _, _ in
-            model.closePreview()
-            Task { await model.reloadAssets() }
-        }
-        .onChange(of: model.flagFilter) { _, _ in
-            model.closePreview()
-            Task { await model.reloadAssets() }
-        }
+        .onChange(of: model.minimumRating) { _, _ in model.requestFilters() }
+        .onChange(of: model.flagFilter) { _, _ in model.requestFilters() }
     }
 
     private func photoPreview(_ item: AssetListItem) -> some View {
@@ -224,30 +234,26 @@ struct ContentView: View {
         VStack(spacing: 0) {
             FolderScopeBar()
             filterBar
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Toggle("批量选择", isOn: Binding(get: { model.isBatchSelecting }, set: { model.changeCheckboxMode($0) }))
-                        .toggleStyle(.button)
-                        .help("也可使用 ⌘ 点击增减、Shift 点击连续选择")
-                    if model.isBatchSelecting || !model.selectedPhotoIDs.isEmpty {
-                        Text("已选 \(model.selectedPhotoIDs.count) 张")
-                        Button("全选当前照片") { model.selectVisiblePhotos() }
-                        Button("清空选择") { model.clearPhotoSelection() }
-                    }
-                    Spacer()
-                }
-                HStack {
-                    Button("移动到目录…") { model.prepareBatchMove() }
-                        .disabled(model.selectedPhotoIDs.isEmpty || model.archivePending || model.fileOperationsBlockedByShare)
-                    Button("分享…", systemImage: "square.and.arrow.up") { model.showPhotoShare() }.disabled(!model.canShowPhotoShare)
-                    Button("预设与调色…") { model.showColorPresets() }.disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
-                    Button("导出成片…") { model.showColorExport() }.disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
-                    if model.colorUndoPlan != nil { Button("撤销批量调色") { model.undoColorBatch() }.disabled(!model.canStartColorAction) }
-                    Spacer()
-                }
+            if model.currentQuery().similarGroupID != nil {
+                HStack { Text("相似连拍组").font(.caption); Spacer(); Button("返回原范围") { model.leaveSimilarGroup() } }.padding(8)
             }
-            .disabled(model.isWorking)
-            .padding(8)
+            BatchSelectionBar()
+            if model.resultsChanged {
+                HStack {
+                    Text("结果有更新，当前浏览位置已保留").font(.caption)
+                    Spacer()
+                    Button("刷新结果") { model.resultsChanged = false; Task { await model.reloadAssets() } }
+                }.padding(8)
+            }
+            if model.isLoadingAssets {
+                HStack { ProgressView().controlSize(.small); Text("正在更新结果…").font(.caption); Spacer() }.padding(8)
+            }
+            if let failure = model.browseError {
+                HStack {
+                    Text(failure).font(.caption).foregroundStyle(.orange)
+                    Spacer(); Button("重试") { model.retryBrowse() }.disabled(!model.canChangeBrowseScope)
+                }.padding(8)
+            }
             Divider()
             if model.isLoadingAssets && model.assets.isEmpty {
                 ProgressView("正在载入当前范围…").frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -277,21 +283,19 @@ struct ContentView: View {
                                                 .allowsHitTesting(false)
                                         }
                                     }
-                                    .overlay {
-                                        GridClickHandler(label: item.fileName) { command, shift, count in
-                                            model.clickAsset(item, command: command, shift: shift, count: count)
-                                        }
+                                    .overlay(alignment: .bottomTrailing) {
+                                        if model.selectedAssetID == item.id { Image(systemName: "scope").padding(6).foregroundStyle(.tint).allowsHitTesting(false) }
                                     }
                                     .contextMenu {
+                                        Button("重新载入缩略图") { model.thumbnailReloadID = UUID() }
+                                        Button("重新授权来源…") { model.reauthorizeThumbnailSource(item) }
                                         Button("在访达中显示") {
-                                            model.selectedAssetID = item.id
-                                            model.revealSelectedInFinder()
+                                            model.revealSelectedInFinder(assetID: item.id)
                                         }
                                         Menu("添加到相册") {
                                             ForEach(model.albums) { album in
                                                 Button(album.name) {
-                                                    model.selectedAssetID = item.id
-                                                    model.addSelectedAsset(to: album)
+                                                    model.applyAnnotation(.init(albumID: album.id), title: "添加到相册", ids: [item.id])
                                                 }
                                             }
                                         }
@@ -299,6 +303,12 @@ struct ContentView: View {
                             }
                         }
                         .padding(14)
+                        .background(GeometryReader { geometry in
+                            Color.clear.onChange(of: geometry.size.width, initial: true) { _, width in
+                                model.gridColumns = max(1, Int((width - 16) / (model.gridSize + 12)))
+                            }
+                            .onChange(of: model.gridSize) { _, _ in model.gridColumns = max(1, Int((geometry.size.width - 16) / (model.gridSize + 12))) }
+                        })
                     }
                     .onChange(of: model.selectedAssetID) { _, id in
                         if let id { proxy.scrollTo(id) }
@@ -313,9 +323,7 @@ struct ContentView: View {
     private var filterBar: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("文件名、相机、镜头或标签", text: $model.searchText)
-                .textFieldStyle(.plain)
-                .onSubmit { Task { await model.reloadAssets() } }
+            BrowseSearchField(text: $model.searchText, changed: { model.scheduleSearch() }, submit: { model.requestFilters() }, composing: { model.searchTask?.cancel() })
             Divider().frame(height: 18)
             Picker("最低评分", selection: $model.minimumRating) {
                 Text("全部评分").tag(0)
@@ -334,10 +342,20 @@ struct ContentView: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 42)
+        .disabled(!model.canInteractWithLibrary || model.isSavingAnnotation || model.isShowingKeywords)
     }
 
     private var statusBar: some View {
-        HStack {
+        VStack(spacing: 4) {
+            if model.previewAsset == nil {
+                HStack {
+                    Text(model.browseSummary).font(.caption).monospacedDigit()
+                    Spacer()
+                    Button("上一页") { model.turnPage(-1) }.disabled(!model.hasPreviousPage || !model.canChangeBrowseScope)
+                    Button("下一页") { model.turnPage(1) }.disabled(!model.hasNextPage || !model.canChangeBrowseScope)
+                }
+            }
+            HStack {
             if let report = model.lastImportReport {
                 Button(report.outcome.rawValue) { model.isShowingImportReport = true }
                     .buttonStyle(.borderless)
@@ -350,7 +368,11 @@ struct ContentView: View {
                     .popover(isPresented: $showsScanReport) { ScanReportView(report: report) }
             }
             if model.isWorking { ProgressView().controlSize(.small) }
-            Text(model.statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Text(model.activeTaskSummary ?? model.statusText).font(.caption).foregroundStyle(.secondary).lineLimit(1).help(model.activeTaskSummary ?? model.statusText)
+            if !model.operationResults.isEmpty {
+                Menu("最近操作") { ForEach(Array(model.operationResults.enumerated()), id: \.offset) { Text($0.element) } }
+                    .menuStyle(.borderlessButton).fixedSize()
+            }
             Spacer()
             if model.isWorking {
                 if model.isReanalyzing {
@@ -367,9 +389,10 @@ struct ContentView: View {
                 Slider(value: $model.gridSize, in: 100...260)
                     .frame(width: 110)
             }
+            }
         }
         .padding(.horizontal, 12)
-        .frame(height: 30)
+        .padding(.vertical, 6)
     }
 
     @ViewBuilder
@@ -394,15 +417,14 @@ struct ContentView: View {
                         Spacer()
                         Menu("XMP") {
                             Button("导出（跳过已有文件）") { model.exportSelectedXMP() }
-                            Button("替换已有 XMP") { model.replaceSelectedXMP() }
                         }
                     }
                 }
                 .padding(16)
             }
             .navigationTitle("检查器")
-            .onChange(of: model.selectedAssetID) { _, _ in keywordDraft = item.keywords.joined(separator: ", ") }
-            .onAppear { keywordDraft = item.keywords.joined(separator: ", ") }
+            .onChange(of: model.selectedAssetID) { _, _ in model.syncKeywordDraft() }
+            .onAppear { model.syncKeywordDraft() }
         } else {
             ContentUnavailableView("未选择照片", systemImage: "sidebar.right", description: Text("选择一项以查看元数据和整理选项。"))
         }
@@ -434,7 +456,7 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .disabled(model.isSavingFlag)
+            .disabled(model.isSavingAnnotation)
         }
     }
 
@@ -467,37 +489,41 @@ struct ContentView: View {
     private func keywordSection(_ item: AssetListItem) -> some View {
         GroupBox("关键词") {
             HStack {
-                TextField("旅行, 人像, 夜景", text: $keywordDraft)
+                TextField("旅行, 人像, 夜景", text: $model.keywordDraft)
                     .onSubmit { saveKeywords() }
                 Button("保存") { saveKeywords() }
             }
-        }
+        }.disabled(model.operationBlockReason(.annotation) != nil)
     }
 
     private func saveKeywords() {
-        model.updateKeywords(keywordDraft.split(separator: ",").map(String.init))
+        Task { _ = await model.flushKeywords() }
     }
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
-            Group {
-                if model.previewAsset == nil {
-                    Button("按日期重新归档…") { model.prepareArchive() }.disabled(model.isWorking || model.archivePending)
-                    Button("恢复未完成归档…") { model.resumeArchive(undo: false) }.disabled(model.isWorking || !model.archivePending)
-                    Button("撤销最近一次归档…") { model.resumeArchive(undo: true) }.disabled(model.isWorking)
-                    Button("清理失效索引…", systemImage: "photo.badge.exclamationmark") { model.prepareMissingAssetCleanup() }
-                        .disabled(model.isWorking || model.missingAssetPlan != nil)
-                    Button("整理重复来源…", systemImage: "folder.badge.gearshape") { model.prepareSourceMerge() }
-                        .disabled(model.isWorking || model.sourceMergePlan != nil || model.deletionPlan != nil)
-                    Button("清理淘汰图片…", systemImage: "trash") { model.prepareDeletion() }
-                        .disabled(model.isWorking || model.deletionPlan != nil)
-                    Button { model.chooseAndAddFolder() } label: { Label("添加文件夹", systemImage: "folder.badge.plus") }
-                    Button { model.isShowingImport = true } label: { Label("从相机卡导入", systemImage: "externaldrive.badge.plus") }
+            if model.previewAsset == nil {
+                Button("添加文件夹", systemImage: "folder.badge.plus") { model.chooseAndAddFolder() }
+                    .disabled(model.operationBlockReason(.files) != nil).help(model.operationBlockReason(.files) ?? "添加照片来源")
+                Button("导入", systemImage: "externaldrive.badge.plus") { model.isShowingImport = true }
+                    .disabled(model.operationBlockReason(.files) != nil)
+                Menu("整理") {
+                    Button("按日期重新归档…") { model.prepareArchive() }.disabled(model.archivePending)
+                    Button("撤销最近一次归档…") { model.resumeArchive(undo: true) }
+                    Divider()
+                    Button("清理失效索引…") { model.prepareMissingAssetCleanup() }
+                    Button("整理重复来源…") { model.prepareSourceMerge() }
+                    Button("清理淘汰图片…") { model.prepareDeletion() }
+                }.disabled(model.operationBlockReason(.files) != nil).help(model.operationBlockReason(.files) ?? "图库整理与维护")
+                if model.archivePending {
+                    Button("恢复未完成归档…", systemImage: "exclamationmark.arrow.circlepath") { model.resumeArchive(undo: false) }
+                        .disabled(model.operationBlockReason(.files) != nil)
                 }
-            }.disabled(model.fileOperationsBlockedByShare)
+            }
         }
     }
+
 }
 
 private struct MissingAssetCleanupSheet: View {
@@ -537,21 +563,13 @@ private struct AssetCell: View {
     let item: AssetListItem
     let size: CGFloat
     let isSelected: Bool
-    @State private var image: NSImage?
+    @State private var thumbnailFailed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .topTrailing) {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(.quaternary)
+                PhotoThumbnail(item: item, size: Int(size), failureChanged: { thumbnailFailed = $0 })
                     .aspectRatio(1, contentMode: .fit)
-                    .overlay {
-                        if let image {
-                            Image(nsImage: image).resizable().scaledToFill()
-                        } else {
-                            ProgressView().controlSize(.small)
-                        }
-                    }
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                 HStack(spacing: 4) {
                     if item.isColorEdited { badge("slider.horizontal.3", color: .purple).help("已调色").accessibilityLabel("已调色") }
@@ -563,6 +581,7 @@ private struct AssetCell: View {
                 .padding(7)
             }
             Text(item.fileName).font(.caption).lineLimit(1)
+                .overlay { if thumbnailFailed { clickHandler } }
             HStack(spacing: 4) {
                 if item.rating > 0 {
                     Label("\(item.rating)", systemImage: "star.fill").foregroundStyle(.yellow)
@@ -577,10 +596,12 @@ private struct AssetCell: View {
         .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2))
         .contentShape(Rectangle())
-        .task(id: "\(item.id)-\(item.fileVersion)-\(item.colorRevision)-\(Int(size))") {
-            let result = await model.thumbnail(for: item, pixelSize: Int(size * 1.5))
-            guard !Task.isCancelled else { return }
-            image = result
+        .overlay { if !thumbnailFailed { clickHandler } }
+    }
+
+    private var clickHandler: some View {
+        GridClickHandler(label: item.fileName) { command, shift, count in
+            model.clickAsset(item, command: command, shift: shift, count: count)
         }
     }
 
@@ -596,21 +617,10 @@ private struct AssetCell: View {
 private struct LargePreview: View {
     @EnvironmentObject private var model: AppModel
     let item: AssetListItem
-    @State private var image: NSImage?
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 8)
-            .fill(.quaternary)
-            .aspectRatio(4 / 3, contentMode: .fit)
-            .overlay {
-                if let image { Image(nsImage: image).resizable().scaledToFit().padding(4) }
-                else { ProgressView() }
-            }
-            .task(id: "\(item.id)-\(item.fileVersion)-\(item.colorRevision)") {
-                let result = await model.thumbnail(for: item, pixelSize: 1_024)
-                guard !Task.isCancelled else { return }
-                image = result
-            }
+        PhotoThumbnail(item: item, size: 1_024).aspectRatio(4 / 3, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 

@@ -71,18 +71,18 @@ enum FolderBrowsingChecks {
         for (path, recursive, expected) in [("", true, 14), ("", false, 1), ("旅行", true, 4), ("旅行", false, 2),
             ("旅行/第2天", false, 1), ("100%_ 原图", true, 2), ("100%_ 原图", false, 1), ("100%_ 原图/👩‍💻", false, 1),
             ("Case", true, 1), ("case", true, 1), ("é", false, 1), ("e\u{301}", false, 1)] {
-            let query = AssetQuery(sourceID: source.id, relativeDirectory: path, includeSubdirectories: recursive, limit: 1, offset: 1)
+            let query = BrowseQuery(sourceID: source.id, relativeDirectory: path, includeSubdirectories: recursive)
             try check(try await store.matchingAssetCount(query) == expected, "目录范围或不分页计数错误：\(path)")
-            var all = query; all.limit = 2000; all.offset = 0
-            try check(try await store.assets(all).count == expected, "目录网格范围错误：\(path)")
+            let page = try await store.browsePage(query, limit: 1, count: true)
+            try check(page.items.count == min(1, expected) && page.total == expected, "目录分页范围错误：\(path)")
         }
         for path in ["/旅行", "旅行/", "旅行//第2天", "..", "旅行/../旅行精选", ".", "a\0b"] {
             do {
-                _ = try await store.assets(AssetQuery(sourceID: source.id, relativeDirectory: path))
+                _ = try await store.assets(BrowseQuery(sourceID: source.id, relativeDirectory: path))
                 throw ColorChecks.Failure(description: "非法目录未被拒绝")
             } catch is CatalogFolderError {}
         }
-        let unscoped = AssetQuery(relativeDirectory: "旅行")
+        let unscoped = BrowseQuery(relativeDirectory: "旅行")
         for operation in 0..<4 {
             do {
                 switch operation {
@@ -99,7 +99,7 @@ enum FolderBrowsingChecks {
         for item in [photo, other] { try await store.seedAnnotation(UserAnnotation(assetID: item.id, rating: 5, flag: .rejected, keywords: ["入选"])) }
         let album = Album(name: "选片"); try await store.saveAlbum(album)
         for item in [photo, other] { try await store.add(assetID: item.id, toAlbum: album.id) }
-        let selected = AssetQuery(sourceID: source.id, relativeDirectory: "旅行", includeSubdirectories: false,
+        let selected = BrowseQuery(sourceID: source.id, relativeDirectory: "旅行", includeSubdirectories: false,
                                   albumID: album.id, searchText: "入选", minimumRating: 4, flag: .rejected)
         try check(try await store.assets(selected).map(\.id) == [photo.id], "目录和相册／搜索／评分／旗标组合串范围")
         try check(try await store.matchingAssetCount(selected) == 1, "筛选计数与列表不一致")
@@ -126,8 +126,8 @@ enum FolderBrowsingChecks {
         let excluded = asset(source, "旅行精选/keep.jpg")
         _ = try await store.upsertAssets(large + [excluded])
         for value in large + [excluded] { try await store.seedAnnotation(UserAnnotation(assetID: value.id, flag: .rejected)) }
-        let query = AssetQuery(sourceID: source.id, relativeDirectory: "旅行", limit: 2000)
-        try check(try await store.assets(query).count == 2000, "网格显示上限改变")
+        let query = BrowseQuery(sourceID: source.id, relativeDirectory: "旅行")
+        try check(try await store.browsePage(query).items.count == 200, "网格每页应为 200 项")
         try check(try await store.matchingAssetCount(query) == 2005, "目录计数被网格截断")
         try check(try await store.deletionCandidates(query).count == 2005, "淘汰候选被网格截断")
         try check(try await store.analysisCandidates(query).count == 2005, "重算候选被网格截断")

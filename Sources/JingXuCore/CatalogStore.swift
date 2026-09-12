@@ -16,7 +16,7 @@ public protocol CatalogRepository: Sendable {
     func asset(id: String) async throws -> MediaAsset?
     func asset(sourceID: String, relativePath: String) async throws -> MediaAsset?
     func assets(sourceID: String) async throws -> [MediaAsset]
-    func assets(_ query: AssetQuery) async throws -> [AssetListItem]
+    func assets(_ query: BrowseQuery, limit: Int) async throws -> [AssetListItem]
     func annotation(for assetID: String) async throws -> UserAnnotation
     @discardableResult func setRating(_ rating: Int, for assetID: String) async throws -> UserAnnotation
     @discardableResult func setFlag(_ flag: AssetFlag, for assetID: String) async throws -> UserAnnotation
@@ -453,34 +453,31 @@ public actor CatalogStore: CatalogRepository {
         try dbPool.read { db in try MediaAsset.filter(Column("sourceID") == sourceID).fetchAll(db) }
     }
 
-    public func assets(_ query: AssetQuery) throws -> [AssetListItem] {
-        try queryAssets(query, rejectedOnly: false)
+    public func assets(_ query: BrowseQuery, limit: Int = 2_000) throws -> [AssetListItem] {
+        try queryAssets(query, rejectedOnly: false, limit: limit)
     }
 
-    public func analysisCandidates(_ query: AssetQuery = AssetQuery(), legacyOnly: Bool = false) throws -> [String] {
-        var unlimited = query; unlimited.limit = Int.max; unlimited.offset = 0
+    public func analysisCandidates(_ query: BrowseQuery = BrowseQuery(), legacyOnly: Bool = false) throws -> [String] {
+        let unlimited = query
         let (sql, arguments) = try Self.assetQuerySQL(unlimited, rejectedOnly: false, photosOnly: true,
-            legacyOnly: legacyOnly, projection: "a.id")
+            legacyOnly: legacyOnly, projection: "a.id", paginated: false)
         return try dbPool.read { try String.fetchAll($0, sql: sql, arguments: arguments) }
     }
 
     public func assetListItem(id: String) throws -> AssetListItem? {
-        let (sql, arguments) = try Self.assetQuerySQL(AssetQuery(limit: 1), rejectedOnly: false, assetID: id)
+        let (sql, arguments) = try Self.assetQuerySQL(BrowseQuery(), rejectedOnly: false, assetID: id)
         return try dbPool.read { try AssetListItem.fetchOne($0, sql: sql, arguments: arguments) }
     }
 
-    public func deletionCandidates(_ query: AssetQuery) throws -> [MediaAsset] {
-        var unlimited = query
-        unlimited.limit = Int.max
-        unlimited.offset = 0
-        let ids = try queryAssets(unlimited, rejectedOnly: true).map(\.id)
+    public func deletionCandidates(_ query: BrowseQuery) throws -> [MediaAsset] {
+        let unlimited = query
+        let ids = try queryAssets(unlimited, rejectedOnly: true, limit: Int.max).map(\.id)
         return try dbPool.read { db in try ids.compactMap { try MediaAsset.fetchOne(db, key: $0) } }
     }
 
-    public func prepareMissingAssetCleanup(_ query: AssetQuery) throws -> MissingAssetPlan {
-        var unlimited = query
-        unlimited.limit = Int.max; unlimited.offset = 0
-        let (sql, arguments) = try Self.assetQuerySQL(unlimited, rejectedOnly: false, projection: "a.*")
+    public func prepareMissingAssetCleanup(_ query: BrowseQuery) throws -> MissingAssetPlan {
+        let unlimited = query
+        let (sql, arguments) = try Self.assetQuerySQL(unlimited, rejectedOnly: false, projection: "a.*", paginated: false)
         let candidates = try dbPool.read { try MediaAsset.fetchAll($0, sql: sql, arguments: arguments) }
         var plan = MissingAssetPlan()
         for (sourceID, files) in Dictionary(grouping: candidates, by: \.sourceID) {
@@ -544,22 +541,22 @@ public actor CatalogStore: CatalogRepository {
         }
     }
 
-    private func queryAssets(_ query: AssetQuery, rejectedOnly: Bool) throws -> [AssetListItem] {
-        let (sql, arguments) = try Self.assetQuerySQL(query, rejectedOnly: rejectedOnly)
+    private func queryAssets(_ query: BrowseQuery, rejectedOnly: Bool, limit: Int = 2_000) throws -> [AssetListItem] {
+        let (sql, arguments) = try Self.assetQuerySQL(query, rejectedOnly: rejectedOnly, limit: limit)
         return try dbPool.read { try AssetListItem.fetchAll($0, sql: sql, arguments: arguments) }
     }
 
-    public func matchingAssetCount(_ query: AssetQuery) throws -> Int {
+    public func matchingAssetCount(_ query: BrowseQuery) throws -> Int {
         let (sql, arguments) = try Self.assetQuerySQL(query, rejectedOnly: false, projection: "COUNT(*)", paginated: false)
         return try dbPool.read { try Int.fetchOne($0, sql: sql, arguments: arguments) ?? 0 }
     }
 
-    private static func assetQuerySQL(_ query: AssetQuery, rejectedOnly: Bool, photosOnly: Bool = false,
+    static func assetQuerySQL(_ query: BrowseQuery, rejectedOnly: Bool, photosOnly: Bool = false,
                                      legacyOnly: Bool = false, projection: String? = nil, assetID: String? = nil,
-                                     paginated: Bool = true) throws -> (String, StatementArguments) {
+                                     paginated: Bool = true, limit: Int = 2_000, cursor: BrowseCursor? = nil, reverse: Bool = false, inclusive: Bool = false, assetIDs: [String]? = nil) throws -> (String, StatementArguments) {
         let hasSearch = !query.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let needsAnnotation = projection == nil || rejectedOnly || query.collection == .rejected || hasSearch || query.minimumRating > 0 || query.flag != nil
-        let needsAnalysis = projection == nil || legacyOnly || query.collection == .review
+        let needsAnalysis = projection == nil || legacyOnly || query.collection == .review || query.similarGroupID != nil
         var joins = ""
         if needsAnnotation { joins += " LEFT JOIN annotations an ON an.assetID = a.id" }
         if needsAnalysis { joins += " LEFT JOIN analysisResults ar ON ar.assetID = a.id" }
@@ -569,6 +566,19 @@ public actor CatalogStore: CatalogRepository {
         if rejectedOnly { conditions.append("a.kind = 'photo' AND an.flag = 'rejected'") }
         if photosOnly { conditions.append("a.kind = 'photo'") }
         if legacyOnly { conditions.append("ar.algorithmVersion < 2") }
+        if let group = query.similarGroupID { conditions.append("ar.similarGroupID = ?"); arguments += [group] }
+        if let assetIDs {
+            guard !assetIDs.isEmpty else { return ("SELECT * FROM mediaAssets WHERE 0", []) }
+            conditions.append("a.id IN (" + assetIDs.map { _ in "?" }.joined(separator: ",") + ")")
+            arguments += StatementArguments(assetIDs)
+        }
+        if let cursor {
+            conditions.append("COALESCE(a.capturedAt, a.modifiedAt) \(reverse ? ">=" : "<=") ?")
+            arguments += [cursor.date]
+            let dateOp = reverse ? ">" : "<", textOp = reverse ? "<" : ">"
+            conditions.append("(COALESCE(a.capturedAt, a.modifiedAt) \(dateOp) ? OR (COALESCE(a.capturedAt, a.modifiedAt) = ? AND (a.fileName \(textOp) ? OR (a.fileName = ? AND a.id \(textOp)\(inclusive ? "=" : "") ?))))")
+            arguments += [cursor.date, cursor.date, cursor.name, cursor.name, cursor.id]
+        }
         if let assetID { conditions.append("a.id = ?"); arguments += [assetID] }
 
         if let albumID = query.albumID {
@@ -617,8 +627,8 @@ public actor CatalogStore: CatalogRepository {
         }
 
         if hasSearch {
-            let pattern = "%\(query.searchText)%"
-            conditions.append("(a.fileName LIKE ? OR a.cameraModel LIKE ? OR a.lens LIKE ? OR an.keywordsJSON LIKE ?)")
+            let pattern = "%" + query.searchText.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_") + "%"
+            conditions.append("(a.fileName LIKE ? ESCAPE '\\' OR a.cameraModel LIKE ? ESCAPE '\\' OR a.lens LIKE ? ESCAPE '\\' OR an.keywordsJSON LIKE ? ESCAPE '\\')")
             arguments += [pattern, pattern, pattern, pattern]
         }
         if query.minimumRating > 0 {
@@ -631,10 +641,10 @@ public actor CatalogStore: CatalogRepository {
         }
 
         let whereClause = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
-        if paginated { arguments += [query.limit, query.offset] }
+        if paginated { arguments += [max(1, limit)] }
         let columns = projection ?? """
                    a.id, a.sourceID, a.relativePath, a.fileName, a.kind,
-                   a.capturedAt, a.importedAt, a.width, a.height,
+                   a.capturedAt, COALESCE(a.capturedAt, a.modifiedAt) AS browseDate, a.importedAt, a.width, a.height,
                    a.cameraModel, a.lens, a.metadataError,
                    COALESCE(an.rating, 0) AS rating,
                    COALESCE(an.flag, 'none') AS flag,
@@ -649,7 +659,8 @@ public actor CatalogStore: CatalogRepository {
             FROM mediaAssets a
             \(joins)
             \(whereClause)
-            \(paginated ? "ORDER BY COALESCE(a.capturedAt, a.modifiedAt) DESC, a.fileName ASC, a.id ASC LIMIT ? OFFSET ?" : "")
+            ORDER BY COALESCE(a.capturedAt, a.modifiedAt) \(reverse ? "ASC" : "DESC"), a.fileName \(reverse ? "DESC" : "ASC"), a.id \(reverse ? "DESC" : "ASC")
+            \(paginated ? "LIMIT ?" : "")
             """
         return (sql, arguments)
     }

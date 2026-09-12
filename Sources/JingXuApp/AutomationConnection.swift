@@ -76,22 +76,27 @@ import JingXuCore
 
 extension AppModel: ColorAutomationHost {
     var automationSelection: AutomationSelection {
-        let photos = colorTargetIDs.compactMap { id -> AutomationPhoto? in
-            guard let item = previewAsset?.id == id ? previewAsset : assets.first(where: { $0.id == id }) else { return nil }
-            return AutomationPhoto(id: id, name: item.fileName)
+        get async throws {
+            let token = automationSelectionToken
+            let rows = try await resolveColorTargets()
+            guard token == automationSelectionToken else { throw ColorEditError("选择已变化") }
+            let photos = rows.map { AutomationPhoto(id: $0.id, name: $0.fileName) }
+            let current = previewAsset?.id ?? (photos.contains(where: { $0.id == selectedAssetID }) ? selectedAssetID : photos.first?.id)
+            return AutomationSelection(token: token.uuidString, currentID: current, photos: photos)
         }
-        let current = previewAsset?.id ?? (photos.contains(where: { $0.id == selectedAssetID }) ? selectedAssetID : photos.first?.id)
-        return AutomationSelection(token: automationSelectionToken.uuidString, currentID: current, photos: photos)
     }
     var automationEditor: ColorEditSession? { colorEditor }
     var automationBusy: Bool {
-        isStarting || startupFailure != nil || !canStartColorAction || isShowingColorPresets || isSavingFlag ||
+        isStarting || startupFailure != nil || !canStartColorAction || isShowingColorPresets || isSavingAnnotation ||
         NSApp.modalWindow != nil || NSApp.keyWindow?.attachedSheet != nil
     }
     func automationBeginOperation() async throws {
         guard !automationBusy, !automationOwnsOperation, store != nil else { throw ColorEditError("镜序当前无法开始 AI 操作") }
         automationOwnsOperation = true; isWorking = true
-        do { try await checkDeletionRecovery() }
+        do {
+            guard await flushKeywords() else { throw ColorEditError("关键词保存失败，请先处理保留的草稿") }
+            try await checkDeletionRecovery()
+        }
         catch { automationEndOperation(); throw error }
     }
     func automationEndOperation() {
@@ -104,7 +109,7 @@ extension AppModel: ColorAutomationHost {
             guard editor.snapshot.asset.id == assetID else { throw ColorEditError("当前编辑照片已变化") }
             return editor
         }
-        guard let item = assets.first(where: { $0.id == assetID }) ?? (previewAsset?.id == assetID ? previewAsset : nil) else { throw ColorEditError("照片已不在当前范围") }
+        guard colorTargetIDs.contains(assetID), let item = try await store.assetListItem(id: assetID) else { throw ColorEditError("照片已不在当前范围") }
         let selection = automationSelectionToken
         let snapshot = try await store.colorSnapshot(assetID: assetID)
         guard automationSelectionToken == selection else { throw ColorEditError("打开编辑会话时选择已变化") }
