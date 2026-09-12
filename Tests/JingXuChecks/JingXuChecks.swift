@@ -40,6 +40,18 @@ private struct TestTrash: TrashService {
 @main
 private enum JingXuChecks {
     static func main() async throws {
+        setenv("SWIFTNIO_STRICT", "1", 1)
+        if CommandLine.arguments.contains("--reliability-checks") {
+            try await ImportChecks.groupingAndRetry()
+            try await ImportChecks.failuresAndRecovery()
+            try await ImportChecks.changedFilesAndCommit()
+            try await ImportChecks.completeRange()
+            try await ThumbnailCacheChecks.run()
+            try await ThumbnailCacheChecks.performance()
+            try await MCPShutdownChecks.run()
+            print("导入与后台可靠性专项校验通过")
+            return
+        }
         if CommandLine.arguments.contains("--sharing-ui-fixtures") {
             print(try await PhotoShareChecks.uiFixtures().path)
             return
@@ -136,6 +148,12 @@ private enum JingXuChecks {
             ("质量 v2 兼容、审核隔离、指纹与断点队列", QualityV2Checks.persistence),
             ("增量扫描与 RAW/JPEG 配对", checkIncrementalScan),
             ("校验导入、重复跳过与不覆盖", checkSafeImport),
+            ("导入分组、XMP、编号空洞与重复重试", ImportChecks.groupingAndRetry),
+            ("导入目录权限、容量、模糊配对与中断恢复", ImportChecks.failuresAndRecovery),
+            ("导入文件替换、取消、部分提交及数据库失败", ImportChecks.changedFilesAndCommit),
+            ("导入 2001 项完整范围", ImportChecks.completeRange),
+            ("缓存失效竞争、修订、容量、像素比例及写入失败", ThumbnailCacheChecks.run),
+            ("缓存失效性能与分析刷新节流", ThumbnailCacheChecks.performance),
             ("删除范围、文件复核与中断恢复", checkDeletion),
             ("失效索引、来源安全、备份与事务回滚", checkMissingAssetCleanup),
             ("原图解码、方向、错误和取消", checkPreview),
@@ -157,6 +175,7 @@ private enum JingXuChecks {
             ("编辑会话自动保存、并发保存、失败重试及过期渲染", ColorChecks.editing),
             ("MCP 调色、预览、批量、导出、版本冲突与取消", AutomationChecks.run),
             ("MCP HTTP 实连、认证、Origin、Host 与端口冲突", AutomationChecks.networking),
+            ("MCP 请求与关闭、重启竞争 100 次", MCPShutdownChecks.run),
             ("10 万条目录查询性能", checkLargeCatalog)
         ]
 
@@ -166,7 +185,7 @@ private enum JingXuChecks {
                 try await check()
                 print("✓ \(name)")
             } catch {
-                print("✗ \(name)：\(error)")
+                try? FileHandle.standardError.write(contentsOf: Data("✗ \(name)：\(error)\n".utf8))
                 throw error
             }
         }
@@ -411,20 +430,23 @@ private enum JingXuChecks {
         let scanner = DefaultSourceScanner(repository: store, metadataExtractor: StubMetadataExtractor())
         let importer = ImportCoordinator(repository: store, scanner: scanner)
 
-        let first = try await importer.importMedia(from: card.deletingLastPathComponent(), to: destinationRoot, batchName: "测试", progress: nil)
+        let firstPlan = try await importer.prepare(from: card.deletingLastPathComponent(), to: destinationRoot, batchName: "测试")
+        let first = try await importer.execute(firstPlan)
         let copied = first.destination.appendingPathComponent("IMG_1000.JPG")
         try require(first.session.completedFiles == 1, "首次导入未完成")
         let sourceHash = try FileHasher.sha256(of: cardFile)
         let copiedHash = try FileHasher.sha256(of: copied)
         try require(sourceHash == copiedHash, "目标校验值与来源不同")
 
-        let second = try await importer.importMedia(from: card.deletingLastPathComponent(), to: destinationRoot, batchName: "测试", progress: nil)
+        let secondPlan = try await importer.prepare(from: card.deletingLastPathComponent(), to: destinationRoot, batchName: "测试")
+        let second = try await importer.execute(secondPlan)
         try require(second.session.skippedFiles == 1, "相同文件未跳过")
         let sourceCount = try await store.sources().count
         try require(sourceCount == 1, "重复导入创建了重复来源")
 
         try Data("changed-camera-bytes".utf8).write(to: cardFile, options: .atomic)
-        let third = try await importer.importMedia(from: card.deletingLastPathComponent(), to: destinationRoot, batchName: "测试", progress: nil)
+        let thirdPlan = try await importer.prepare(from: card.deletingLastPathComponent(), to: destinationRoot, batchName: "测试")
+        let third = try await importer.execute(thirdPlan)
         let collisionCopy = third.destination.appendingPathComponent("IMG_1000-2.JPG")
         try require(FileManager.default.fileExists(atPath: collisionCopy.path), "同名不同内容未生成安全后缀")
         let copiedContents = String(decoding: try Data(contentsOf: copied), as: UTF8.self)

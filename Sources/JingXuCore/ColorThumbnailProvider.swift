@@ -4,14 +4,14 @@ import ImageIO
 import UniformTypeIdentifiers
 
 public actor ColorThumbnailProvider {
-    private let directory: URL
-    public init(directory: URL) { self.directory = directory }
-    public func thumbnail(_ snapshot: ColorEditSnapshot, pixelSize: Int) async throws -> Data {
+    private let cache: ThumbnailCache
+    public init(cache: ThumbnailCache) { self.cache = cache }
+    public func thumbnail(_ snapshot: ColorEditSnapshot, pixelSize: Int, scale: CGFloat = 1) async throws -> Data {
         let access = try ColorSourceAccess(snapshot)
-        let size = min(2048, max(64, pixelSize))
-        let key = "\(snapshot.asset.id)-color-\(snapshot.revision)-\(access.fingerprint.size)-\(access.fingerprint.modifiedAt.timeIntervalSince1970)-\(size).png"
-        let url = directory.appendingPathComponent(key)
-        if let bytes = try? Data(contentsOf: url) { try access.revalidate(); return bytes }
+        let size = ThumbnailCache.pixelSize(pixelSize, scale: scale)
+        let key = ThumbnailCache.Key(assetID: snapshot.asset.id, kind: "color", revision: snapshot.revision, fingerprint: access.fingerprint, pixelSize: size)
+        let (ticket, cached) = await cache.lookup(key)
+        if let cached { try access.revalidate(); return cached }
         let result = try await ColorImageRenderer.shared.render(snapshot, adjustments: snapshot.adjustments, maximumDimension: size)
         try Task.checkCancellation()
         let data = NSMutableData()
@@ -19,8 +19,7 @@ public actor ColorThumbnailProvider {
         CGImageDestinationAddImage(destination, result.image, nil)
         guard CGImageDestinationFinalize(destination) else { throw ColorEditError("无法编码调色缩略图") }
         try access.revalidate()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try (data as Data).write(to: url, options: .atomic)
+        await cache.store(data as Data, for: key, ticket: ticket)
         return data as Data
     }
 }

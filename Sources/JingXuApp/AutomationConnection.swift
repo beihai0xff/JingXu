@@ -12,6 +12,7 @@ import JingXuCore
     private var token: String?
     private var server: MCPHTTPServer?
     private var controller: ColorAutomationController?
+    private var shutdownTask: Task<Void, Never>?
     private let makeController: () throws -> ColorAutomationController
     private let defaults: UserDefaults
     private let credentialService: String
@@ -48,9 +49,14 @@ import JingXuCore
     func shutdown(preservePreference: Bool = false) async {
         enabled = false
         if !preservePreference { defaults.set(false, forKey: "AIConnectionEnabled") }
+        if let shutdownTask { await shutdownTask.value; return }
         let server = server, controller = controller
         self.server = nil; self.controller = nil; token = nil
-        await server?.stop(); await controller?.shutdown()
+        let task = Task {
+            await server?.beginShutdown(); await controller?.shutdown(); await server?.stop()
+        }
+        shutdownTask = task
+        await task.value; shutdownTask = nil
         status = "连接已关闭"
     }
     func copyConfiguration() {

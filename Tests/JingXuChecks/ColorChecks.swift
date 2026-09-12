@@ -193,7 +193,7 @@ enum ColorChecks {
         let undoneFirst = try await store.colorSnapshot(assetID: first.asset.id), undoneSecond = try await store.colorSnapshot(assetID: second.asset.id)
         try check(try undoneFirst.adjustments == a && undoneSecond.adjustments.isIdentity, "批量撤销失败")
         do { _ = try await store.applyColorBatch(plan, backupURL: root.appendingPathComponent("stale.sqlite")); throw Failure(description: "过期计划覆盖最新调整") } catch is ColorEditError {}
-        let thumb = ColorThumbnailProvider(directory: root.appendingPathComponent("thumbnails"))
+        let thumb = ColorThumbnailProvider(cache: ThumbnailCache(directory: root.appendingPathComponent("thumbnails")))
         first = try await store.colorSnapshot(assetID: first.asset.id)
         let beforeThumb = try await thumb.thumbnail(first, pixelSize: 128)
         a.exposure = -1; first = try await store.saveColorAdjustments(a, snapshot: first)

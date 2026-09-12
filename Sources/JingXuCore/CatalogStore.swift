@@ -27,7 +27,6 @@ public protocol CatalogRepository: Sendable {
     func saveSimilarGroup(_ groupID: String, assetIDs: [String]) async throws
     func analysis(for assetID: String) async throws -> AnalysisResult?
     func assetIDsNeedingAnalysis(sourceID: String, algorithmVersion: Int) async throws -> [String]
-    func saveImportSession(_ session: ImportSession) async throws
     func saveAlbum(_ album: Album) async throws
     func albums() async throws -> [Album]
     func add(assetID: String, toAlbum albumID: String) async throws
@@ -827,10 +826,6 @@ public actor CatalogStore: CatalogRepository {
                 arguments: [sourceID]
             )
         }
-    }
-
-    public func saveImportSession(_ session: ImportSession) throws {
-        try dbPool.write { db in try session.save(db) }
     }
 
     public func saveAlbum(_ album: Album) throws {

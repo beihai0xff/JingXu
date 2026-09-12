@@ -13,9 +13,12 @@ public actor MCPHTTPServer {
     private let handler: Handler
     private let disconnected: @Sendable (String) async -> Void
     private var listener: Channel?
-    private var children: [ObjectIdentifier: Channel] = [:]
+    private let connections = MCPConnections()
     private var group: MultiThreadedEventLoopGroup?
     private var running = false
+    private var starting: Task<Void, Error>?
+    private var stopping: Task<Void, Never>?
+    private var requests: [UUID: (ObjectIdentifier, Task<Void, Never>)] = [:]
     private var sessions: [String: (Server, StatefulHTTPServerTransport)] = [:]
     private var cleanup: Task<Void, Never>?
     private var lastAccess: [String: Date] = [:]
@@ -25,27 +28,39 @@ public actor MCPHTTPServer {
         self.port = port; self.token = token; self.handler = handler; self.disconnected = disconnected
     }
     public func start() async throws {
-        guard !running, group == nil, (0...65535).contains(port), token.utf8.count >= 32 else { throw MCPError.invalidRequest("连接设置无效") }
+        guard !running, group == nil, starting == nil, stopping == nil, (0...65535).contains(port), token.utf8.count >= 32 else { throw MCPError.invalidRequest("连接设置无效或正在关闭") }
+        running = true; connections.open()
+        let task = Task { try await self.bind() }; starting = task
+        defer { starting = nil }
+        try await task.value
+        guard running else { throw MCPError.connectionClosed }
+    }
+    private func bind() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
-        self.group = group; running = true
+        self.group = group
         do {
             listener = try await ServerBootstrap(group: group)
                 .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
                 .childChannelInitializer { channel in
-                    channel.pipeline.configureHTTPServerPipeline().flatMap {
+                    guard self.connections.insert(channel) else { return channel.eventLoop.makeFailedFuture(MCPError.connectionClosed) }
+                    return channel.pipeline.configureHTTPServerPipeline().flatMap {
                         channel.eventLoop.makeCompletedFuture {
                             try channel.pipeline.syncOperations.addHandler(MCPHTTPHandler(server: self))
                         }
                     }
                 }.bind(host: "127.0.0.1", port: port).get()
-            cleanup = Task { [weak self] in
-                while !Task.isCancelled {
-                    do { try await Task.sleep(for: .seconds(60)) } catch { return }
-                    await self?.expireSessions()
+            if running {
+                cleanup = Task { [weak self] in
+                    while !Task.isCancelled {
+                        do { try await Task.sleep(for: .seconds(60)) } catch { return }
+                        await self?.expireSessions()
+                    }
                 }
             }
         } catch {
-            running = false; self.group = nil; try? await group.shutdownGracefully()
+            running = false
+            // stop() waits for bind, so the group is still owned exclusively here.
+            try? await group.shutdownGracefully(); self.group = nil
             if let error = error as? IOError, error.errnoCode == EADDRINUSE {
                 throw ColorEditError("本机端口 \(port) 已被占用，请修改端口后重新启用")
             }
@@ -53,21 +68,62 @@ public actor MCPHTTPServer {
         }
     }
     public var boundPort: Int? { listener?.localAddress?.port }
+    public func beginShutdown() async {
+        running = false; connections.rejectNew(); cleanup?.cancel()
+        if let starting { _ = await starting.result }
+        let listener = listener; self.listener = nil
+        try? await listener?.close()
+    }
     public func stop() async {
-        running = false; cleanup?.cancel(); cleanup = nil
-        try? await listener?.close(); listener = nil
+        if let stopping { await stopping.value; return }
+        let task = Task { await self.drain() }; stopping = task
+        await task.value; stopping = nil
+    }
+    private func drain() async {
+        await beginShutdown()
+        if let cleanup { await cleanup.value }; cleanup = nil
         for id in Array(sessions.keys) { await closeSession(id) }
-        for channel in children.values { try? await channel.close() }
-        children.removeAll()
+        for (_, task) in requests.values { task.cancel() }
+        // Connections close while their event loops still exist; tasks can safely finish failed writes.
+        for channel in connections.snapshot() { try? await channel.close() }
+        for (_, task) in Array(requests.values) { await task.value }
+        requests.removeAll(); connections.removeAll()
         if let group { try? await group.shutdownGracefully() }
         group = nil
     }
-    fileprivate func track(_ channel: Channel) async {
-        guard running else { try? await channel.close(); return }
-        let id = ObjectIdentifier(channel); children[id] = channel
-        Task { [weak self] in try? await channel.closeFuture.get(); await self?.removeChild(id) }
+    fileprivate func inactive(_ channel: Channel) {
+        let id = ObjectIdentifier(channel)
+        connections.remove(channel)
+        for (owner, task) in requests.values where owner == id { task.cancel() }
     }
-    private func removeChild(_ id: ObjectIdentifier) { children[id] = nil }
+    fileprivate func respond(_ request: HTTPRequest, on channel: Channel) async {
+        let owner = ObjectIdentifier(channel)
+        guard running, connections.contains(channel) else { return }
+        let id = UUID()
+        let task = Task {
+            let response = await self.handle(request)
+            do {
+                try Task.checkCancellation()
+                var headers = HTTPHeaders(response.headers.map { ($0.key, $0.value) })
+                headers.replaceOrAdd(name: "Connection", value: "close")
+                headers.replaceOrAdd(name: "Cache-Control", value: "no-store")
+                let head = HTTPResponseHead(version: .http1_1, status: .init(statusCode: response.statusCode), headers: headers)
+                try await channel.writeAndFlush(HTTPServerResponsePart.head(head)).get()
+                if case .stream(let stream, _) = response {
+                    for try await data in stream {
+                        try Task.checkCancellation()
+                        try await channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(ByteBuffer(bytes: data)))).get()
+                    }
+                } else if let data = response.bodyData {
+                    try await channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(ByteBuffer(bytes: data)))).get()
+                }
+                try await channel.writeAndFlush(HTTPServerResponsePart.end(nil)).get()
+            } catch { /* A disconnected response never rolls back an accepted edit. */ }
+            try? await channel.close()
+        }
+        requests[id] = (owner, task)
+        await task.value; requests[id] = nil
+    }
     private func closeSession(_ id: String) async {
         guard let (server, transport) = sessions.removeValue(forKey: id) else { return }
         lastAccess[id] = nil
@@ -135,14 +191,12 @@ private final class MCPHTTPHandler: ChannelInboundHandler {
     private var head: HTTPRequestHead?
     private var bytes = Data()
     private var processing = false
-    private var task: Task<Void, Never>?
     init(server: MCPHTTPServer) { self.server = server }
-    func channelActive(context: ChannelHandlerContext) {
+    func channelInactive(context: ChannelHandlerContext) {
         let channel = context.channel, server = server
-        Task { await server.track(channel) }
-        context.fireChannelActive()
+        Task { await server.inactive(channel) }
+        context.fireChannelInactive()
     }
-    func channelInactive(context: ChannelHandlerContext) { task?.cancel(); context.fireChannelInactive() }
     func errorCaught(context: ChannelHandlerContext, error: Error) { context.close(promise: nil) }
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         switch unwrapInboundIn(data) {
@@ -162,26 +216,26 @@ private final class MCPHTTPHandler: ChannelInboundHandler {
             }
             let request = HTTPRequest(method: head.method.rawValue, headers: headers, body: bytes, path: head.uri)
             let channel = context.channel, server = server
-            task = Task {
-                let response = await server.handle(request)
-                do {
-                    var outputHeaders = HTTPHeaders(response.headers.map { ($0.key, $0.value) })
-                    outputHeaders.replaceOrAdd(name: "Connection", value: "close")
-                    outputHeaders.replaceOrAdd(name: "Cache-Control", value: "no-store")
-                    let output = HTTPResponseHead(version: .http1_1, status: .init(statusCode: response.statusCode), headers: outputHeaders)
-                    try await channel.writeAndFlush(HTTPServerResponsePart.head(output)).get()
-                    if case .stream(let stream, _) = response {
-                        for try await data in stream {
-                            try Task.checkCancellation()
-                            try await channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(ByteBuffer(bytes: data)))).get()
-                        }
-                    } else if let data = response.bodyData {
-                        try await channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(ByteBuffer(bytes: data)))).get()
-                    }
-                    try await channel.writeAndFlush(HTTPServerResponsePart.end(nil)).get()
-                } catch { /* Disconnecting a client does not cancel an already submitted edit. */ }
-                try? await channel.close()
-            }
+            Task { await server.respond(request, on: channel) }
         }
     }
+}
+
+/// Registration happens synchronously on NIO's event loop, before a child initializer returns.
+/// The lock bridges NIO and the server actor without creating an untracked registration Task.
+private final class MCPConnections: @unchecked Sendable {
+    private let lock = NSLock()
+    private var accepting = false
+    private var channels: [ObjectIdentifier: Channel] = [:]
+    func open() { lock.lock(); defer { lock.unlock() }; accepting = true }
+    func rejectNew() { lock.lock(); defer { lock.unlock() }; accepting = false }
+    func insert(_ channel: Channel) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard accepting else { return false }
+        channels[ObjectIdentifier(channel)] = channel; return true
+    }
+    func remove(_ channel: Channel) { lock.lock(); defer { lock.unlock() }; channels[ObjectIdentifier(channel)] = nil }
+    func contains(_ channel: Channel) -> Bool { lock.lock(); defer { lock.unlock() }; return channels[ObjectIdentifier(channel)] != nil }
+    func snapshot() -> [Channel] { lock.lock(); defer { lock.unlock() }; return Array(channels.values) }
+    func removeAll() { lock.lock(); defer { lock.unlock() }; channels.removeAll() }
 }

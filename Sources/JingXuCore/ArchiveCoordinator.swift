@@ -323,11 +323,9 @@ public actor ArchiveCoordinator {
                             let file = ArchiveFile(asset: photo, from: photo.relativePath, to: "", fingerprint: fingerprint, hash: try FileHasher.sha256(of: original))
                             try verify(file, at: original); files.append(file)
                         }
-                        let sidecars = entries.filter { $0.pathExtension.lowercased() == "xmp" &&
-                            $0.deletingPathExtension().lastPathComponent == stem }
-                        // Both shared stem.xmp and explicit image.ext.xmp are supported.
-                        let explicit = entries.filter { candidate in candidate.pathExtension.lowercased() == "xmp" && photos.contains { $0.fileName == candidate.deletingPathExtension().lastPathComponent } }
-                        for sidecar in Set(sidecars + explicit).sorted(by: { $0.path < $1.path }) {
+                        let photosURLs = try photos.map { try url($0.relativePath, root: root) }
+                        let members = try MediaFileGroup.members(photos: photosURLs, entries: entries)
+                        for sidecar in members where sidecar.pathExtension.lowercased() == "xmp" {
                             let relative = FileIdentity.relativePath(of: sidecar, under: root)
                             let file = ArchiveFile(asset: nil, from: relative, to: "", fingerprint: try AnalysisFingerprint(url: sidecar), hash: try FileHasher.sha256(of: sidecar))
                             try verify(file, at: sidecar); files.append(file)

@@ -2,8 +2,8 @@ import Foundation
 import JingXuCore
 
 enum ArchiveChecks {
-    struct Failure: Error {}
-    static func check(_ value: Bool) throws { if !value { throw Failure() } }
+    struct Failure: Error { var line: Int = 0 }
+    static func check(_ value: Bool, line: Int = #line) throws { if !value { throw Failure(line: line) } }
     struct FailingMover: ArchiveMover {
         func move(_ from: URL, _ to: URL) throws {
             if from.pathExtension == "xmp" { throw CocoaError(.fileWriteNoPermission) }

@@ -113,11 +113,15 @@ final class AppModel: ObservableObject {
 
     var store: CatalogStore?
     private var scanner: DefaultSourceScanner?
-    private var importer: ImportCoordinator?
-    private var analysisCoordinator: AnalysisCoordinator?
+    var importer: ImportCoordinator?
+    var analysisCoordinator: AnalysisCoordinator?
     private var reanalysisCoordinator: QualityReanalysisCoordinator?
     var thumbnailProvider: DefaultThumbnailProvider?
     private var xmpExporter: DefaultXMPExporter?
+    @Published var importPlan: ImportPlan?
+    @Published var lastImportReport: ImportReport?
+    @Published var isShowingImportReport = false
+    @Published var isAnalyzingNewAssets = false
     private var operationTask: Task<Void, Never>?
     @Published var startupFailure: String?
     @Published var isStarting = true
@@ -164,16 +168,17 @@ final class AppModel: ObservableObject {
             self.archivePending = try await self.archiveCoordinator?.hasPending() ?? false
             self.deletionCoordinator = DeletionCoordinator(store: store, journalURL: try JingXuPaths.databaseURL().deletingLastPathComponent().appendingPathComponent("deletions.json"))
             self.scanner = scanner
-            self.importer = ImportCoordinator(repository: store, scanner: scanner)
+            self.importer = ImportCoordinator(repository: store, scanner: DefaultSourceScanner(repository: store, failureDetailLimit: .max))
             self.analysisCoordinator = AnalysisCoordinator(repository: store)
             self.reanalysisCoordinator = QualityReanalysisCoordinator(store: store, analyzer: self.analysisCoordinator)
-            self.thumbnailProvider = try DefaultThumbnailProvider(cacheDirectory: JingXuPaths.thumbnailCache())
+            let thumbnailCache = ThumbnailCache(directory: try JingXuPaths.thumbnailCache())
+            self.thumbnailProvider = DefaultThumbnailProvider(cache: thumbnailCache)
             self.xmpExporter = DefaultXMPExporter(repository: store)
             self.colorExportCoordinator = ColorExportCoordinator(store: store)
             self.photoShareCoordinator = PhotoShareCoordinator(store: store, cacheRoot: try JingXuPaths.applicationSupport().appendingPathComponent("Sharing"))
             do { try await self.photoShareCoordinator?.cleanupExpired() }
             catch { self.statusText = "分享缓存清理失败：\(error.localizedDescription)" }
-            self.colorThumbnails = ColorThumbnailProvider(directory: try JingXuPaths.thumbnailCache())
+            self.colorThumbnails = ColorThumbnailProvider(cache: thumbnailCache)
             self.colorPresets = try await store.colorPresets()
             let testID = ProcessInfo.processInfo.environment["JINGXU_UI_TEST_ROOT"].map {
                 SHA256.hash(data: Data(URL(fileURLWithPath: $0).standardizedFileURL.path.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -211,12 +216,14 @@ final class AppModel: ObservableObject {
                 if FileManager.default.fileExists(atPath: journal.path) {
                     let entries = try JSONDecoder().decode([DeletionJournalEntry].self, from: Data(contentsOf: journal))
                     let pendingIDs = Set(entries.filter { $0.state == "moved" || $0.state == "moving" }.flatMap { $0.relatedIDs ?? [$0.asset.id] })
-                    if !pendingIDs.isEmpty { try thumbnailProvider?.invalidate(assetIDs: pendingIDs) }
+                    if !pendingIDs.isEmpty { try await thumbnailProvider?.invalidate(assetIDs: pendingIDs) }
                 }
                 let warnings = try await deletionCoordinator?.recover() ?? []
                 if !warnings.isEmpty { errorMessage = warnings.joined(separator: "\n") }
             } catch { errorMessage = "恢复删除记录失败：\(error.localizedDescription)" }
             do {
+                try await store?.recoverImportJobs()
+                lastImportReport = try await store?.latestImportReport()
                 try await store?.recoverQualityJobs()
                 qualityJobs = try await store?.qualityJobs() ?? []
             } catch { errorMessage = "读取重算进度失败：\(error.localizedDescription)" }
@@ -436,7 +443,7 @@ final class AppModel: ObservableObject {
                 let report = try await store.cleanupMissingAssets(plan, backupURL: self.backupURL())
                 if let id = self.previewAsset?.id, report.removedIDs.contains(id) { self.closePreview() }
                 if let id = self.selectedAssetID, report.removedIDs.contains(id) { self.selectedAssetID = nil }
-                do { try self.thumbnailProvider?.invalidate(assetIDs: report.removedIDs) }
+                do { try await self.thumbnailProvider?.invalidate(assetIDs: report.removedIDs) }
                 catch { self.errorMessage = "索引已清理，但缩略图缓存清理失败：\(error.localizedDescription)" }
                 await self.reloadAll()
                 self.statusText = "已移除 \(report.removedIDs.count) 项失效索引，跳过 \(report.skipped.count) 项；原文件未改动，图库已备份"
@@ -465,11 +472,11 @@ final class AppModel: ObservableObject {
                 let report = try await deletionCoordinator.execute(plan) { done, total in
                     await MainActor.run { self.statusText = "正在移到废纸篓 \(done)/\(total)" }
                 }
-                try self.thumbnailProvider?.invalidate(assetIDs: Set(plan.files.map(\.id)))
+                try await self.thumbnailProvider?.invalidate(assetIDs: Set(plan.files.map(\.id)))
                 await self.reloadAll()
                 self.errorMessage = "成功 \(report.deleted)，跳过 \(report.skipped)，失败 \(report.failures.count)\(report.cancelled ? "；已取消后续项目" : "")\n" + (report.failures + report.skipReasons).prefix(30).joined(separator: "\n")
             } catch {
-                try? self.thumbnailProvider?.invalidate(assetIDs: Set(plan.files.map(\.id)))
+                try? await self.thumbnailProvider?.invalidate(assetIDs: Set(plan.files.map(\.id)))
                 await self.reloadAll()
                 self.errorMessage = "清理未完成：\(error.localizedDescription)"
             }
@@ -590,7 +597,7 @@ final class AppModel: ObservableObject {
                 try await self.checkDeletionRecovery()
                 self.closePreview()
                 let ids = try await store.removeSource(id: source.id, backupURL: self.backupURL())
-                try self.thumbnailProvider?.invalidate(assetIDs: ids)
+                try await self.thumbnailProvider?.invalidate(assetIDs: ids)
                 if self.selectedFolderID?.sourceID == source.id { self.applyBrowseScope(.smart(.all)) }
                 await self.reloadAll()
                 self.statusText = "来源已移除，原照片未改动；图库备份保存在 Backups"
@@ -634,7 +641,7 @@ final class AppModel: ObservableObject {
                 try await self.checkDeletionRecovery()
                 self.closePreview()
                 let report = try await store.mergeSources(plan, backupURL: self.backupURL())
-                try self.thumbnailProvider?.invalidate(assetIDs: report.invalidatedIDs)
+                try await self.thumbnailProvider?.invalidate(assetIDs: report.invalidatedIDs)
                 self.applyBrowseScope(.smart(.all))
                 await self.reloadAll()
                 self.errorMessage = "已合并 \(report.mergedGroups) 组来源。原文件未改动。\n" + report.skipped.joined(separator: "\n")
@@ -655,7 +662,7 @@ final class AppModel: ObservableObject {
     }
 
     func addFolder(_ url: URL) {
-        guard let store, let scanner, let analysisCoordinator else { return }
+        guard let store, let scanner, analysisCoordinator != nil else { return }
         startOperation {
             self.lastScanReport = nil
             do {
@@ -667,13 +674,8 @@ final class AppModel: ObservableObject {
                     }
                 }
                 await MainActor.run { self.scanProgress = nil; self.lastScanReport = report }
-                try await analysisCoordinator.analyzePending(sourceID: report.sourceID) { [weak self] progress in
-                    await MainActor.run {
-                        self?.analysisProgress = progress
-                        self?.statusText = "正在分析 \(progress.completed)/\(progress.total)：\(progress.currentFile)"
-                    }
-                }
-                await MainActor.run { self.analysisProgress = nil }
+                await self.reloadAll()
+                try await self.analyzeNewAssets(sourceID: report.sourceID)
                 await self.reloadAll()
             } catch is CancellationError {
                 await Task { await self.reloadAll() }.value
@@ -681,39 +683,6 @@ final class AppModel: ObservableObject {
             } catch {
                 await Task { await self.reloadAll() }.value
                 await MainActor.run { self.errorMessage = "索引失败：\(error.localizedDescription)" }
-            }
-        }
-    }
-
-    func importMedia(from source: URL, to destination: URL, batchName: String) {
-        guard let importer, let analysisCoordinator else { return }
-        isShowingImport = false
-        startOperation {
-            self.lastScanReport = nil
-            do {
-                let report = try await importer.importMedia(from: source, to: destination, batchName: batchName) { [weak self] progress in
-                    await MainActor.run {
-                        self?.importProgress = progress
-                        self?.statusText = "正在导入 \(progress.completedFiles + progress.skippedFiles)/\(progress.totalFiles)：\(progress.currentFile)"
-                    }
-                }
-                await MainActor.run { self.importProgress = nil; self.lastScanReport = report.scanReport }
-                if let sourceID = report.scanReport?.sourceID {
-                    try await analysisCoordinator.analyzePending(sourceID: sourceID) { [weak self] progress in
-                        await MainActor.run {
-                            self?.analysisProgress = progress
-                            self?.statusText = "正在分析 \(progress.completed)/\(progress.total)：\(progress.currentFile)"
-                        }
-                    }
-                }
-                await MainActor.run { self.analysisProgress = nil }
-                await self.reloadAll()
-            } catch is CancellationError {
-                await Task { await self.reloadAll() }.value
-                await MainActor.run { self.statusText = "导入已取消，已复制的文件保持完整" }
-            } catch {
-                await Task { await self.reloadAll() }.value
-                await MainActor.run { self.errorMessage = "导入失败：\(error.localizedDescription)" }
             }
         }
     }
@@ -728,7 +697,7 @@ final class AppModel: ObservableObject {
     }
 
     private func addFolderFromExistingSource(_ source: SourceRoot) {
-        guard let scanner, let analysisCoordinator else { return }
+        guard let scanner, analysisCoordinator != nil else { return }
         startOperation {
             self.lastScanReport = nil
             do {
@@ -736,10 +705,8 @@ final class AppModel: ObservableObject {
                     await MainActor.run { self?.scanProgress = progress }
                 }
                 await MainActor.run { self.scanProgress = nil; self.lastScanReport = report }
-                try await analysisCoordinator.analyzePending(sourceID: report.sourceID) { [weak self] progress in
-                    await MainActor.run { self?.analysisProgress = progress }
-                }
-                await MainActor.run { self.analysisProgress = nil }
+                await self.reloadAll()
+                try await self.analyzeNewAssets(sourceID: report.sourceID)
                 await self.reloadAll()
             } catch is CancellationError {
                 await Task { await self.reloadAll() }.value
@@ -968,7 +935,7 @@ final class AppModel: ObservableObject {
         do {
             if item.colorRevision > 0, let colorThumbnails {
                 let snapshot = try await store.colorSnapshot(assetID: item.id)
-                return NSImage(data: try await colorThumbnails.thumbnail(snapshot, pixelSize: pixelSize))
+                return NSImage(data: try await colorThumbnails.thumbnail(snapshot, pixelSize: pixelSize, scale: NSScreen.main?.backingScaleFactor ?? 2))
             }
             let root = try BookmarkStore.resolve(source).url
             let didAccess = root.startAccessingSecurityScopedResource()
@@ -996,15 +963,17 @@ final class AppModel: ObservableObject {
     }
 
     func clearThumbnailCache() {
-        do {
-            try thumbnailProvider?.clearDiskCache()
-            statusText = "缩略图缓存已清理，将按需重建"
-        } catch { errorMessage = "清理缓存失败：\(error.localizedDescription)" }
+        Task {
+            do {
+                try await thumbnailProvider?.clearDiskCache()
+                statusText = "缩略图缓存已清理，将按需重建"
+            } catch { errorMessage = "清理缓存失败：\(error.localizedDescription)" }
+        }
     }
 
     func startOperation(_ work: @escaping @MainActor @Sendable () async -> Void) {
         guard !photoShareSession.blocksFileChanges, !isShowingPhotoShare else { return }
-        guard !isWorking, colorEditor == nil, !isPreviewTransitioning, colorBatchPlan == nil, colorExportPlan == nil, !isShowingColorPresets, !isShowingColorExport, archivePlan == nil, deletionPlan == nil, missingAssetPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
+        guard !isWorking, importPlan == nil, !isShowingImportReport, colorEditor == nil, !isPreviewTransitioning, colorBatchPlan == nil, colorExportPlan == nil, !isShowingColorPresets, !isShowingColorExport, archivePlan == nil, deletionPlan == nil, missingAssetPlan == nil, sourceMergePlan == nil, qualityReanalysisPlan == nil else { return }
         isWorking = true
         operationTask = Task {
             do {
@@ -1091,7 +1060,7 @@ final class AppModel: ObservableObject {
                 let report = try await archiveCoordinator.execute(authorized, backupURL: self.backupURL())
                 self.statusText = report.summary
                 if !report.warnings.isEmpty { self.errorMessage = report.summary }
-                try self.thumbnailProvider?.invalidate(assetIDs: Set(authorized.groups.flatMap(\.files).compactMap { $0.asset?.id }))
+                try await self.thumbnailProvider?.invalidate(assetIDs: Set(authorized.groups.flatMap(\.files).compactMap { $0.asset?.id }))
             } catch { self.errorMessage = "归档未完成：\(error.localizedDescription)" }
             self.archivePending = (try? await archiveCoordinator.hasPending()) ?? true
             await self.reloadAll()
@@ -1100,7 +1069,7 @@ final class AppModel: ObservableObject {
 
     func resumeArchive(undo: Bool) {
         guard !photoShareSession.blocksFileChanges, !isShowingPhotoShare else { return }
-        guard !isWorking, colorEditor == nil, !isPreviewTransitioning, colorBatchPlan == nil, colorExportPlan == nil, !isShowingColorPresets, !isShowingColorExport, archivePlan == nil, let archiveCoordinator else { return }
+        guard !isWorking, importPlan == nil, !isShowingImportReport, colorEditor == nil, !isPreviewTransitioning, colorBatchPlan == nil, colorExportPlan == nil, !isShowingColorPresets, !isShowingColorExport, archivePlan == nil, let archiveCoordinator else { return }
         let alert = NSAlert()
         alert.messageText = undo ? "撤销最近一次归档？" : "继续未完成的归档？"
         alert.informativeText = "会根据日志复核文件并移动，绝不覆盖。冲突将保留并报告。"
@@ -1123,7 +1092,7 @@ final class AppModel: ObservableObject {
                 let report = try await archiveCoordinator.resume(undo: undo)
                 statusText = report.summary
                 if !report.warnings.isEmpty { errorMessage = report.summary }
-                try thumbnailProvider?.clearDiskCache()
+                try await thumbnailProvider?.clearDiskCache()
             } catch { errorMessage = "归档恢复失败：\(error.localizedDescription)" }
             archivePending = (try? await archiveCoordinator.hasPending()) ?? true
             await reloadAll()
