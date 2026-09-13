@@ -43,9 +43,10 @@ public struct ColorAdjustments: Codable, Equatable, Sendable {
     public var whites = 0.0, blacks = 0.0, saturation = 0.0, vibrance = 0.0
     public var whiteBalance: ColorWhiteBalance = .asShot
     public var temperature = 6500.0, tint = 0.0
+    public var crop: CropAdjustment?
     public init() {}
     public var isIdentity: Bool {
-        ColorParameter.allCases.filter { $0.group != .whiteBalance }.allSatisfy { self[$0] == 0 } &&
+        (crop == nil || crop == .full) && ColorParameter.allCases.filter { $0.group != .whiteBalance }.allSatisfy { self[$0] == 0 } &&
         (whiteBalance == .asShot || (whiteBalance == .relative && temperature == 0 && tint == 0))
     }
     public subscript(_ parameter: ColorParameter) -> Double {
@@ -66,6 +67,7 @@ public struct ColorAdjustments: Codable, Equatable, Sendable {
         }
     }
     public func validate(isRAW: Bool) throws {
+        try crop?.validate()
         guard whiteBalance == .asShot || (isRAW ? whiteBalance == .raw : whiteBalance == .relative) else {
             throw ColorEditError("白平衡类型不适用；RAW 使用绝对色温，普通图片使用相对调整。可取消选择白平衡组。")
         }

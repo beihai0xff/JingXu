@@ -9,7 +9,7 @@ extension AppModel {
         return selectedPhotoIDs
     }
     var canStartColorAction: Bool {
-        canInteractWithLibrary && !isWorking && !isLoadingAssets && !isSavingAnnotation && !isPreparingSelection && !photoShareSession.blocksFileChanges
+        canInteractWithLibrary && colorEditor?.isComposing != true && !isWorking && !isLoadingAssets && !isSavingAnnotation && !isPreparingSelection && !photoShareSession.blocksFileChanges
     }
     var canInteractWithLibrary: Bool {
         xmpPlan == nil && !isShowingKeywords && !isShowingPhotoShare && (!isWorking || isAnalyzingNewAssets) && importPlan == nil && !isShowingImportReport && !isPreviewTransitioning && colorBatchPlan == nil && colorExportPlan == nil &&
@@ -30,6 +30,7 @@ extension AppModel {
     func transitionPreview(_ action: @escaping @MainActor () -> Void) {
         guard !isPreviewTransitioning, (!isSavingAnnotation || keywordSaveTask != nil), !automationOwnsOperation else { return }
         if colorEditor == nil && keywordDraft == keywordSaved && keywordSaveTask == nil { action(); return }
+        colorEditor?.cancelComposition()
         isPreviewTransitioning = true
         Task {
             guard await flushKeywords() else { isPreviewTransitioning = false; return }
@@ -52,7 +53,7 @@ extension AppModel {
         session.start()
     }
     func discardStaleColor() {
-        guard let editor = colorEditor, let store, !editor.isSaving, !isPreviewTransitioning else { return }
+        guard let editor = colorEditor, let store, !editor.isComposing, !editor.isSaving, !isPreviewTransitioning else { return }
         let alert = NSAlert()
         alert.messageText = "放弃此照片的旧调整？"
         alert.informativeText = "请先重新扫描来源。将备份图库并清除当前照片的旧调色记录，原片保持不变。"

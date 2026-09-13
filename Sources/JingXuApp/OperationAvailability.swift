@@ -6,6 +6,7 @@ extension AppModel {
     func operationBlockReason(_ operation: LibraryOperation) -> String? {
         if isStarting || startupFailure != nil { return "图库尚未打开" }
         if automationOwnsOperation { return "Codex 正在操作照片" }
+        if colorEditor?.isComposing == true && operation != .browse { return "请先应用或取消构图" }
         if isLoadingAssets { return "正在更新查询结果" }
         if isSavingAnnotation { return "正在保存标注" }
         if isPreparingSelection { return "正在读取所选照片" }

@@ -41,6 +41,18 @@ private struct TestTrash: TrashService {
 private enum JingXuChecks {
     static func main() async throws {
         setenv("SWIFTNIO_STRICT", "1", 1)
+        if let index = CommandLine.arguments.firstIndex(of: "--composition-review"), CommandLine.arguments.count > index + 2 {
+            try await CompositionChecks.reviewFiles(URL(fileURLWithPath: CommandLine.arguments[index + 1]),
+                output: URL(fileURLWithPath: CommandLine.arguments[index + 2]))
+            return
+        }
+        if CommandLine.arguments.contains("--composition-checks") {
+            try CompositionChecks.geometry()
+            try await CompositionChecks.rendering()
+            try await CompositionChecks.editing()
+            print("构图几何、渲染、导出与编辑会话检查通过")
+            return
+        }
         if CommandLine.arguments.contains("--reliability-checks") {
             try await ImportChecks.groupingAndRetry()
             try await ImportChecks.failuresAndRecovery()
@@ -134,6 +146,9 @@ private enum JingXuChecks {
             return
         }
         let checks: [(String, () async throws -> Void)] = [
+            ("构图几何、主体保护与裁剪参数", { try CompositionChecks.geometry() }),
+            ("裁剪方向、预览、缩略图及成片导出", CompositionChecks.rendering),
+            ("构图草稿、取消、保存恢复与过期请求", CompositionChecks.editing),
             ("XMP 固定清单、不覆盖竞争、身份变化与取消", WorkflowChecks.xmp),
             ("批量标注、字段撤销、相册与事务失败", WorkflowChecks.annotations),
             ("十万项游标分页、跨页目标与字面搜索", WorkflowChecks.pagination),
