@@ -9,6 +9,7 @@ public actor ThumbnailRequests {
     }
     private var requests: [String: Request] = [:]
     public init() {}
+    package var pendingSubscriberCount: Int { requests.values.reduce(0) { $0 + $1.waiters.count } }
     public func data(key: String, operation: @escaping @Sendable () async throws -> Data) async throws -> Data {
         let subscriber = UUID()
         return try await withTaskCancellationHandler {

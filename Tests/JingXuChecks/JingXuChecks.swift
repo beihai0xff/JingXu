@@ -41,6 +41,11 @@ private struct TestTrash: TrashService {
 private enum JingXuChecks {
     static func main() async throws {
         setenv("SWIFTNIO_STRICT", "1", 1)
+        if CommandLine.arguments.contains("--thumbnail-request-checks") {
+            for _ in 0..<100 { try await WorkflowChecks.coalescing() }
+            print("缩略图合并与独立取消连续 100 次检查通过")
+            return
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--composition-review"), CommandLine.arguments.count > index + 2 {
             try await CompositionChecks.reviewFiles(URL(fileURLWithPath: CommandLine.arguments[index + 1]),
                 output: URL(fileURLWithPath: CommandLine.arguments[index + 2]))
