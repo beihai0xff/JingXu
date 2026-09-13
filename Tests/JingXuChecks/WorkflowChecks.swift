@@ -170,15 +170,42 @@ enum WorkflowChecks {
 
     actor Calls {
         var count = 0
-        func render() async throws -> Data { count += 1; try await Task.sleep(for: .milliseconds(100)); return Data([7]) }
+        private var released = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func render() async throws -> Data {
+            count += 1
+            if !released { await withCheckedContinuation { waiters.append($0) } }
+            try Task.checkCancellation()
+            return Data([7])
+        }
+        func release() {
+            released = true
+            let pending = waiters; waiters.removeAll()
+            for waiter in pending { waiter.resume() }
+        }
     }
     static func coalescing() async throws {
         let requests = ThumbnailRequests(), calls = Calls()
         let cancelled = Task { try await requests.data(key: "same") { try await calls.render() } }
         let retained = Task { try await requests.data(key: "same") { try await calls.render() } }
-        try await Task.sleep(for: .milliseconds(20)); cancelled.cancel()
+        // Keep the render suspended until both subscriptions exist and cancellation
+        // has completed; elapsed time does not prove task scheduling order on CI.
+        do {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+            while await requests.pendingSubscriberCount != 2 {
+                try check(ContinuousClock.now < deadline, "缩略图订阅未就绪")
+                await Task.yield()
+            }
+        } catch {
+            cancelled.cancel(); retained.cancel(); await calls.release()
+            throw error
+        }
+        cancelled.cancel()
         do { _ = try await cancelled.value; throw ColorChecks.Failure(description: "订阅取消未传播") } catch is CancellationError {}
+        try check(await requests.pendingSubscriberCount == 1, "取消未移除独立订阅")
+        await calls.release()
         try check(try await retained.value == Data([7]), "一个订阅取消了其他订阅")
         try check(await calls.count == 1, "相同缩略图请求未合并")
+        try check(await requests.pendingSubscriberCount == 0, "完成后遗留缩略图订阅")
     }
 }
