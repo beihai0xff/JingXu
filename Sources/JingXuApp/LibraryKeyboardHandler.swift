@@ -40,6 +40,12 @@ final class KeyboardView: NSView {
 
 extension AppModel {
     func handleLibraryKey(code: UInt16, text: String, shift: Bool, command: Bool) -> Bool {
+        if colorEditor?.isComposing == true {
+            guard !command else { return false }
+            if code == 53 { colorEditor?.cancelComposition(); return true }
+            if code == 123 || code == 124 { navigatePreview(code == 123 ? -1 : 1); return true }
+            return false
+        }
         if command {
             if text == "a", previewAsset == nil { selectVisiblePhotos(); return true }
             if text == "z" { performUndo(redo: shift); return true }

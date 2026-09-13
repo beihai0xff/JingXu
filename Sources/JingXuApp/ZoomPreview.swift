@@ -37,12 +37,14 @@ struct ZoomPreview: View {
                 }.disabled(!model.canNavigatePreview(1)).help("下一张（→）")
                 Menu("\(item.rating) 星") {
                     ForEach(0...5, id: \.self) { value in Button(value == 0 ? "无评分" : "\(value) 星") { model.updateRating(value) } }
-                }.help("0–5 评分；Shift 加数字评分并下一张")
+                }.help("0–5 评分；Shift 加数字评分并下一张").disabled(model.colorEditor?.isComposing == true)
                 if item.flag == .rejected {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.red).accessibilityLabel("已淘汰").help("已淘汰（U 取消）")
                 }
                 Spacer()
+                Button("构图") { model.beginComposition() }
+                    .disabled(!model.canStartColorAction).help("为当前照片推荐取景，并手动裁剪")
                 Button(model.colorEditor == nil ? "调色" : "完成调色") {
                     if model.colorEditor == nil { model.beginColorEditing() } else { model.finishColorEditing() }
                 }.disabled(!model.canStartColorAction)
@@ -54,15 +56,15 @@ struct ZoomPreview: View {
                     Text("嵌入预览").font(.caption).foregroundStyle(.secondary)
                         .help("当前显示文件内嵌预览；100% 按原片尺寸显示，细节受嵌入预览分辨率限制")
                 }
-                Button("适应") { action = "fit"; command += 1 }.help("适应窗口，完整显示照片")
+                Button("适应") { action = "fit"; command += 1 }.help("适应窗口，完整显示照片").disabled(model.colorEditor?.isComposing == true)
                 Button("100%") { action = "actual"; command += 1 }
-                    .help("按屏幕物理像素查看")
+                    .help("按屏幕物理像素查看").disabled(model.colorEditor?.isComposing == true)
                 Button { action = "out"; command += 1 } label: {
                     Label("缩小", systemImage: "minus").labelStyle(.iconOnly)
-                }.help("缩小")
+                }.help("缩小").disabled(model.colorEditor?.isComposing == true)
                 Button { action = "in"; command += 1 } label: {
                     Label("放大", systemImage: "plus").labelStyle(.iconOnly)
-                }.help("放大")
+                }.help("放大").disabled(model.colorEditor?.isComposing == true)
                 Divider().frame(height: 16)
                 Button { showsFilmstrip.toggle() } label: {
                     Label("胶片栏", systemImage: "rectangle.bottomthird.inset.filled")
@@ -78,28 +80,36 @@ struct ZoomPreview: View {
             .buttonStyle(.borderless).controlSize(.small)
             .padding(.horizontal, 12).frame(height: 36)
             .background(Color(nsColor: .controlBackgroundColor))
-            ZoomScroll(image: model.colorEditor?.result?.image ?? image, assetID: item.id,
-                nativeSize: model.colorEditor?.result?.nativeSize ?? nativeSize,
-                action: action, command: command, onExit: { model.closePreview() })
-                .overlay {
-                    if model.colorEditor != nil {
-                        if model.colorEditor?.result == nil && model.colorEditor?.renderError == nil {
-                            ProgressView("正在解码原片…").padding().background(.regularMaterial)
+            if let draft = model.colorEditor?.composition {
+                CompositionCanvas(draft: draft)
+            } else {
+                ZoomScroll(image: model.colorEditor?.result?.image ?? image, assetID: item.id,
+                    nativeSize: model.colorEditor?.result?.nativeSize ?? nativeSize,
+                    action: action, command: command, onExit: { model.closePreview() })
+                    .overlay {
+                        if model.colorEditor != nil {
+                            if model.colorEditor?.result == nil && model.colorEditor?.renderError == nil {
+                                ProgressView("正在解码原片…").padding().background(.regularMaterial)
+                            }
+                        } else if let loadError {
+                            VStack(spacing: 10) {
+                                Text("载入失败").font(.headline)
+                                Text(loadError).font(.caption).multilineTextAlignment(.center)
+                                Button("重试") { retry += 1 }
+                            }
+                            .padding(20).frame(maxWidth: 360)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                        } else if isLoading {
+                            ProgressView().controlSize(.small).allowsHitTesting(false)
                         }
-                    } else if let loadError {
-                        VStack(spacing: 10) {
-                            Text("载入失败").font(.headline)
-                            Text(loadError).font(.caption).multilineTextAlignment(.center)
-                            Button("重试") { retry += 1 }
-                        }
-                        .padding(20).frame(maxWidth: 360)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-                    } else if isLoading {
-                        ProgressView().controlSize(.small).allowsHitTesting(false)
                     }
-                }
+            }
         }
-        .onExitCommand { model.closePreview() }
+        .onExitCommand {
+            guard !model.isPreviewTransitioning else { return }
+            if model.colorEditor?.isComposing == true { model.colorEditor?.cancelComposition() }
+            else { model.closePreview() }
+        }
         .onDisappear { loadGeneration = UUID(); image = nil; originalPreview = nil; nativeSize = .zero; imageAssetID = nil }
         .onChange(of: model.colorEditor?.result.map { ObjectIdentifier($0.image) }) { _, _ in
             guard let result = model.colorEditor?.result else { return }

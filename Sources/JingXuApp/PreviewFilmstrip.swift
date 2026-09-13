@@ -52,7 +52,7 @@ private struct FilmstripCell: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            if item.isColorEdited { Image(systemName: "slider.horizontal.3").font(.caption2).padding(3).background(.purple).help("已调色") }
+            if item.isColorEdited { Image(systemName: "slider.horizontal.3").font(.caption2).padding(3).background(.purple).help("已编辑") }
         }
         .overlay(alignment: .bottom) {
             if item.rating > 0 {

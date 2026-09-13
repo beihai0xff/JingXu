@@ -69,6 +69,7 @@ public actor ColorImageRenderer {
     private var input: Input?
     public init() {}
     public func release() { input = nil; context.clearCaches() }
+    public func validateSource(_ snapshot: ColorEditSnapshot) throws { _ = try ColorSourceAccess(snapshot) }
 
     private func load(_ snapshot: ColorEditSnapshot, access: ColorSourceAccess) throws -> Input {
         let key = "\(snapshot.asset.id)-\(access.url.path)-\(access.fingerprint.identifier ?? "")-\(access.fingerprint.size)-\(access.fingerprint.modifiedAt.timeIntervalSince1970)"
@@ -131,7 +132,13 @@ public actor ColorImageRenderer {
         if a.contrast != 0 { image = image.applyingFilter("CIColorControls", parameters: [kCIInputContrastKey: pow(2, a.contrast / 100)]) }
         if a.vibrance != 0 { image = image.applyingFilter("CIVibrance", parameters: [kCIInputAmountKey: a.vibrance / 100]) }
         if a.saturation != 0 { image = image.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1 + a.saturation / 100]) }
-        return image.cropped(to: extent).transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY))
+        image = image.cropped(to: extent).transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY))
+        if let crop = a.crop {
+            let pixels = try crop.pixelRect(in: extent.size)
+            let rect = CGRect(x: pixels.minX, y: extent.height - pixels.maxY, width: pixels.width, height: pixels.height)
+            image = image.cropped(to: rect).transformed(by: CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
+        }
+        return image
     }
 
     public func render(_ snapshot: ColorEditSnapshot, adjustments: ColorAdjustments, maximumDimension: Int? = nil) throws -> ColorRenderedImage {

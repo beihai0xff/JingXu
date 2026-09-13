@@ -81,7 +81,8 @@ struct ContentView: View {
                 }
             }.padding(20).frame(width: 760, height: 520)
         }
-        .background(LibraryKeyboardHandler(enabled: !showsScanReport && !model.isShowingKeywords && model.operationBlockReason(.annotation) == nil, requiresCanvasFocus: model.colorEditor != nil) { code, text, shift, command in
+        .background(LibraryKeyboardHandler(enabled: !showsScanReport && !model.isShowingKeywords && model.operationBlockReason(model.colorEditor?.isComposing == true ? .browse : .annotation) == nil,
+            requiresCanvasFocus: model.colorEditor != nil && model.colorEditor?.isComposing != true) { code, text, shift, command in
             model.handleLibraryKey(code: code, text: text, shift: shift, command: command)
         })
         .sheet(item: $model.missingAssetPlan) { plan in
@@ -166,7 +167,10 @@ struct ContentView: View {
                         PreviewFilmstrip(items: model.previewFilmstrip, currentID: item.id)
                     }
                 }
-                if let editor = model.colorEditor {
+                if let draft = model.colorEditor?.composition {
+                    Divider()
+                    CompositionPanel(draft: draft).frame(width: 310)
+                } else if let editor = model.colorEditor {
                     Divider()
                     ColorEditPanel(session: editor).frame(width: 310)
                 } else if showsPreviewInspector {
@@ -572,7 +576,7 @@ private struct AssetCell: View {
                     .aspectRatio(1, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                 HStack(spacing: 4) {
-                    if item.isColorEdited { badge("slider.horizontal.3", color: .purple).help("已调色").accessibilityLabel("已调色") }
+                    if item.isColorEdited { badge("slider.horizontal.3", color: .purple).help("已编辑").accessibilityLabel("已编辑") }
                     if item.kind == .video { badge("video.fill", color: .blue) }
                     if item.hasPendingQualityWarning { badge("exclamationmark.triangle.fill", color: .orange) }
                     if item.similarGroupID != nil || item.issues.contains(.similarBurst) { badge("square.stack.3d.up", color: .blue) }
