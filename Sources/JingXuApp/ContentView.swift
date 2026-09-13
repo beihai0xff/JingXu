@@ -152,6 +152,7 @@ struct ContentView: View {
         }
         .modifier(ColorWorkflowPresentation())
         .onChange(of: model.minimumRating) { _, _ in model.requestFilters() }
+        .onChange(of: model.sortOrder) { _, _ in model.requestFilters() }
         .onChange(of: model.flagFilter) { _, _ in model.requestFilters() }
     }
 
@@ -328,6 +329,13 @@ struct ContentView: View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
             BrowseSearchField(text: $model.searchText, changed: { model.scheduleSearch() }, submit: { model.requestFilters() }, composing: { model.searchTask?.cancel() })
+            Picker("图片排序", selection: $model.sortOrder) {
+                ForEach(BrowseSortOrder.allCases) { order in
+                    Text(order.displayName).tag(order)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 145)
             Divider().frame(height: 18)
             Picker("最低评分", selection: $model.minimumRating) {
                 Text("全部评分").tag(0)

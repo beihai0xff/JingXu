@@ -19,7 +19,7 @@ extension AppModel {
     }
     func currentQuery() -> BrowseQuery { appliedQuery }
     func draftQuery(destination: SidebarDestination? = nil, includeSubdirectories: Bool? = nil) -> BrowseQuery {
-        var query = BrowseQuery(searchText: searchText.trimmingCharacters(in: .whitespacesAndNewlines), minimumRating: minimumRating, flag: flagFilter)
+        var query = BrowseQuery(searchText: searchText.trimmingCharacters(in: .whitespacesAndNewlines), minimumRating: minimumRating, flag: flagFilter, sortOrder: sortOrder)
         query.includeSubdirectories = includeSubdirectories ?? self.includeSubdirectories
         switch destination ?? sidebarSelection {
         case .smart(let collection): query.collection = collection

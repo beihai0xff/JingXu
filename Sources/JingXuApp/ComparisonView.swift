@@ -24,7 +24,7 @@ extension AppModel {
             Task {
                 defer { self.isPreparingSelection = false }
                 do {
-                    let query = BrowseQuery(similarGroupID: id)
+                    let query = BrowseQuery(similarGroupID: id, sortOrder: self.appliedQuery.sortOrder)
                     let page = try await store.browsePage(query, photosOnly: true, limit: 2)
                     guard page.items.count == 2 else { self.errorMessage = "相似组不足两张可比较照片"; return }
                     self.comparisonReturnQuery = self.appliedQuery

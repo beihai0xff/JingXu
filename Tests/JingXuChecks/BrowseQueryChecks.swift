@@ -6,14 +6,72 @@ enum BrowseQueryChecks {
     static func assertIndexes(_ db: Database) throws {
         let names = try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type = 'index'")
         try ColorChecks.check(names.contains("mediaAssets_browseOrder") && names.contains("mediaAssets_sourceBrowseOrder"), "浏览索引未补齐")
-        for sourceFilter in [false, true] {
-            let sql = "EXPLAIN QUERY PLAN SELECT id FROM mediaAssets \(sourceFilter ? "WHERE sourceID = 'source'" : "") ORDER BY COALESCE(capturedAt, modifiedAt) DESC, fileName ASC, id ASC LIMIT 2000"
-            let plan = try Row.fetchAll(db, sql: sql).map { $0["detail"] as String }.joined(separator: "\n")
-            try ColorChecks.check(!plan.contains("TEMP B-TREE") && plan.contains(sourceFilter ? "mediaAssets_sourceBrowseOrder" : "mediaAssets_browseOrder"), "浏览排序没有使用匹配索引：\(plan)")
+        for (direction, globalIndex, sourceIndex) in [
+            ("DESC", "mediaAssets_browseOrder", "mediaAssets_sourceBrowseOrder"),
+            ("ASC", "mediaAssets_oldestBrowseOrder", "mediaAssets_sourceOldestBrowseOrder")
+        ] {
+            for sourceFilter in [false, true] {
+                let sql = "EXPLAIN QUERY PLAN SELECT id FROM mediaAssets \(sourceFilter ? "WHERE sourceID = 'source'" : "") ORDER BY COALESCE(capturedAt, modifiedAt) \(direction), fileName ASC, id ASC LIMIT 2000"
+                let plan = try Row.fetchAll(db, sql: sql).map { $0["detail"] as String }.joined(separator: "\n")
+                try ColorChecks.check(!plan.contains("TEMP B-TREE") && plan.contains(sourceFilter ? sourceIndex : globalIndex), "浏览排序没有使用匹配索引：\(plan)")
+            }
+        }
+    }
+
+    static func sorting() async throws {
+        let root = try ColorChecks.root(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CatalogStore(databaseURL: root.appendingPathComponent("sort.sqlite"))
+        let source = SourceRoot(id: "sorting", name: "排序", bookmarkData: nil, pathHint: root.path)
+        try await store.upsertSource(source)
+        var fixtures: [MediaAsset] = []
+        for i in 0..<450 {
+            let date = Date(timeIntervalSince1970: Double((i * 17) % 23))
+            let asset = MediaAsset(id: String(format: "id-%03d", i), sourceID: source.id,
+                relativePath: "folder-\(i)/same.jpg", fileIdentifier: nil,
+                fileName: i % 2 == 0 ? "same.jpg" : "照片.jpg", uniformType: nil,
+                kind: i % 7 == 0 ? .video : .photo, fileSize: 10,
+                modifiedAt: i % 3 == 0 ? date : date.addingTimeInterval(1000),
+                capturedAt: i % 3 == 0 ? nil : date)
+            fixtures.append(asset)
+            try await store.upsertAsset(asset)
+        }
+        try ColorChecks.check(BrowseQuery().sortOrder == .oldestFirst, "默认不是最老在前")
+        for order in BrowseSortOrder.allCases {
+            for photosOnly in [false, true] {
+                let query = BrowseQuery(sourceID: source.id, sortOrder: order)
+                let expected = fixtures.filter { !photosOnly || $0.kind == .photo }.sorted {
+                    let left = $0.capturedAt ?? $0.modifiedAt, right = $1.capturedAt ?? $1.modifiedAt
+                    if left != right { return order == .oldestFirst ? left < right : left > right }
+                    if $0.fileName != $1.fileName { return $0.fileName.utf8.lexicographicallyPrecedes($1.fileName.utf8) }
+                    return $0.id < $1.id
+                }.map(\.id)
+                var seen: [String] = []
+                var cursor: BrowseCursor?
+                var previous: BrowsePage?
+                repeat {
+                    let page = try await store.browsePage(query, cursor: cursor, photosOnly: photosOnly, count: true)
+                    try ColorChecks.check(page.total == expected.count && !page.items.isEmpty, "排序分页计数错误或提前结束")
+                    if let previous, let first = page.items.first {
+                        let back = try await store.browsePage(query, cursor: BrowseCursor(first), reverse: true, photosOnly: photosOnly)
+                        try ColorChecks.check(back.items.map(\.id) == previous.items.map(\.id), "反向排序分页重复或漏项")
+                    }
+                    let refreshed = try await store.browsePage(query, cursor: page.items.first.map(BrowseCursor.init), inclusive: true, photosOnly: photosOnly)
+                    try ColorChecks.check(refreshed.items.map(\.id) == page.items.map(\.id), "排序刷新丢失锚点")
+                    seen += page.items.map(\.id)
+                    previous = page
+                    cursor = page.items.last.map(BrowseCursor.init)
+                    if !page.hasNext { break }
+                    try ColorChecks.check(seen.count <= expected.count, "分页未前进")
+                } while true
+                try ColorChecks.check(seen == expected, "排序遍历顺序错误、重复或漏项")
+                let selected = try await store.assetListItems(ids: expected.reversed(), matching: query)
+                try ColorChecks.check(selected.map(\.id) == expected, "跨批次选择排序不一致")
+            }
         }
     }
 
     static func run() async throws {
+        try await sorting()
         let root = try ColorChecks.root(); defer { try? FileManager.default.removeItem(at: root) }
         let url = root.appendingPathComponent("Catalog.sqlite")
         let store = try CatalogStore(databaseURL: url)

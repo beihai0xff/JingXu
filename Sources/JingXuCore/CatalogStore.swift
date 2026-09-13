@@ -61,6 +61,8 @@ public actor CatalogStore: CatalogRepository {
         try dbPool.write { db in
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS mediaAssets_browseOrder ON mediaAssets(COALESCE(capturedAt, modifiedAt) DESC, fileName ASC, id ASC)")
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS mediaAssets_sourceBrowseOrder ON mediaAssets(sourceID, COALESCE(capturedAt, modifiedAt) DESC, fileName ASC, id ASC)")
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS mediaAssets_oldestBrowseOrder ON mediaAssets(COALESCE(capturedAt, modifiedAt) ASC, fileName ASC, id ASC)")
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS mediaAssets_sourceOldestBrowseOrder ON mediaAssets(sourceID, COALESCE(capturedAt, modifiedAt) ASC, fileName ASC, id ASC)")
         }
         try Data().write(to: databaseURL.appendingPathExtension("initialized"), options: .atomic)
     }
@@ -572,10 +574,11 @@ public actor CatalogStore: CatalogRepository {
             conditions.append("a.id IN (" + assetIDs.map { _ in "?" }.joined(separator: ",") + ")")
             arguments += StatementArguments(assetIDs)
         }
+        let dateAscending = (query.sortOrder == .oldestFirst) != reverse
         if let cursor {
-            conditions.append("COALESCE(a.capturedAt, a.modifiedAt) \(reverse ? ">=" : "<=") ?")
+            conditions.append("COALESCE(a.capturedAt, a.modifiedAt) \(dateAscending ? ">=" : "<=") ?")
             arguments += [cursor.date]
-            let dateOp = reverse ? ">" : "<", textOp = reverse ? "<" : ">"
+            let dateOp = dateAscending ? ">" : "<", textOp = reverse ? "<" : ">"
             conditions.append("(COALESCE(a.capturedAt, a.modifiedAt) \(dateOp) ? OR (COALESCE(a.capturedAt, a.modifiedAt) = ? AND (a.fileName \(textOp) ? OR (a.fileName = ? AND a.id \(textOp)\(inclusive ? "=" : "") ?))))")
             arguments += [cursor.date, cursor.date, cursor.name, cursor.name, cursor.id]
         }
@@ -659,7 +662,7 @@ public actor CatalogStore: CatalogRepository {
             FROM mediaAssets a
             \(joins)
             \(whereClause)
-            ORDER BY COALESCE(a.capturedAt, a.modifiedAt) \(reverse ? "ASC" : "DESC"), a.fileName \(reverse ? "DESC" : "ASC"), a.id \(reverse ? "DESC" : "ASC")
+            ORDER BY COALESCE(a.capturedAt, a.modifiedAt) \(dateAscending ? "ASC" : "DESC"), a.fileName \(reverse ? "DESC" : "ASC"), a.id \(reverse ? "DESC" : "ASC")
             \(paginated ? "LIMIT ?" : "")
             """
         return (sql, arguments)

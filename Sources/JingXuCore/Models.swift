@@ -450,6 +450,19 @@ public enum SmartCollection: String, CaseIterable, Sendable, Identifiable, Hasha
     }
 }
 
+public enum BrowseSortOrder: String, CaseIterable, Sendable, Identifiable {
+    case oldestFirst
+    case newestFirst
+
+    public var id: String { rawValue }
+    public var displayName: String {
+        switch self {
+        case .oldestFirst: "时间：最老在前"
+        case .newestFirst: "时间：最新在前"
+        }
+    }
+}
+
 public struct BrowseQuery: Sendable, Equatable {
     public static func == (lhs: Self, rhs: Self) -> Bool {
         let sameDirectory: Bool
@@ -461,7 +474,7 @@ public struct BrowseQuery: Sendable, Equatable {
         return sameDirectory && lhs.sourceID == rhs.sourceID && lhs.collection == rhs.collection &&
             lhs.albumID == rhs.albumID && lhs.includeSubdirectories == rhs.includeSubdirectories &&
             lhs.searchText == rhs.searchText && lhs.minimumRating == rhs.minimumRating &&
-            lhs.flag == rhs.flag && lhs.similarGroupID == rhs.similarGroupID
+            lhs.flag == rhs.flag && lhs.similarGroupID == rhs.similarGroupID && lhs.sortOrder == rhs.sortOrder
     }
 
     public var collection: SmartCollection
@@ -473,6 +486,7 @@ public struct BrowseQuery: Sendable, Equatable {
     public var minimumRating: Int
     public var flag: AssetFlag?
     public var similarGroupID: String?
+    public var sortOrder: BrowseSortOrder
 
     public init(
         collection: SmartCollection = .all,
@@ -483,8 +497,10 @@ public struct BrowseQuery: Sendable, Equatable {
         searchText: String = "",
         minimumRating: Int = 0,
         flag: AssetFlag? = nil,
-        similarGroupID: String? = nil
+        similarGroupID: String? = nil,
+        sortOrder: BrowseSortOrder = .oldestFirst
     ) {
+        self.sortOrder = sortOrder
         self.collection = collection
         self.sourceID = sourceID
         self.relativeDirectory = relativeDirectory

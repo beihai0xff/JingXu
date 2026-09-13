@@ -26,6 +26,7 @@ final class AppModel: ObservableObject {
     @Published var folderRoots: [CatalogFolderNode] = []
     @Published var expandedFolders = Set<CatalogFolderID>()
     @Published var includeSubdirectories: Bool
+    @Published var sortOrder: BrowseSortOrder = .oldestFirst
     @Published var matchingAssetCount = 0
     @Published var isLoadingAssets = false
     var assetRequestID = UUID()

@@ -53,7 +53,9 @@ extension CatalogStore {
                 result += try AssetListItem.fetchAll(db, sql: sql, arguments: args)
             }
             return result.sorted {
-                if $0.browseDate != $1.browseDate { return $0.browseDate > $1.browseDate }
+                if $0.browseDate != $1.browseDate {
+                    return query.sortOrder == .oldestFirst ? $0.browseDate < $1.browseDate : $0.browseDate > $1.browseDate
+                }
                 if !$0.fileName.utf8.elementsEqual($1.fileName.utf8) { return $0.fileName.utf8.lexicographicallyPrecedes($1.fileName.utf8) }
                 return $0.id.utf8.lexicographicallyPrecedes($1.id.utf8)
             }
