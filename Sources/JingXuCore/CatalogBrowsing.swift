@@ -41,6 +41,28 @@ extension CatalogStore {
         }
     }
 
+    /// Return a complete grid page around an anchor, rather than truncating the
+    /// result to the anchor and everything after it. All reads share one snapshot.
+    public func browsePageContaining(_ query: BrowseQuery, anchor: BrowseCursor, limit: Int = 200) throws -> BrowsePage {
+        let pageSize = max(1, limit)
+        return try dbPool.read { db in
+            let (anchorSQL, anchorArgs) = try Self.assetQuerySQL(query, rejectedOnly: false, assetID: anchor.id, limit: 1)
+            let current = try AssetListItem.fetchOne(db, sql: anchorSQL, arguments: anchorArgs).map(BrowseCursor.init) ?? anchor
+            let (rankSQL, rankArgs) = try Self.assetQuerySQL(query, rejectedOnly: false,
+                projection: "COUNT(*)", paginated: false, cursor: current, reverse: true)
+            let preceding = try Int.fetchOne(db, sql: rankSQL, arguments: rankArgs) ?? 0
+            let (countSQL, countArgs) = try Self.assetQuerySQL(query, rejectedOnly: false,
+                projection: "COUNT(*)", paginated: false)
+            let total = try Int.fetchOne(db, sql: countSQL, arguments: countArgs) ?? 0
+            // A removed/filtered-out last photo returns to the last surviving page.
+            let offset = min(preceding, max(0, total - 1)) / pageSize * pageSize
+            let (sql, args) = try Self.assetQuerySQL(query, rejectedOnly: false, limit: pageSize)
+            let items = try AssetListItem.fetchAll(db, sql: sql + " OFFSET ?", arguments: args + [offset])
+            return BrowsePage(items: items, hasPrevious: offset > 0,
+                              hasNext: offset + items.count < total, total: total)
+        }
+    }
+
     /// Batches IDs without coupling explicit selections to a loaded page.
     public func assetListItems(ids: [String], matching query: BrowseQuery = BrowseQuery()) throws -> [AssetListItem] {
         let unique = Array(Set(ids)).sorted()

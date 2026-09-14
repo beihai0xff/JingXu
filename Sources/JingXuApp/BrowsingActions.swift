@@ -50,7 +50,7 @@ extension AppModel {
         let changedScope = pendingQuery != nil
         await loadBrowsePage(cursor: changedScope ? nil : assets.first.map(BrowseCursor.init), inclusive: !changedScope)
     }
-    func loadBrowsePage(cursor: BrowseCursor? = nil, reverse: Bool = false, inclusive: Bool = false) async {
+    func loadBrowsePage(cursor: BrowseCursor? = nil, reverse: Bool = false, inclusive: Bool = false, containing: Bool = false) async {
         guard let store else { return }
         let query = pendingQuery ?? appliedQuery
         let destination = pendingDestination
@@ -59,7 +59,12 @@ extension AppModel {
         isLoadingAssets = true; browseError = nil; retryBrowseAction = nil
         defer { if assetRequestID == request { isLoadingAssets = false } }
         do {
-            let page = try await store.browsePage(query, cursor: cursor, reverse: reverse, inclusive: inclusive, count: true)
+            let page: BrowsePage
+            if containing, let cursor {
+                page = try await store.browsePageContaining(query, anchor: cursor)
+            } else {
+                page = try await store.browsePage(query, cursor: cursor, reverse: reverse, inclusive: inclusive, count: true)
+            }
             let selected = changesQuery ? [] : selectedPhotoIDs
             let valid = try await store.assetListItems(ids: selected, matching: query)
             let previousPreview = previewAsset?.id
@@ -95,7 +100,7 @@ extension AppModel {
             retryBrowseAction = { [weak self] in
                 guard let self else { return }
                 self.pendingQuery = query; self.pendingDestination = destination
-                self.browseTask = Task { await self.loadBrowsePage(cursor: cursor, reverse: reverse, inclusive: inclusive) }
+                self.browseTask = Task { await self.loadBrowsePage(cursor: cursor, reverse: reverse, inclusive: inclusive, containing: containing) }
             }
         }
     }

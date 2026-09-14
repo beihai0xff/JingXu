@@ -322,7 +322,7 @@ struct ContentView: View {
                             .onChange(of: model.gridSize) { _, _ in model.gridColumns = max(1, Int((geometry.size.width - 16) / (model.gridSize + 12))) }
                         })
                     }
-                    .onChange(of: model.selectedAssetID) { _, id in
+                    .onChange(of: model.selectedAssetID, initial: true) { _, id in
                         if let id { proxy.scrollTo(id) }
                     }
                 }

@@ -24,7 +24,7 @@ enum BrowseQueryChecks {
         let source = SourceRoot(id: "sorting", name: "排序", bookmarkData: nil, pathHint: root.path)
         try await store.upsertSource(source)
         var fixtures: [MediaAsset] = []
-        for i in 0..<450 {
+        for i in 0..<2_005 {
             let date = Date(timeIntervalSince1970: Double((i * 17) % 23))
             let asset = MediaAsset(id: String(format: "id-%03d", i), sourceID: source.id,
                 relativePath: "folder-\(i)/same.jpg", fileIdentifier: nil,
@@ -64,6 +64,17 @@ enum BrowseQueryChecks {
                     try ColorChecks.check(seen.count <= expected.count, "分页未前进")
                 } while true
                 try ColorChecks.check(seen == expected, "排序遍历顺序错误、重复或漏项")
+                if !photosOnly {
+                    for index in [0, 198, 199, 200, 399, expected.count - 1] {
+                        let item = try await store.assetListItems(ids: [expected[index]], matching: query).first!
+                        let restored = try await store.browsePageContaining(query, anchor: BrowseCursor(item))
+                        let start = index / 200 * 200
+                        try ColorChecks.check(restored.items.map(\.id) == Array(expected[start..<min(start + 200, expected.count)]),
+                                              "单图返回未恢复完整页：\(order) / \(index)")
+                        try ColorChecks.check(restored.total == expected.count && restored.hasPrevious == (start > 0) &&
+                                              restored.hasNext == (start + 200 < expected.count), "单图返回的总数或翻页边界错误")
+                    }
+                }
                 let selected = try await store.assetListItems(ids: expected.reversed(), matching: query)
                 try ColorChecks.check(selected.map(\.id) == expected, "跨批次选择排序不一致")
             }
@@ -108,6 +119,17 @@ enum BrowseQueryChecks {
                 try ColorChecks.check(paged.total == total && paged.items.count == min(1, total), "分页混入其他范围或截断完整计数")
             }
         }
+        let scopedQuery = BrowseQuery(sourceID: source.id, relativeDirectory: "a", sortOrder: .newestFirst)
+        let scoped = try await store.browsePage(scopedQuery, count: true)
+        let lastAnchor = BrowseCursor(scoped.items.last!)
+        let restored = try await store.browsePageContaining(scopedQuery, anchor: lastAnchor)
+        try ColorChecks.check(restored.items.map(\.id) == scoped.items.map(\.id) && !restored.hasPrevious && !restored.hasNext,
+                              "小目录查看最后一张返回后丢失前面的照片")
+        let filtered = try await store.browsePageContaining(BrowseQuery(sourceID: source.id, relativeDirectory: "a", minimumRating: 5), anchor: lastAnchor)
+        try ColorChecks.check(filtered.items.map(\.id) == ["id-0"] && filtered.total == 1,
+                              "返回时当前照片被筛选隐藏导致空页或串范围")
+        let empty = try await store.browsePageContaining(BrowseQuery(sourceID: source.id, searchText: "不存在的文件"), anchor: lastAnchor)
+        try ColorChecks.check(empty.items.isEmpty && empty.total == 0 && !empty.hasPrevious && !empty.hasNext, "空范围返回页边界错误")
         let db = try DatabaseQueue(path: url.path)
         try await db.read { try assertIndexes($0) }
         let before = try LegacyMigrationChecks.snapshot(url)

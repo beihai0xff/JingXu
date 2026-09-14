@@ -498,7 +498,14 @@ final class AppModel: ObservableObject {
         transitionPreview {
             let anchor = self.previewAsset.map(BrowseCursor.init)
             self.dismissPreview()
-            if let anchor { Task { await self.loadBrowsePage(cursor: anchor, inclusive: true); self.syncKeywordDraft() } }
+            guard let anchor else { return }
+            if self.assets.contains(where: { $0.id == anchor.id }) {
+                self.selectedAssetID = anchor.id
+                self.syncKeywordDraft()
+            } else {
+                self.browseTask?.cancel()
+                self.browseTask = Task { await self.loadBrowsePage(cursor: anchor, containing: true) }
+            }
         }
     }
     /// Used after drafts have drained. File operations refresh the grid themselves.
