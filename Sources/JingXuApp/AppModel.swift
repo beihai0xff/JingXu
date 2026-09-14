@@ -24,6 +24,7 @@ final class AppModel: ObservableObject {
     }
     @Published var sidebarSelection: SidebarDestination? = .smart(.all)
     @Published var folderRoots: [CatalogFolderNode] = []
+    @Published var folderOutline: [CatalogFolderOutline] = []
     @Published var expandedFolders = Set<CatalogFolderID>()
     @Published var includeSubdirectories: Bool
     @Published var sortOrder: BrowseSortOrder = .oldestFirst
@@ -328,6 +329,7 @@ final class AppModel: ObservableObject {
             guard folderRequestID == request else { return }
             let knownSources = Set(sources.map(\.id))
             sources = newSources; albums = newAlbums; folderRoots = newFolders
+            folderOutline = CatalogFolderOutline.build(sources: newSources, roots: newFolders)
             for source in sources where !knownSources.contains(source.id) {
                 expandedFolders.insert(CatalogFolderID(sourceID: source.id))
             }
