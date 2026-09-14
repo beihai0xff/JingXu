@@ -201,13 +201,20 @@ struct ContentView: View {
 
             Section("来源") {
                 ForEach(model.visibleFolderRows) { row in
-                    FolderSidebarLabel(row: row)
-                    .tag(row.destination)
-                    .contextMenu {
-                        if row.depth == 0 {
-                            Button("移除来源…", role: .destructive) { model.removeSource(row.source) }
-                                .disabled(model.isWorking || model.fileOperationsBlockedByShare)
-                        }
+                    if row.outline.node != nil {
+                        FolderSidebarLabel(row: row)
+                            // List selects SidebarDestination; an Optional tag does not
+                            // match that identity on the supported macOS List implementation.
+                            .tag(row.destination)
+                            .contextMenu {
+                                if row.outline.isSourceRoot {
+                                    Button("移除来源…", role: .destructive) { model.removeSource(row.source) }
+                                        .disabled(model.isWorking || model.fileOperationsBlockedByShare)
+                                }
+                            }
+                    } else {
+                        // Structural ancestors only expand; they have no query destination.
+                        FolderSidebarLabel(row: row)
                     }
                 }
                 Button("添加文件夹…") { model.chooseAndAddFolder() }

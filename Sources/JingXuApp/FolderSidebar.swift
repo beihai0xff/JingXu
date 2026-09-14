@@ -3,29 +3,25 @@ import SwiftUI
 
 /// A flat visible outline keeps collapsed subtrees out of SwiftUI's view graph.
 struct FolderSidebarRow: Identifiable {
-    let node: CatalogFolderNode
+    let outline: CatalogFolderOutline
     let source: SourceRoot
     let depth: Int
-    var id: CatalogFolderID { node.id }
+    var id: CatalogFolderID { outline.id }
     var destination: SidebarDestination {
-        depth == 0 ? .source(source.id) : .folder(id)
+        outline.isSourceRoot ? .source(source.id) : .folder(id)
     }
 }
 
 extension AppModel {
     var visibleFolderRows: [FolderSidebarRow] {
         var rows: [FolderSidebarRow] = []
-        func append(_ node: CatalogFolderNode, source: SourceRoot, depth: Int) {
-            rows.append(FolderSidebarRow(node: node, source: source, depth: depth))
-            if expandedFolders.contains(node.id) {
-                for child in node.children { append(child, source: source, depth: depth + 1) }
+        func append(_ outline: CatalogFolderOutline, depth: Int) {
+            rows.append(FolderSidebarRow(outline: outline, source: outline.source, depth: depth))
+            if expandedFolders.contains(outline.id) {
+                for child in outline.children { append(child, depth: depth + 1) }
             }
         }
-        for source in sources {
-            if let root = folderRoots.first(where: { $0.id.sourceID == source.id }) {
-                append(root, source: source, depth: 0)
-            }
-        }
+        for root in folderOutline { append(root, depth: 0) }
         return rows
     }
 }
@@ -43,18 +39,23 @@ struct FolderSidebarLabel: View {
                     .font(.caption2).frame(width: 12, height: 22).contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
-            .opacity(row.node.children.isEmpty ? 0 : 1)
-            .disabled(row.node.children.isEmpty)
-            .accessibilityLabel("\(model.expandedFolders.contains(row.id) ? "折叠" : "展开")\(row.depth == 0 ? row.source.name : row.node.name)")
+            .opacity(row.outline.children.isEmpty ? 0 : 1)
+            .disabled(row.outline.children.isEmpty)
+            .accessibilityLabel("\(model.expandedFolders.contains(row.id) ? "折叠" : "展开")\(row.outline.name)")
             Image(systemName: row.source.isOnline ? "folder" : "externaldrive.badge.xmark")
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text(row.depth == 0 ? row.source.name : row.node.name).lineLimit(1)
-                if row.depth == 0 && !row.source.isOnline { Text("离线").font(.caption2).foregroundStyle(.secondary) }
+                Text(row.outline.name).lineLimit(1)
+                if row.outline.isSourceRoot && row.depth > 0 {
+                    Text("独立来源").font(.caption2).foregroundStyle(.secondary)
+                }
+                if row.outline.isSourceRoot && !row.source.isOnline { Text("离线").font(.caption2).foregroundStyle(.secondary) }
             }
             Spacer(minLength: 0)
-            Text(row.node.recursiveCount.formatted()).font(.caption).foregroundStyle(.secondary)
-                .help("图库索引共 \(row.node.recursiveCount) 项（包含子目录），不是实时磁盘文件数，不受筛选影响")
+            if let node = row.outline.node {
+                Text(node.recursiveCount.formatted()).font(.caption).foregroundStyle(.secondary)
+                    .help("此来源的图库索引共 \(node.recursiveCount) 项（包含子目录），独立添加的其他来源另计")
+            }
         }
         .padding(.leading, CGFloat(row.depth) * 12)
         .accessibilityElement(children: .contain)

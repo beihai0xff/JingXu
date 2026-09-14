@@ -68,6 +68,23 @@ enum FolderBrowsingChecks {
         try check(tree.first { $0.id.sourceID == sibling.id }?.recursiveCount == 1, "离线同名来源被丢弃或合并")
         try check(folder("é") != folder("e\u{301}"), "目录身份错误合并不同原始字符")
 
+        let nested = SourceRoot(name: "任意显示名", bookmarkData: nil,
+                                pathHint: source.pathHint + "/2026/第10天", isOnline: false)
+        let adjacent = SourceRoot(name: "相邻", bookmarkData: nil, pathHint: source.pathHint + "-other")
+        for value in [nested, adjacent] { try await store.upsertSource(value) }
+        _ = try await store.upsertAsset(asset(nested, "photo.jpg"))
+        let outline = CatalogFolderOutline.build(sources: [nested, childSource, sibling, adjacent, source, emptySource],
+                                                 roots: try await store.folderTree())
+        let displayed = outline.first { $0.id.sourceID == source.id }!
+        try check(outline.count == 4, "父子来源仍平铺或相似前缀被误嵌套")
+        let child = displayed.children.first { $0.id.sourceID == childSource.id }!
+        try check(child.isSourceRoot && child.node?.id == CatalogFolderID(sourceID: childSource.id), "嵌套来源丢失独立操作身份")
+        try check(displayed.children.contains { $0.id == folder("旅行") }, "重叠来源覆盖了父来源的目录索引")
+        let intermediate = displayed.children.first { $0.name == "2026" }!
+        try check(intermediate.node == nil && intermediate.children.first?.name == "第10天", "跨层来源没有保留磁盘中间目录")
+        try check(intermediate.children.first?.node?.recursiveCount == 1, "嵌套离线来源的计数丢失")
+        try check(displayed.node?.recursiveCount == 14, "展示层改变了来源查询计数")
+
         for (path, recursive, expected) in [("", true, 14), ("", false, 1), ("旅行", true, 4), ("旅行", false, 2),
             ("旅行/第2天", false, 1), ("100%_ 原图", true, 2), ("100%_ 原图", false, 1), ("100%_ 原图/👩‍💻", false, 1),
             ("Case", true, 1), ("case", true, 1), ("é", false, 1), ("e\u{301}", false, 1)] {
