@@ -42,6 +42,36 @@ extension AppModel {
             action()
         }
     }
+    /// Keep editing across photo navigation; a failed save or destination load retains the current session.
+    func switchPreview(_ destination: @escaping @MainActor () async throws -> AssetListItem?) {
+        guard previewNavigationEnabled, let store else { return }
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        let editor = colorEditor
+        editor?.cancelComposition()
+        isPreviewTransitioning = true
+        Task {
+            defer { isPreviewTransitioning = false }
+            guard await flushKeywords() else { return }
+            if let editor, !(await editor.flush()) { return }
+            do {
+                guard let next = try await destination() else {
+                    statusText = "已到当前范围边界"
+                    return
+                }
+                let nextSession: ColorEditSession?
+                if editor != nil {
+                    nextSession = try makeColorSession(await store.colorSnapshot(assetID: next.id))
+                } else {
+                    nextSession = nil
+                }
+                editor?.dispose()
+                colorEditor = nil; colorEditorObservation = nil
+                previewAsset = next
+                if let nextSession { attachColorSession(nextSession) }
+                await refreshPreviewWindow()
+            } catch { errorMessage = "切图失败：\(error.localizedDescription)" }
+        }
+    }
     func finishColorEditing() { transitionPreview {} }
     func makeColorSession(_ snapshot: ColorEditSnapshot) throws -> ColorEditSession {
         guard let store else { throw ColorEditError("图库未打开") }

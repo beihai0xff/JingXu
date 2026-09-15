@@ -72,12 +72,26 @@ extension ColorChecks {
         try await eventually { !editor.isRendering && editor.result != nil }
         let expected = try await ColorImageRenderer.shared.render(editor.snapshot, adjustments: editor.adjustments)
         try check(try SRGBPixels(editor.result!.image).rgba == SRGBPixels(expected.image).rgba, "过期渲染覆盖最新请求")
-        editor.comparing = true
+        let beforeComparison = editor.result!
+        let comparisonRevision = editor.snapshot.revision
+        let comparisonVersion = editor.editVersion
+        editor.beginComparison()
         try await eventually { !editor.isRendering }
         let unadjusted = try await ColorImageRenderer.shared.render(editor.snapshot, adjustments: ColorAdjustments())
         try check(try SRGBPixels(editor.result!.image).rgba == SRGBPixels(unadjusted.image).rgba && editor.adjustments.exposure == 1, "原图对比未使用相同解码或改变了参数")
 
+        editor.endComparison()
+        try check(!editor.comparing && editor.result?.image === beforeComparison.image, "松开对比未立即恢复成片")
+        try await eventually { !editor.isRendering }
+        try check(editor.editVersion == comparisonVersion && editor.snapshot.revision == comparisonRevision && !editor.isDirty,
+                  "原图对比改变调整或保存修订")
+        for _ in 0..<10 { editor.beginComparison(); editor.endComparison() }
+        try await eventually { !editor.isRendering }
+        try check(!editor.comparing && (try SRGBPixels(editor.result!.image).rgba) == (try SRGBPixels(expected.image).rgba),
+                  "快速按下松开后原图结果覆盖成片")
+        editor.beginComparison()
         editor.change(.exposure, value: -2)
+        try check(!editor.comparing, "修改参数未结束原图对比")
         try check(await editor.flush(), "切图前草稿保存失败")
         editor.dispose()
         let disposedValues = editor.adjustments
@@ -87,7 +101,10 @@ extension ColorChecks {
         next.start()
         try await eventually { next.result != nil && !next.isRendering }
         try check(editor.result == nil && next.snapshot.asset.id == second.asset.id, "快速切图后旧结果泄露或图像未释放")
+        next.beginComparison()
         next.dispose()
+        next.endComparison(); next.beginComparison()
+        try check(!next.comparing && next.result == nil, "退出会话后对比手势恢复了旧图")
     }
 
     private static func histogramDragging() throws {

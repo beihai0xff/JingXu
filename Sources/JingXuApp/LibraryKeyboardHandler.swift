@@ -4,17 +4,15 @@ import JingXuCore
 
 struct LibraryKeyboardHandler: NSViewRepresentable {
     let enabled: Bool
-    let requiresCanvasFocus: Bool
     let action: (UInt16, String, Bool, Bool) -> Bool
     func makeNSView(context: Context) -> KeyboardView { KeyboardView() }
     func updateNSView(_ view: KeyboardView, context: Context) {
-        view.enabled = enabled; view.requiresCanvasFocus = requiresCanvasFocus; view.action = action
+        view.enabled = enabled; view.action = action
     }
     static func dismantleNSView(_ view: KeyboardView, coordinator: ()) { view.stop() }
 }
 final class KeyboardView: NSView {
     var enabled = false
-    var requiresCanvasFocus = false
     var action: ((UInt16, String, Bool, Bool) -> Bool)?
     private var monitor: Any?
     override func viewDidMoveToWindow() {
@@ -24,7 +22,6 @@ final class KeyboardView: NSView {
             let handled = MainActor.assumeIsolated {
                 guard let self, self.enabled, let window = self.window, window.isKeyWindow,
                       event.window === window, window.attachedSheet == nil, NSApp.modalWindow == nil,
-                      (!self.requiresCanvasFocus || window.firstResponder is PreviewCanvasView),
                       !(window.firstResponder is NSTextView), !(window.firstResponder is NSTextField), !(window.firstResponder is NSSlider),
                       (window.firstResponder as? NSTextInputClient)?.hasMarkedText() != true,
                       event.modifierFlags.intersection([.control, .option]).isEmpty else { return false }

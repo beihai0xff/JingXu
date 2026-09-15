@@ -81,8 +81,7 @@ struct ContentView: View {
                 }
             }.padding(20).frame(width: 760, height: 520)
         }
-        .background(LibraryKeyboardHandler(enabled: !showsScanReport && !model.isShowingKeywords && model.operationBlockReason(model.colorEditor?.isComposing == true ? .browse : .annotation) == nil,
-            requiresCanvasFocus: model.colorEditor != nil && model.colorEditor?.isComposing != true) { code, text, shift, command in
+        .background(LibraryKeyboardHandler(enabled: !showsScanReport && !model.isShowingKeywords && model.operationBlockReason(model.colorEditor?.isComposing == true ? .browse : .annotation) == nil) { code, text, shift, command in
             model.handleLibraryKey(code: code, text: text, shift: shift, command: command)
         })
         .sheet(item: $model.missingAssetPlan) { plan in
@@ -173,7 +172,10 @@ struct ContentView: View {
                     CompositionPanel(draft: draft).frame(width: 310)
                 } else if let editor = model.colorEditor {
                     Divider()
-                    ColorEditPanel(session: editor).frame(width: 310)
+                    ColorEditPanel(session: editor)
+                        .id(editor.snapshot.asset.id)
+                        .disabled(model.isPreviewTransitioning)
+                        .frame(width: 310)
                 } else if showsPreviewInspector {
                     Divider()
                     inspector

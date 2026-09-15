@@ -19,7 +19,15 @@ struct ColorEditPanel: View {
                     Button("撤销") { session.undo() }.disabled(!session.history.canUndo)
                     Button("重做") { session.redo() }.disabled(!session.history.canRedo)
                     Spacer()
-                    Toggle("原图对比", isOn: $session.comparing).toggleStyle(.button)
+                    Button(session.comparing ? "松开恢复成片" : "按住对比原图") {}
+                        .buttonStyle(OriginalComparisonButtonStyle { pressed in
+                            if pressed {
+                                focusedParameter = nil
+                                session.beginComparison()
+                            } else { session.endComparison() }
+                        })
+                        .disabled(!session.usable || model.isWorking)
+                        .help("按住查看未调色、未裁剪的原图，松开或移出按钮恢复成片；不会修改调整。")
                 }.disabled(model.isPreviewTransitioning)
                 if let error = session.saveError {
                     Text("保存失败：\(error)").font(.caption).foregroundStyle(.red).textSelection(.enabled)
@@ -87,5 +95,22 @@ struct ColorEditPanel: View {
         }.background(Color(nsColor: .controlBackgroundColor))
             .disabled(model.automationOwnsOperation || session.isExternallyControlled || session.isComposing)
             .onChange(of: focusedParameter) { previous, _ in if previous != nil && !histogramIsDragging { session.endGesture() } }
+    }
+}
+
+/// ButtonStyle follows mouse and keyboard press state, including dragging outside the button.
+private struct OriginalComparisonButtonStyle: ButtonStyle {
+    let pressed: (Bool) -> Void
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.caption)
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .background(configuration.isPressed ? Color.accentColor.opacity(0.25) : Color.secondary.opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 5))
+            .contentShape(Rectangle())
+            .onChange(of: configuration.isPressed) { _, value in pressed(value) }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in pressed(false) }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in pressed(false) }
+            .onDisappear { pressed(false) }
     }
 }

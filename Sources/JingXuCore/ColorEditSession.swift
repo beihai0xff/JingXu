@@ -13,7 +13,8 @@ public final class ColorEditSession: ObservableObject {
     @Published public private(set) var isComposing = false
     @Published public private(set) var composition: CompositionSession?
     @Published public private(set) var result: ColorRenderedImage?
-    @Published public var comparing = false { didSet { render(interactive: false) } }
+    @Published public private(set) var comparing = false
+    private var comparisonReturnResult: ColorRenderedImage?
     @Published public private(set) var renderError: String?
     @Published public private(set) var saveError: String?
     @Published public private(set) var isRendering = false
@@ -37,6 +38,19 @@ public final class ColorEditSession: ObservableObject {
         adjustments = try snapshot.adjustments
     }
     public func start() { render(interactive: false) }
+    public func beginComparison() {
+        guard !disposed, !isExternallyControlled, !isComposing, !comparing, usable else { return }
+        comparisonReturnResult = result
+        comparing = true
+        render(interactive: false)
+    }
+    public func endComparison() {
+        guard comparing else { return }
+        comparing = false
+        if let comparisonReturnResult { result = comparisonReturnResult }
+        comparisonReturnResult = nil
+        render(interactive: false)
+    }
     public func displayValue(_ parameter: ColorParameter) -> Double {
         if parameter.group == .whiteBalance && adjustments.whiteBalance == .asShot {
             if !isRAW { return 0 }
@@ -61,7 +75,7 @@ public final class ColorEditSession: ObservableObject {
             adjustments.whiteBalance = isRAW ? .raw : .relative
         }
         adjustments[parameter] = value
-        comparing = false
+        endComparison()
         schedule()
     }
     public func reset(_ parameter: ColorParameter) {
@@ -80,7 +94,7 @@ public final class ColorEditSession: ObservableObject {
         guard !disposed, !isExternallyControlled, !isComposing else { return }
         guard value != adjustments else { return }
         if track { endGestureIfNeeded(); history.push(adjustments) }
-        adjustments = value; comparing = false; schedule()
+        adjustments = value; endComparison(); schedule()
     }
     private func endGestureIfNeeded() {
         if let initial = gestureStart, initial != adjustments { history.push(initial) }
@@ -147,10 +161,11 @@ public final class ColorEditSession: ObservableObject {
         autoSave?.cancel(); autoSave = nil
         guard !isSaving, let saved = try? snapshot.adjustments else { return }
         adjustments = saved; saveError = nil; history = ColorEditHistory(); gestureStart = nil
-        comparing = false; render(interactive: false)
+        endComparison(); render(interactive: false)
     }
     public func dispose() {
         endGestureIfNeeded()
+        comparing = false; comparisonReturnResult = nil
         cancelComposition()
         disposed = true; autoSave?.cancel(); rendering?.cancel(); generation = UUID(); result = nil
         Task { await ColorImageRenderer.shared.release() }
@@ -161,6 +176,7 @@ public final class ColorEditSession: ObservableObject {
     public func beginComposition(detector: @escaping CompositionSession.Detector = { try await CompositionAnalyzer.shared.regions(in: $0) }) async throws {
         guard !disposed, !isComposing, !isExternallyControlled else { throw ColorEditError("编辑会话正在操作") }
         guard saveError == nil else { throw ColorEditError("请先重试保存或放弃未保存调整") }
+        endComparison()
         endGestureIfNeeded(); isDragging = false; isComposing = true
         rendering?.cancel(); generation = UUID(); isRendering = false
         do {

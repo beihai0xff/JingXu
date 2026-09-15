@@ -525,25 +525,18 @@ final class AppModel: ObservableObject {
     }
     func navigatePreview(_ direction: Int) {
         guard previewNavigationEnabled, let item = previewAsset, let store else { return }
-        transitionPreview {
-            self.isPreviewTransitioning = true
-            Task {
-                defer { self.isPreviewTransitioning = false }
-                do {
-                    let cursor = BrowseCursor(item)
-                    let page = try await store.browsePage(self.appliedQuery, cursor: cursor, reverse: direction < 0, photosOnly: true, limit: 2)
-                    var candidates = direction < 0 ? Array(page.items.reversed()) : page.items
-                    if candidates.first?.id == self.comparisonReference?.id { candidates.removeFirst() }
-                    if let next = candidates.first { self.previewAsset = next; await self.refreshPreviewWindow() }
-                    else { self.statusText = "已到当前范围边界" }
-                } catch { self.errorMessage = "切图失败：\(error.localizedDescription)" }
-            }
+        switchPreview {
+            let cursor = BrowseCursor(item)
+            let page = try await store.browsePage(self.appliedQuery, cursor: cursor, reverse: direction < 0, photosOnly: true, limit: 2)
+            let candidates = direction < 0 ? Array(page.items.reversed()) : page.items
+            return candidates.first { $0.id != self.comparisonReference?.id }
         }
     }
+
     var previewFilmstrip: [AssetListItem] { previewItems }
     func selectPreview(id: String) {
-        guard previewNavigationEnabled, let item = previewItems.first(where: { $0.id == id }), id != comparisonReference?.id else { return }
-        transitionPreview { self.previewAsset = item; Task { await self.refreshPreviewWindow() } }
+        guard previewNavigationEnabled, let item = previewItems.first(where: { $0.id == id }), id != comparisonReference?.id, id != previewAsset?.id else { return }
+        switchPreview { item }
     }
     func flagFromMenu(_ flag: AssetFlag) {
         guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil,
