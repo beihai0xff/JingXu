@@ -44,9 +44,9 @@ public final class ColorEditSession: ObservableObject {
         }
         return adjustments[parameter]
     }
-    public func beginGesture() { guard !isExternallyControlled, !isComposing else { return }; isDragging = true; if gestureStart == nil { gestureStart = adjustments } }
+    public func beginGesture() { guard !disposed, !isExternallyControlled, !isComposing else { return }; isDragging = true; if gestureStart == nil { gestureStart = adjustments } }
     public func endGesture() {
-        guard !isExternallyControlled, !isComposing else { return }
+        guard !disposed, !isExternallyControlled, !isComposing else { return }
         if let initial = gestureStart, initial != adjustments { history.push(initial) }
         gestureStart = nil; isDragging = false
         render(interactive: false)
@@ -54,7 +54,7 @@ public final class ColorEditSession: ObservableObject {
         autoSave = Task { _ = await flush() }
     }
     public func change(_ parameter: ColorParameter, value: Double) {
-        guard !isExternallyControlled, !isComposing else { return }
+        guard !disposed, !isExternallyControlled, !isComposing else { return }
         if gestureStart == nil { gestureStart = adjustments }
         if parameter.group == .whiteBalance, adjustments.whiteBalance == .asShot {
             adjustments.temperature = displayValue(.temperature); adjustments.tint = displayValue(.tint)
@@ -74,17 +74,17 @@ public final class ColorEditSession: ObservableObject {
     }
     public func asShot() { var value = adjustments; value.whiteBalance = .asShot; apply(value) }
     public func resetAll() { apply(ColorAdjustments()) }
-    public func undo() { guard !isExternallyControlled, !isComposing else { return }; endGestureIfNeeded(); if let value = history.undo(adjustments) { apply(value, track: false) } }
-    public func redo() { guard !isExternallyControlled, !isComposing else { return }; endGestureIfNeeded(); if let value = history.redo(adjustments) { apply(value, track: false) } }
+    public func undo() { guard !disposed, !isExternallyControlled, !isComposing else { return }; endGestureIfNeeded(); if let value = history.undo(adjustments) { apply(value, track: false) } }
+    public func redo() { guard !disposed, !isExternallyControlled, !isComposing else { return }; endGestureIfNeeded(); if let value = history.redo(adjustments) { apply(value, track: false) } }
     public func apply(_ value: ColorAdjustments, track: Bool = true) {
-        guard !isExternallyControlled, !isComposing else { return }
+        guard !disposed, !isExternallyControlled, !isComposing else { return }
         guard value != adjustments else { return }
         if track { endGestureIfNeeded(); history.push(adjustments) }
         adjustments = value; comparing = false; schedule()
     }
     private func endGestureIfNeeded() {
         if let initial = gestureStart, initial != adjustments { history.push(initial) }
-        gestureStart = nil
+        gestureStart = nil; isDragging = false
     }
     private func schedule() {
         render(interactive: true)
@@ -143,13 +143,14 @@ public final class ColorEditSession: ObservableObject {
         return await task.value
     }
     public func discardDraft() {
-        guard !isExternallyControlled, !isComposing else { return }
+        guard !disposed, !isExternallyControlled, !isComposing else { return }
         autoSave?.cancel(); autoSave = nil
         guard !isSaving, let saved = try? snapshot.adjustments else { return }
         adjustments = saved; saveError = nil; history = ColorEditHistory(); gestureStart = nil
         comparing = false; render(interactive: false)
     }
     public func dispose() {
+        endGestureIfNeeded()
         cancelComposition()
         disposed = true; autoSave?.cancel(); rendering?.cancel(); generation = UUID(); result = nil
         Task { await ColorImageRenderer.shared.release() }

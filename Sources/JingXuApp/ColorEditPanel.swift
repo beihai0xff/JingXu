@@ -5,6 +5,7 @@ struct ColorEditPanel: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject var session: ColorEditSession
     @FocusState private var focusedParameter: ColorParameter?
+    @State private var histogramIsDragging = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -34,7 +35,17 @@ struct ColorEditPanel: View {
                         Button("放弃旧调整…") { model.discardStaleColor() }
                     }
                 }
-                if let result = session.result { ColorHistogram(result: result.histogram) }
+                if let result = session.result {
+                    ColorHistogram(session: session, result: result.histogram,
+                        enabled: session.usable && !model.isWorking && !model.isPreviewTransitioning &&
+                            !model.automationOwnsOperation && !session.isExternallyControlled && !session.isComposing,
+                        prepare: {
+                            histogramIsDragging = true
+                            focusedParameter = nil
+                            session.endGesture()
+                        }, finished: { histogramIsDragging = false })
+                        .id(session.snapshot.asset.id)
+                }
                 ForEach(ColorGroup.allCases, id: \.self) { group in
                     GroupBox(group.title) {
                         VStack(spacing: 10) {
@@ -75,24 +86,6 @@ struct ColorEditPanel: View {
             }.padding(14)
         }.background(Color(nsColor: .controlBackgroundColor))
             .disabled(model.automationOwnsOperation || session.isExternallyControlled || session.isComposing)
-            .onChange(of: focusedParameter) { previous, _ in if previous != nil { session.endGesture() } }
-    }
-}
-
-struct ColorHistogram: View {
-    let result: HistogramResult
-    var body: some View {
-        GroupBox("成片直方图 · sRGB") {
-            Canvas { context, size in
-                let channels: [([Int], Color)] = [(result.red, .red), (result.green, .green), (result.blue, .blue)]
-                let peak = max(1, channels.flatMap { $0.0 }.max() ?? 1)
-                for (bins, color) in channels {
-                    var path = Path(); path.move(to: CGPoint(x: 0, y: size.height))
-                    for i in 0..<256 { path.addLine(to: CGPoint(x: Double(i) / 255 * size.width, y: size.height * (1 - Double(bins[i]) / Double(peak)))) }
-                    path.addLine(to: CGPoint(x: size.width, y: size.height)); path.closeSubpath()
-                    context.fill(path, with: .color(color.opacity(0.45)))
-                }
-            }.frame(height: 76).background(.black.opacity(0.3))
-        }
+            .onChange(of: focusedParameter) { previous, _ in if previous != nil && !histogramIsDragging { session.endGesture() } }
     }
 }

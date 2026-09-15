@@ -5,6 +5,7 @@ import JingXuCore
 extension ColorChecks {
     @MainActor
     static func editing() async throws {
+        try histogramDragging()
         let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
         let databaseURL = root.appendingPathComponent("Catalog.sqlite")
         let store = try CatalogStore(databaseURL: databaseURL)
@@ -36,9 +37,20 @@ extension ColorChecks {
         editor.undo(); try check(await editor.flush(), "拖动撤销保存失败")
         try check(editor.adjustments.exposure == 0.5, "一次拖动没有合并为一次撤销")
 
+        editor.redo(); try check(await editor.flush(), "拖动重做保存失败")
+        try check(editor.adjustments.exposure == 1.5, "拖动重做未恢复终值")
+        let reopened = try ColorEditSession(store: store, snapshot: await store.colorSnapshot(assetID: first.asset.id), saved: {})
+        try check(reopened.adjustments.exposure == 1.5, "重开未恢复拖动结果")
+        reopened.dispose()
+        editor.beginGesture(); editor.endGesture()
+        editor.undo(); try check(await editor.flush(), "无变化手势之后撤销失败")
+        try check(editor.adjustments.exposure == 0.5, "无变化手势产生额外撤销记录")
+
         let database = try DatabaseQueue(path: databaseURL.path)
         try await database.write { try $0.execute(sql: "CREATE TRIGGER fail_session BEFORE UPDATE ON colorEdits BEGIN SELECT RAISE(ABORT, 'session write failure'); END") }
+        editor.beginGesture()
         editor.change(.contrast, value: 25)
+        editor.endGesture()
         try check(!(await editor.flush()) && editor.isDirty && editor.saveError != nil && editor.adjustments.contrast == 25, "保存失败未保留草稿或阻止离开")
         try await database.write { try $0.execute(sql: "DROP TRIGGER fail_session") }
         try check(await editor.flush(), "保存失败后不能重试")
@@ -68,11 +80,31 @@ extension ColorChecks {
         editor.change(.exposure, value: -2)
         try check(await editor.flush(), "切图前草稿保存失败")
         editor.dispose()
+        let disposedValues = editor.adjustments
+        editor.beginGesture(); editor.change(.exposure, value: 5); editor.endGesture()
+        try check(editor.adjustments == disposedValues, "退出会话仍接受迟到手势")
         let next = try ColorEditSession(store: store, snapshot: second, saved: {})
         next.start()
         try await eventually { next.result != nil && !next.isRendering }
         try check(editor.result == nil && next.snapshot.asset.id == second.asset.id, "快速切图后旧结果泄露或图像未释放")
         next.dispose()
+    }
+
+    private static func histogramDragging() throws {
+        for (index, parameter) in HistogramDrag.parameters.enumerated() {
+            try check(HistogramDrag.parameter(at: Double(index * 100), width: 500) == parameter, "直方图分区边界错误")
+            let drag = HistogramDrag(startX: Double(index * 100 + 50), width: 500, initialValue: 0)!
+            let scale = parameter == .exposure ? 5.0 : 100.0
+            try check(drag.value(translation: 500) == scale && drag.value(translation: -500) == -scale, "拖动方向或灵敏度错误")
+            try check(drag.parameter == parameter, "跨区拖动改变参数")
+            try check(drag.value(translation: 100_000) == parameter.range(isRAW: false).upperBound, "拖动未限制上界")
+            try check(drag.value(translation: -100_000) == parameter.range(isRAW: false).lowerBound, "拖动未限制下界")
+        }
+        try check(HistogramDrag.parameter(at: 500, width: 500) == .whites, "最右边界错误")
+        try check(HistogramDrag.parameter(at: 0, width: 0) == nil && HistogramDrag.parameter(at: .nan, width: 500) == nil &&
+            HistogramDrag(startX: 0, width: .infinity, initialValue: 0) == nil, "无效尺寸未拒绝")
+        let exposure = HistogramDrag(startX: 250, width: 500, initialValue: 0.5)!
+        try check(exposure.value(translation: 1.4) == 0.51 && exposure.value(translation: .nan) == 0.5, "曝光精度或无效位移错误")
     }
 
     @MainActor
