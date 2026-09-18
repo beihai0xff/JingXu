@@ -130,6 +130,11 @@ extension AppModel {
         }
     }
     func performUndo(redo: Bool = false) {
+        if showsSystemPhotos {
+            guard let photos = systemPhotos, photos.canAct, let editor = photos.editor else { return }
+            if redo { editor.redo() } else { editor.undo() }
+            return
+        }
         if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
             if redo { editor.undoManager?.redo() } else { editor.undoManager?.undo() }
             return

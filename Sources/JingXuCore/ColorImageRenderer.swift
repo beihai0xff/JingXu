@@ -71,8 +71,8 @@ public actor ColorImageRenderer {
     public func release() { input = nil; context.clearCaches() }
     public func validateSource(_ snapshot: ColorEditSnapshot) throws { _ = try ColorSourceAccess(snapshot) }
 
-    private func load(_ snapshot: ColorEditSnapshot, access: ColorSourceAccess) throws -> Input {
-        let key = "\(snapshot.asset.id)-\(access.url.path)-\(access.fingerprint.identifier ?? "")-\(access.fingerprint.size)-\(access.fingerprint.modifiedAt.timeIntervalSince1970)"
+    private func load(_ access: ColorRenderInput) throws -> Input {
+        let key = "\(access.id)-\(access.url.path)-\(access.fingerprint.identifier ?? "")-\(access.fingerprint.size)-\(access.fingerprint.modifiedAt.timeIntervalSince1970)-\(access.orientation ?? 0)"
         if let input, input.key == key { return input }
         input = nil
         try Task.checkCancellation()
@@ -83,15 +83,17 @@ public actor ColorImageRenderer {
         guard let source = CGImageSourceCreateWithData(bytes as CFData, options as CFDictionary) else { throw ColorEditError("无法解码照片") }
         let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
         let value: Input
-        if snapshot.isRAW {
+        if access.isRAW {
             guard let raw = CIRAWFilter(imageData: bytes, identifierHint: hint), raw.decoderVersion != .none,
                   raw.supportedDecoderVersions.contains(raw.decoderVersion), raw.outputImage != nil else {
                 throw ColorEditError("macOS 不支持此 RAW 原片的完整解码；无法调色或导出成片。")
             }
+            if let orientation = access.orientation, let value = CGImagePropertyOrientation(rawValue: UInt32(orientation)) { raw.orientation = value }
             value = Input(key: key, bytes: bytes, image: nil, raw: raw, temperature: Double(raw.neutralTemperature),
                 tint: Double(raw.neutralTint), properties: properties)
         } else {
-            guard let image = CIImage(data: bytes, options: [.applyOrientationProperty: true]) else { throw ColorEditError("无法完整解码照片") }
+            guard let decoded = CIImage(data: bytes, options: [.applyOrientationProperty: access.orientation == nil]) else { throw ColorEditError("无法完整解码照片") }
+            let image = access.orientation.map { decoded.oriented(forExifOrientation: Int32($0)) } ?? decoded
             value = Input(key: key, bytes: bytes, image: image, raw: nil, temperature: 0, tint: 0, properties: properties)
         }
         try access.revalidate(); try Task.checkCancellation()
@@ -142,11 +144,18 @@ public actor ColorImageRenderer {
     }
 
     public func render(_ snapshot: ColorEditSnapshot, adjustments: ColorAdjustments, maximumDimension: Int? = nil) throws -> ColorRenderedImage {
+        try render(ColorRenderInput(local: snapshot), adjustments: adjustments, maximumDimension: maximumDimension)
+    }
+    public func render(_ snapshot: ColorEditingSnapshot, adjustments: ColorAdjustments, maximumDimension: Int? = nil) throws -> ColorRenderedImage {
+        try render(snapshot.input, adjustments: adjustments, maximumDimension: maximumDimension)
+    }
+    public func validateSource(_ snapshot: ColorEditingSnapshot) throws { try snapshot.input.revalidate() }
+    public func render(_ access: ColorRenderInput, adjustments: ColorAdjustments, maximumDimension: Int? = nil) throws -> ColorRenderedImage {
         try Task.checkCancellation()
         return try autoreleasepool {
-            let access = try ColorSourceAccess(snapshot)
-            let input = try load(snapshot, access: access)
-            var image = try graph(input, adjustments: adjustments, isRAW: snapshot.isRAW)
+            try access.revalidate()
+            let input = try load(access)
+            var image = try graph(input, adjustments: adjustments, isRAW: access.isRAW)
             let size = image.extent.size
             if let limit = maximumDimension, max(size.width, size.height) > CGFloat(limit) {
                 let scale = CGFloat(limit) / max(size.width, size.height)
@@ -162,11 +171,14 @@ public actor ColorImageRenderer {
 
     /// Writes only a caller-owned temporary file. Publication is the export coordinator's job.
     public func encode(_ snapshot: ColorEditSnapshot, adjustments: ColorAdjustments, format: ColorExportFormat, to temporaryURL: URL, maximumDimension: Int? = nil) throws {
+        try encode(ColorRenderInput(local: snapshot), adjustments: adjustments, format: format, to: temporaryURL, maximumDimension: maximumDimension)
+    }
+    public func encode(_ access: ColorRenderInput, adjustments: ColorAdjustments, format: ColorExportFormat, to temporaryURL: URL, maximumDimension: Int? = nil) throws {
         try Task.checkCancellation()
         try autoreleasepool {
-            let access = try ColorSourceAccess(snapshot)
-            let input = try load(snapshot, access: access)
-            var image = try graph(input, adjustments: adjustments, isRAW: snapshot.isRAW)
+            try access.revalidate()
+            let input = try load(access)
+            var image = try graph(input, adjustments: adjustments, isRAW: access.isRAW)
             if let limit = maximumDimension {
                 guard limit > 0 else { throw ColorEditError("成片尺寸必须大于零") }
                 if max(image.extent.width, image.extent.height) > CGFloat(limit) {

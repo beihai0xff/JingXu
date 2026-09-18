@@ -4,7 +4,7 @@ import Foundation
 
 @MainActor
 public final class ColorEditSession: ObservableObject {
-    @Published public private(set) var snapshot: ColorEditSnapshot
+    @Published public private(set) var snapshot: ColorEditingSnapshot
     @Published public private(set) var adjustments: ColorAdjustments {
         didSet { if adjustments != oldValue { editVersion = UUID() } }
     }
@@ -20,7 +20,7 @@ public final class ColorEditSession: ObservableObject {
     @Published public private(set) var isRendering = false
     @Published public private(set) var isSaving = false
     @Published public private(set) var history = ColorEditHistory()
-    private let store: CatalogStore
+    private let repository: any ColorEditingRepository
     private let saved: @MainActor () async -> Void
     private var autoSave: Task<Void, Never>?
     private var rendering: Task<Void, Never>?
@@ -30,12 +30,12 @@ public final class ColorEditSession: ObservableObject {
     private var isDragging = false
     private var disposed = false
     public var isRAW: Bool { snapshot.isRAW }
-    public var isDirty: Bool { (try? snapshot.adjustments) != adjustments }
+    public var isDirty: Bool { snapshot.adjustments != adjustments }
     public var usable: Bool { result != nil && renderError == nil }
 
-    public init(store: CatalogStore, snapshot: ColorEditSnapshot, saved: @escaping @MainActor () async -> Void) throws {
-        self.store = store; self.snapshot = snapshot; self.saved = saved
-        adjustments = try snapshot.adjustments
+    public init(repository: any ColorEditingRepository, snapshot: ColorEditingSnapshot, saved: @escaping @MainActor () async -> Void) throws {
+        self.repository = repository; self.snapshot = snapshot; self.saved = saved
+        adjustments = snapshot.adjustments
     }
     public func start() { render(interactive: false) }
     public func beginComparison() {
@@ -146,7 +146,7 @@ public final class ColorEditSession: ObservableObject {
             do {
                 while isDirty {
                     let values = adjustments, expected = snapshot
-                    snapshot = try await store.saveColorAdjustments(values, snapshot: expected)
+                    snapshot = try await repository.saveColorAdjustments(values, snapshot: expected)
                     saveError = nil
                     await saved()
                 }
@@ -159,7 +159,7 @@ public final class ColorEditSession: ObservableObject {
     public func discardDraft() {
         guard !disposed, !isExternallyControlled, !isComposing else { return }
         autoSave?.cancel(); autoSave = nil
-        guard !isSaving, let saved = try? snapshot.adjustments else { return }
+        guard !isSaving else { return }; let saved = snapshot.adjustments
         adjustments = saved; saveError = nil; history = ColorEditHistory(); gestureStart = nil
         endComparison(); render(interactive: false)
     }
@@ -173,6 +173,16 @@ public final class ColorEditSession: ObservableObject {
 
     public enum ExternalChange: Sendable { case set(ColorAdjustments), undo, redo }
 
+    /// A confirmed submission owns one saved revision until the destination returns a result.
+    public func withSavedSnapshot(_ submit: @MainActor (ColorEditingSnapshot) async throws -> Void) async throws {
+        guard !disposed, !isExternallyControlled, !isComposing else { throw ColorEditError("编辑会话正在操作") }
+        endGestureIfNeeded(); endComparison()
+        isExternallyControlled = true
+        defer { isExternallyControlled = false }
+        guard await flush() else { throw ColorEditError(saveError ?? "本机草稿保存失败") }
+        try await submit(snapshot)
+    }
+
     public func beginComposition(detector: @escaping CompositionSession.Detector = { try await CompositionAnalyzer.shared.regions(in: $0) }) async throws {
         guard !disposed, !isComposing, !isExternallyControlled else { throw ColorEditError("编辑会话正在操作") }
         guard saveError == nil else { throw ColorEditError("请先重试保存或放弃未保存调整") }
@@ -182,7 +192,7 @@ public final class ColorEditSession: ObservableObject {
         do {
             guard await flush() else { throw ColorEditError(saveError ?? "保存失败") }
             let expected = snapshot, version = editVersion
-            try await store.validateColorSnapshot(expected)
+            try await repository.validateEditingSnapshot(expected)
             guard !disposed, isComposing, version == editVersion else { throw CancellationError() }
             let draft = CompositionSession(snapshot: expected, adjustments: adjustments, editVersion: version, detector: detector)
             composition = draft; draft.start()
@@ -199,7 +209,7 @@ public final class ColorEditSession: ObservableObject {
         defer { draft.isApplying = false }
         do {
             try draft.crop.validate()
-            try await store.validateColorSnapshot(draft.snapshot)
+            try await repository.validateEditingSnapshot(draft.snapshot)
             guard composition === draft, !disposed, editVersion == draft.editVersion else { throw ColorEditError("照片或调整已变化，请重新打开构图") }
             var values = adjustments; values.crop = draft.crop.normalized
             cancelComposition()

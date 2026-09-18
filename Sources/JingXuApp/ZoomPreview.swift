@@ -143,7 +143,7 @@ struct ZoomPreview: View {
     }
 }
 
-private struct ZoomScroll: NSViewRepresentable {
+struct ZoomScroll: NSViewRepresentable {
     let image: CGImage?
     let assetID: String
     let nativeSize: CGSize
@@ -162,7 +162,7 @@ private struct ZoomScroll: NSViewRepresentable {
     }
 }
 
-private final class PhotoScrollView: NSScrollView {
+final class PhotoScrollView: NSScrollView {
     let photo = PreviewCanvasView()
     var lastCommand = -1
     override init(frame: NSRect) {

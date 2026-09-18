@@ -41,6 +41,11 @@ private struct TestTrash: TrashService {
 private enum JingXuChecks {
     static func main() async throws {
         setenv("SWIFTNIO_STRICT", "1", 1)
+        if CommandLine.arguments.contains("--system-photos-checks") {
+            try await SystemPhotosChecks.run()
+            print("系统照片隔离、跨页选择、相册、上传、草稿、冲突、分析与恢复检查通过")
+            return
+        }
         if CommandLine.arguments.contains("--thumbnail-request-checks") {
             for _ in 0..<100 { try await WorkflowChecks.coalescing() }
             print("缩略图合并与独立取消连续 100 次检查通过")
@@ -151,6 +156,7 @@ private enum JingXuChecks {
             return
         }
         let checks: [(String, () async throws -> Void)] = [
+            ("系统照片端到端、2005 项固定范围、授权、下载、取消、冲突与提交恢复", SystemPhotosChecks.run),
             ("构图几何、主体保护与裁剪参数", { try CompositionChecks.geometry() }),
             ("裁剪方向、预览、缩略图及成片导出", CompositionChecks.rendering),
             ("构图草稿、取消、保存恢复与过期请求", CompositionChecks.editing),

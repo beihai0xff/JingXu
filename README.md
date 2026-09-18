@@ -6,6 +6,8 @@
 
 默认在本机分析和渲染；可选启用 [Codex 调色连接](Documentation/CodexColorControl.md)，把所选照片的缩小预览交给 AI 助手进行调色判断。
 
+也可授权连接 [系统照片与 iCloud 相册](Documentation/SystemPhotos.md)：浏览、加入照片、管理普通相册、删除照片，以及保存单图调色。iCloud 同步由 macOS「照片」处理，镜序不接收 Apple 账户密码。
+
 [下载安装](#安装) · [功能介绍](#功能介绍) · [快速上手](#快速上手) · [开发指南](AGENTS.md)
 
 ## 安装
@@ -132,7 +134,9 @@ brew upgrade --cask beihai0xff/jingxu/jingxu
 
 ## 数据与隐私
 
-镜序无需账户，不使用网络请求、云服务或遥测，照片和分析结果留在本机。图库数据库保存索引、标注、调色参数与预设，缩略图缓存可以重建；它们不能替代原照片备份。
+镜序无需镜序账户，不设服务端或遥测，默认在本机分析和渲染。可选的系统照片功能通过 Apple PhotoKit 读取、按需下载和修改已授权图库；启用 iCloud 照片后，原片、成片、拍摄信息和图库操作由系统同步。可选的 Codex 连接会按其授权规则提供照片预览，详见对应说明。
+
+本地图库数据库保存索引、标注、调色参数与预设。系统照片的草稿、质量分析、人工审核、固定任务和提交记录单独保存在 `SystemPhotos.sqlite`，不会混入本地文件清理。只有点击「保存到系统照片」才提交调色，滑动参数只保存本机草稿；系统返回成功不代表 iCloud 已完成同步。缩略图缓存可以重建，草稿、人工审核和提交记录不能当缓存删除；数据库不能替代原片备份。
 
 图库位于应用的 `Application Support/JingXu/` 下，沙盒版位于应用容器内；可在应用中查看实际图库位置。更新应用时保留这些数据。如果启动出现恢复提示，按提示处理，不要通过删除数据库或未完成任务日志来绕过。
 
@@ -153,4 +157,5 @@ zsh Scripts/build.sh check
 - [缓存与后台任务](Documentation/BackgroundWork.md)：索引后浏览、分析进度与缩略图回收。
 - [日期归档](Documentation/DateArchive.md) / [批量移动](Documentation/BatchMove.md)：操作范围、配套文件、恢复与撤销。
 - [质量分析 v2](Documentation/QualityAnalysisV2.md)：诊断边界、重算与人工校准。
+- [系统照片与 iCloud 相册](Documentation/SystemPhotos.md)：授权、上传、相册语义、调色、所选分析及隔离验收。
 - [打包与发布](Documentation/ReleasePipeline.md) / [发布检查清单](Packaging/ReleaseChecklist.md)：维护者构建和发布流程。

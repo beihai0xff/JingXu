@@ -2,8 +2,13 @@ import SwiftUI
 import JingXuCore
 
 struct ColorEditPanel: View {
-    @EnvironmentObject private var model: AppModel
     @ObservedObject var session: ColorEditSession
+    let isWorking: Bool
+    let isTransitioning: Bool
+    let externallyControlled: Bool
+    let copyAdjustments: () -> Void
+    let showPresets: () -> Void
+    let discardStale: () -> Void
     @FocusState private var focusedParameter: ColorParameter?
     @State private var histogramIsDragging = false
     var body: some View {
@@ -13,22 +18,22 @@ struct ColorEditPanel: View {
                     Text("调色").font(.title2.bold())
                     if session.isRendering { ProgressView().controlSize(.small) }
                     Spacer()
-                    Text(session.isSaving ? "正在保存…" : session.isDirty ? "未保存" : "已保存").font(.caption).foregroundStyle(.secondary)
+                    Text(session.isSaving ? "正在保存…" : session.isDirty ? "未保存" : session.snapshot.isSystemPhoto ? "草稿已保存" : "已保存").font(.caption).foregroundStyle(.secondary)
                 }
                 HStack {
                     Button("撤销") { session.undo() }.disabled(!session.history.canUndo)
                     Button("重做") { session.redo() }.disabled(!session.history.canRedo)
                     Spacer()
-                    Button(session.comparing ? "松开恢复成片" : "按住对比原图") {}
+                    Button(session.comparing ? "松开恢复成片" : (session.snapshot.usesRenderedBase ? "本次编辑前对比" : "按住对比原图")) {}
                         .buttonStyle(OriginalComparisonButtonStyle { pressed in
                             if pressed {
                                 focusedParameter = nil
                                 session.beginComparison()
                             } else { session.endComparison() }
                         })
-                        .disabled(!session.usable || model.isWorking)
-                        .help("按住查看未调色、未裁剪的原图，松开或移出按钮恢复成片；不会修改调整。")
-                }.disabled(model.isPreviewTransitioning)
+                        .disabled(!session.usable || isWorking)
+                        .help(session.snapshot.usesRenderedBase ? "按住查看其他应用提供的成片底图；只移除镜序调整，保留之前的编辑。" : "按住查看未调色、未裁剪的原图，松开或移出按钮恢复成片；不会修改调整。")
+                }.disabled(isTransitioning)
                 if let error = session.saveError {
                     Text("保存失败：\(error)").font(.caption).foregroundStyle(.red).textSelection(.enabled)
                     HStack {
@@ -40,19 +45,19 @@ struct ColorEditPanel: View {
                     Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
                     HStack {
                         Button("重试") { session.render(interactive: false) }
-                        Button("放弃旧调整…") { model.discardStaleColor() }
+                        Button("放弃旧调整…") { discardStale() }
                     }
                 }
                 if let result = session.result {
                     ColorHistogram(session: session, result: result.histogram,
-                        enabled: session.usable && !model.isWorking && !model.isPreviewTransitioning &&
-                            !model.automationOwnsOperation && !session.isExternallyControlled && !session.isComposing,
+                        enabled: session.usable && !isWorking && !isTransitioning &&
+                            !externallyControlled && !session.isExternallyControlled && !session.isComposing,
                         prepare: {
                             histogramIsDragging = true
                             focusedParameter = nil
                             session.endGesture()
                         }, finished: { histogramIsDragging = false })
-                        .id(session.snapshot.asset.id)
+                        .id(session.snapshot.id)
                 }
                 ForEach(ColorGroup.allCases, id: \.self) { group in
                     GroupBox(group.title) {
@@ -82,18 +87,18 @@ struct ColorEditPanel: View {
                                 }
                             }
                         }.padding(.vertical, 4)
-                    }.disabled(session.result == nil || model.isWorking || model.isPreviewTransitioning)
+                    }.disabled(session.result == nil || isWorking || isTransitioning)
                 }
                 HStack {
-                    Button("复制调整") { model.copyColorAdjustments() }
-                    Button("预设…") { model.showColorPresets() }
+                    Button("复制调整") { copyAdjustments() }
+                    Button("预设…") { showPresets() }
                     Spacer()
                 }.disabled(!session.usable)
-                Button("恢复原图") { session.resetAll() }.disabled(session.result == nil || model.isPreviewTransitioning)
-                Text("调整自动保存在图库；导出成片可生成独立图片。").font(.caption2).foregroundStyle(.secondary)
+                Button(session.snapshot.isSystemPhoto ? "重置镜序调整" : "恢复原图") { session.resetAll() }.disabled(session.result == nil || isTransitioning)
+                Text(session.snapshot.isSystemPhoto ? "调整自动保存为本机草稿；点击「保存到系统照片」后提交。" : "调整自动保存在图库；导出成片可生成独立图片。").font(.caption2).foregroundStyle(.secondary)
             }.padding(14)
         }.background(Color(nsColor: .controlBackgroundColor))
-            .disabled(model.automationOwnsOperation || session.isExternallyControlled || session.isComposing)
+            .disabled(isWorking || isTransitioning || externallyControlled || session.isExternallyControlled || session.isComposing)
             .onChange(of: focusedParameter) { previous, _ in if previous != nil && !histogramIsDragging { session.endGesture() } }
     }
 }

@@ -14,7 +14,9 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if let item = model.previewAsset {
+            if model.showsSystemPhotos, let photos = model.systemPhotos {
+                SystemPhotosView(photos: photos, leave: model.leaveSystemPhotos)
+            } else if let item = model.previewAsset {
                 if model.comparisonReference != nil { ComparisonView().environmentObject(model) }
                 else { photoPreview(item) }
             } else {
@@ -31,7 +33,10 @@ struct ContentView: View {
                 }
             }
         }
-        .toolbar { toolbar }
+        .toolbar { if !model.showsSystemPhotos { toolbar } }
+        .sheet(isPresented: Binding(get: { model.systemPhotos?.uploadSnapshots != nil }, set: { if !$0 { model.systemPhotos?.cancelUpload() } })) {
+            if let photos = model.systemPhotos { SystemPhotosUploadSheet(photos: photos) }
+        }
         .sheet(item: $model.xmpPlan) { plan in
             VStack(alignment: .leading, spacing: 14) {
                 Text("导出新 XMP").font(.title2)
@@ -169,11 +174,13 @@ struct ContentView: View {
                 }
                 if let draft = model.colorEditor?.composition {
                     Divider()
-                    CompositionPanel(draft: draft).frame(width: 310)
+                    CompositionPanel(draft: draft, isBusy: model.isPreviewTransitioning, cancel: { model.colorEditor?.cancelComposition() }, apply: model.applyComposition).frame(width: 310)
                 } else if let editor = model.colorEditor {
                     Divider()
-                    ColorEditPanel(session: editor)
-                        .id(editor.snapshot.asset.id)
+                    ColorEditPanel(session: editor, isWorking: model.isWorking, isTransitioning: model.isPreviewTransitioning,
+                            externallyControlled: model.automationOwnsOperation, copyAdjustments: model.copyColorAdjustments,
+                            showPresets: model.showColorPresets, discardStale: model.discardStaleColor)
+                        .id(editor.snapshot.id)
                         .disabled(model.isPreviewTransitioning)
                         .frame(width: 310)
                 } else if showsPreviewInspector {
@@ -194,6 +201,10 @@ struct ContentView: View {
 
     private var sidebar: some View {
         List(selection: Binding(get: { model.sidebarSelection }, set: { model.selectSidebar($0) })) {
+            Section {
+                Button("系统照片", systemImage: "photo.on.rectangle") { model.openSystemPhotos() }
+                    .disabled(model.isWorking || !model.canChangeBrowseScope)
+            }
             Section("图库") {
                 ForEach(SmartCollection.allCases) { collection in
                     Label(collection.displayName, systemImage: collection.systemImage)

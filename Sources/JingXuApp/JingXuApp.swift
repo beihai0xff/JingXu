@@ -41,6 +41,7 @@ struct JingXuApp: App {
                     .keyboardShortcut("i", modifiers: [.command, .shift])
                 Divider()
                 Button("分享照片…") { model.showPhotoShare() }.disabled(!model.canShowPhotoShare)
+                Button("加入系统照片…") { model.showSystemPhotoUpload() }.disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
                 Button("结束本次分享会话…") { model.endPhotoShare() }.disabled(!model.photoShareSession.isActive)
                 Divider()
                 Button("照片调色") { model.beginColorEditing() }.disabled(model.previewAsset == nil || !model.canStartColorAction)
@@ -57,8 +58,8 @@ struct JingXuApp: App {
                 Button("取消淘汰标记（U）") { model.flagFromMenu(.none) }
                     .disabled(model.annotationTargetIDs.isEmpty || model.operationBlockReason(.annotation) != nil || model.colorEditor != nil)
                 Divider()
-                Button("重新分析当前范围…") { model.prepareQualityReanalysis() }.disabled(model.isWorking || model.fileOperationsBlockedByShare)
-                Button("重新分析全部旧结果…") { model.prepareQualityReanalysis(legacyOnly: true) }.disabled(model.isWorking || model.fileOperationsBlockedByShare)
+                Button("重新分析当前范围…") { model.prepareQualityReanalysis() }.disabled(model.operationBlockReason(.files) != nil)
+                Button("重新分析全部旧结果…") { model.prepareQualityReanalysis(legacyOnly: true) }.disabled(model.operationBlockReason(.files) != nil)
                 Button("暂停质量重算") { model.pauseQualityReanalysis() }.disabled(!model.isReanalyzing)
                 Button("继续质量重算") { model.resumeQualityReanalysis() }.disabled(model.isWorking || model.resumableQualityJob == nil || model.fileOperationsBlockedByShare)
                 Divider()

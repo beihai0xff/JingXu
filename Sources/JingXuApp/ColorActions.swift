@@ -12,6 +12,7 @@ extension AppModel {
         canInteractWithLibrary && colorEditor?.isComposing != true && !isWorking && !isLoadingAssets && !isSavingAnnotation && !isPreparingSelection && !photoShareSession.blocksFileChanges
     }
     var canInteractWithLibrary: Bool {
+        !showsSystemPhotos && systemPhotos?.uploadSnapshots == nil && systemPhotos?.blocksLocalOperations != true &&
         xmpPlan == nil && !isShowingKeywords && !isShowingPhotoShare && (!isWorking || isAnalyzingNewAssets) && importPlan == nil && !isShowingImportReport && !isPreviewTransitioning && colorBatchPlan == nil && colorExportPlan == nil &&
         archivePlan == nil && deletionPlan == nil && missingAssetPlan == nil && sourceMergePlan == nil && qualityReanalysisPlan == nil &&
         !isShowingImport && !isShowingAlbumCreator && !isShowingColorExport
@@ -75,7 +76,7 @@ extension AppModel {
     func finishColorEditing() { transitionPreview {} }
     func makeColorSession(_ snapshot: ColorEditSnapshot) throws -> ColorEditSession {
         guard let store else { throw ColorEditError("图库未打开") }
-        return try ColorEditSession(store: store, snapshot: snapshot) { [weak self] in await self?.refreshChangedAssets(ids: [snapshot.asset.id]) }
+        return try ColorEditSession(repository: store, snapshot: .init(local: snapshot)) { [weak self] in await self?.refreshChangedAssets(ids: [snapshot.asset.id]) }
     }
     func attachColorSession(_ session: ColorEditSession) {
         colorEditor = session
@@ -95,7 +96,7 @@ extension AppModel {
             do {
                 try await checkDeletionRecovery()
                 try await store.backup(to: backupURL())
-                _ = try await store.discardStaleColorAdjustments(assetID: editor.snapshot.asset.id)
+                _ = try await store.discardStaleColorAdjustments(assetID: editor.snapshot.id)
                 editor.dispose(); colorEditor = nil; colorEditorObservation = nil
                 await reloadAssets()
                 isPreviewTransitioning = false

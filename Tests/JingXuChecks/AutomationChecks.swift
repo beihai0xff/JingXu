@@ -31,7 +31,7 @@ import GRDB
             beforeOpen?()
             await opening?()
             if let automationEditor { return automationEditor }
-            let editor = try ColorEditSession(store: store, snapshot: await store.colorSnapshot(assetID: assetID), saved: {})
+            let editor = try ColorEditSession(repository: store, snapshot: .init(local: await store.colorSnapshot(assetID: assetID)), saved: {})
             automationEditor = editor
             return editor
         }
