@@ -19,15 +19,17 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.7.1</string>
+    <string>0.8.0</string>
     <key>CFBundleVersion</key>
-    <string>32</string>
+    <string>33</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.photography</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>镜序访问系统照片以浏览照片和相册、保存调色、添加和删除照片。开启 iCloud 照片后，更改由系统同步到其他设备。</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
 </dict>

@@ -126,7 +126,7 @@ public struct AutomationSelection: Sendable {
         }
         let editor = host?.automationEditor
         let value = Version(asset: snapshot.asset, source: snapshot.source, revision: snapshot.revision,
-                            draft: editor?.snapshot.asset.id == snapshot.asset.id ? editor?.editVersion : nil)
+                            draft: editor?.snapshot.id == snapshot.asset.id ? editor?.editVersion : nil)
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         return SHA256.hash(data: try encoder.encode(value)).map { String(format: "%02x", $0) }.joined()
@@ -153,7 +153,7 @@ public struct AutomationSelection: Sendable {
         if let id = selected.currentID, selected.photos.contains(where: { $0.id == id }) {
             let snapshot = try await store.colorSnapshot(assetID: id)
             let editor = host.automationEditor
-            let values = try editor?.snapshot.asset.id == id ? editor!.adjustments : snapshot.adjustments
+            let values = try editor?.snapshot.id == id ? editor!.adjustments : snapshot.adjustments
             let ranges = Dictionary(uniqueKeysWithValues: ColorParameter.allCases.map { p in
                 (p.rawValue, Value.array([.double(p.range(isRAW: snapshot.isRAW).lowerBound), .double(p.range(isRAW: snapshot.isRAW).upperBound)]))
             })
@@ -180,7 +180,7 @@ public struct AutomationSelection: Sendable {
             let snapshot = try await store.colorSnapshot(assetID: id)
             guard try version(snapshot) == args.requiredString("editVersion") else { throw ColorEditError("照片、来源或调整已变化，请重读上下文") }
             let original = args["original"]?.boolValue ?? false
-            let values = try original ? ColorAdjustments() : (host.automationEditor?.snapshot.asset.id == id ? host.automationEditor!.adjustments : snapshot.adjustments)
+            let values = try original ? ColorAdjustments() : (host.automationEditor?.snapshot.id == id ? host.automationEditor!.adjustments : snapshot.adjustments)
             let result = try await ColorImageRenderer.shared.render(snapshot, adjustments: values, maximumDimension: 2048)
             try await store.validateColorSnapshot(snapshot)
             _ = try await scope(args)
@@ -203,7 +203,7 @@ public struct AutomationSelection: Sendable {
             let previousVersion = previousEditor?.editVersion
             let editor = try await host.automationOpenEditor(assetID: snapshot.asset.id)
             guard enabled, !revokedClients.contains(client),
-                  editor.snapshot.asset.id == snapshot.asset.id,
+                  editor.snapshot.id == snapshot.asset.id,
                   (previousEditor == nil ? editor.snapshot.revision == snapshot.revision : (previousEditor === editor && editor.editVersion == previousVersion)) else {
                 throw ColorEditError("编辑会话或连接已变化，请重新读取上下文")
             }

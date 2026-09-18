@@ -77,6 +77,7 @@ import JingXuCore
 extension AppModel: ColorAutomationHost {
     var automationSelection: AutomationSelection {
         get async throws {
+            guard !showsSystemPhotos, systemPhotos?.uploadSnapshots == nil else { throw ColorEditError("系统照片暂不支持 MCP 操作，请返回本地图库") }
             let token = automationSelectionToken
             let rows = try await resolveColorTargets()
             guard token == automationSelectionToken else { throw ColorEditError("选择已变化") }
@@ -106,7 +107,7 @@ extension AppModel: ColorAutomationHost {
     func automationOpenEditor(assetID: String) async throws -> ColorEditSession {
         guard automationOwnsOperation, let store else { throw ColorEditError("没有取得调色操作权限") }
         if let editor = colorEditor {
-            guard editor.snapshot.asset.id == assetID else { throw ColorEditError("当前编辑照片已变化") }
+            guard editor.snapshot.id == assetID else { throw ColorEditError("当前编辑照片已变化") }
             return editor
         }
         guard colorTargetIDs.contains(assetID), let item = try await store.assetListItem(id: assetID) else { throw ColorEditError("照片已不在当前范围") }

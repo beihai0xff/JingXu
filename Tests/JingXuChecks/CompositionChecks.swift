@@ -118,7 +118,7 @@ enum CompositionChecks {
         let (store, source, _) = try await PhotoShareChecks.fixture(root)
         let snapshot = try await ColorChecks.fixture(store: store, source: source, name: "edit.png")
         let detector: CompositionSession.Detector = { _ in [CGRect(x: 0.4, y: 0.3, width: 0.2, height: 0.3)] }
-        let editor = try ColorEditSession(store: store, snapshot: snapshot, saved: {})
+        let editor = try ColorEditSession(repository: store, snapshot: .init(local: snapshot), saved: {})
         editor.start()
         editor.change(.exposure, value: 0.5)
         try await editor.beginComposition(detector: detector)
@@ -169,12 +169,12 @@ enum CompositionChecks {
         try await eventually { stale.preview != nil }
         stale.reset()
         var external = editor.adjustments; external.shadows = 15
-        _ = try await store.saveColorAdjustments(external, snapshot: editor.snapshot)
+        _ = try await store.saveColorAdjustments(external, snapshot: editor.snapshot.localSnapshot())
         try check(!(await editor.applyComposition()) && stale.errorMessage != nil, "过期修订覆盖后续编辑")
         editor.cancelComposition(); editor.dispose()
 
         let nextSnapshot = try await store.colorSnapshot(assetID: snapshot.asset.id)
-        let next = try ColorEditSession(store: store, snapshot: nextSnapshot, saved: {})
+        let next = try ColorEditSession(repository: store, snapshot: .init(local: nextSnapshot), saved: {})
         next.resetAll(); _ = await next.flush()
         try await next.beginComposition(detector: { _ in
             try? await Task.sleep(for: .milliseconds(200)) // Deliberately ignores cancellation.
@@ -191,7 +191,7 @@ enum CompositionChecks {
         let beforeReopen = try await store.colorSnapshot(assetID: snapshot.asset.id)
         var proportional = ColorAdjustments(); proportional.crop = CropAdjustment(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
         let changedSnapshot = try await store.saveColorAdjustments(proportional, snapshot: beforeReopen)
-        let changed = try ColorEditSession(store: store, snapshot: changedSnapshot, saved: {})
+        let changed = try ColorEditSession(repository: store, snapshot: .init(local: changedSnapshot), saved: {})
         try await changed.beginComposition(detector: detector)
         let replaced = changed.composition!
         try await eventually { replaced.preview != nil && !replaced.isAnalyzing }

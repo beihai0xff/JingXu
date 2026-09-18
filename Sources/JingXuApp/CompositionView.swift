@@ -2,8 +2,10 @@ import SwiftUI
 import JingXuCore
 
 struct CompositionPanel: View {
-    @EnvironmentObject private var model: AppModel
     @ObservedObject var draft: CompositionSession
+    let isBusy: Bool
+    let cancel: () -> Void
+    let apply: () -> Void
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -35,15 +37,15 @@ struct CompositionPanel: View {
                 Text("拖动画框移动取景，拖动四角调整大小。建议优先保留检测到的人物与主体，请检查边缘人物和留白。").font(.caption).foregroundStyle(.secondary)
                 Button("重置裁剪") { draft.reset() }.disabled(draft.preview == nil)
                 HStack {
-                    Button("取消") { model.colorEditor?.cancelComposition() }.keyboardShortcut(.cancelAction)
+                    Button("取消") { cancel() }.keyboardShortcut(.cancelAction)
                     Spacer()
-                    Button("应用") { model.applyComposition() }.buttonStyle(.borderedProminent)
+                    Button("应用") { apply() }.buttonStyle(.borderedProminent)
                         .disabled(!draft.canApply)
                 }
-                Text("应用后自动保存到图库；取消不会改变已有编辑，原片始终保留。").font(.caption2).foregroundStyle(.secondary)
+                Text("应用后保存调整；取消不会改变已有编辑，原片始终保留。").font(.caption2).foregroundStyle(.secondary)
             }.padding(16)
         }.background(Color(nsColor: .controlBackgroundColor))
-            .disabled(draft.isApplying || model.isPreviewTransitioning)
+            .disabled(draft.isApplying || isBusy)
     }
 }
 

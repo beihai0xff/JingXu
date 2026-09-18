@@ -4,6 +4,9 @@ enum LibraryOperation { case browse, annotation, files, color }
 
 extension AppModel {
     func operationBlockReason(_ operation: LibraryOperation) -> String? {
+        if showsSystemPhotos || systemPhotos?.uploadSnapshots != nil || systemPhotos?.blocksLocalOperations == true {
+            return "请先返回本地图库或完成系统照片操作"
+        }
         if isStarting || startupFailure != nil { return "图库尚未打开" }
         if automationOwnsOperation { return "Codex 正在操作照片" }
         if colorEditor?.isComposing == true && operation != .browse { return "请先应用或取消构图" }

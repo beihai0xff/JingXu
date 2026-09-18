@@ -13,7 +13,7 @@ extension ColorChecks {
         try await store.upsertSource(source)
         let first = try await fixture(store: store, source: source, name: "first.png")
         let second = try await fixture(store: store, source: source, name: "second.png", gray: 180)
-        let editor = try ColorEditSession(store: store, snapshot: first, saved: {})
+        let editor = try ColorEditSession(repository: store, snapshot: .init(local: first), saved: {})
         editor.start()
         try await eventually { editor.result != nil && !editor.isRendering }
 
@@ -39,7 +39,7 @@ extension ColorChecks {
 
         editor.redo(); try check(await editor.flush(), "拖动重做保存失败")
         try check(editor.adjustments.exposure == 1.5, "拖动重做未恢复终值")
-        let reopened = try ColorEditSession(store: store, snapshot: await store.colorSnapshot(assetID: first.asset.id), saved: {})
+        let reopened = try ColorEditSession(repository: store, snapshot: .init(local: await store.colorSnapshot(assetID: first.asset.id)), saved: {})
         try check(reopened.adjustments.exposure == 1.5, "重开未恢复拖动结果")
         reopened.dispose()
         editor.beginGesture(); editor.endGesture()
@@ -97,10 +97,10 @@ extension ColorChecks {
         let disposedValues = editor.adjustments
         editor.beginGesture(); editor.change(.exposure, value: 5); editor.endGesture()
         try check(editor.adjustments == disposedValues, "退出会话仍接受迟到手势")
-        let next = try ColorEditSession(store: store, snapshot: second, saved: {})
+        let next = try ColorEditSession(repository: store, snapshot: .init(local: second), saved: {})
         next.start()
         try await eventually { next.result != nil && !next.isRendering }
-        try check(editor.result == nil && next.snapshot.asset.id == second.asset.id, "快速切图后旧结果泄露或图像未释放")
+        try check(editor.result == nil && next.snapshot.id == second.asset.id, "快速切图后旧结果泄露或图像未释放")
         next.beginComparison()
         next.dispose()
         next.endComparison(); next.beginComparison()

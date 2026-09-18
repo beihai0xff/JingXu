@@ -10,6 +10,10 @@ final class ColorApplicationDelegate: NSObject, NSApplicationDelegate {
         guard !terminating else { return .terminateCancel }
         terminating = true; model.isPreviewTransitioning = true
         Task {
+            if let photos = model.systemPhotos, !(await photos.prepareForExit()) {
+                model.isPreviewTransitioning = false; terminating = false
+                sender.reply(toApplicationShouldTerminate: false); return
+            }
             guard await model.prepareShareForExit() else {
                 model.isPreviewTransitioning = false; terminating = false
                 sender.reply(toApplicationShouldTerminate: false); return
@@ -58,6 +62,13 @@ struct ColorWindowGuard: NSViewRepresentable {
         }
         func windowShouldClose(_ sender: NSWindow) -> Bool {
             if closing { return original?.windowShouldClose?(sender) ?? true }
+            if let photos = model?.systemPhotos, photos.editor != nil || photos.blocksLocalOperations {
+                Task {
+                    guard await photos.prepareForExit() else { return }
+                    self.closing = true; sender.performClose(nil)
+                }
+                return false
+            }
             guard let model, model.colorEditor != nil || model.keywordDraft != model.keywordSaved else { return original?.windowShouldClose?(sender) ?? true }
             model.transitionPreview {
                 self.closing = true

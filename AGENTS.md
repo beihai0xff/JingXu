@@ -1,6 +1,6 @@
 # 镜序 Agent 开发指南
 
-本指南适用于整个仓库。镜序是面向摄影爱好者的原生 macOS 相册整理工具：安全导入、非破坏式索引、本地质量分析、照片整理与非破坏式基础调色。默认离线，无账户、云服务或遥测；局部修图、人脸识别、地图和云同步不属于当前范围。
+本指南适用于整个仓库。镜序是面向摄影爱好者的原生 macOS 相册整理工具：安全导入、非破坏式索引、本地质量分析、照片整理与非破坏式基础调色。默认在本机处理，无镜序账户、服务端或遥测；可选 PhotoKit 系统图库由 macOS 负责 iCloud 同步。局部修图、人脸识别和地图不属于当前范围。
 
 ## 开始任务
 
@@ -33,6 +33,7 @@ Swift Package，工具版本声明为 Swift 6.1，最低 macOS 14。界面使用
 | 质量诊断、审核和重算 | Core 下的 `QualityAnalyzer.swift`、`QualityDiagnostics.swift`、`QualityReanalysisCoordinator.swift`；App 下的 `QualityInspector.swift` |
 | 调色、预设、导出 | Core 下的 `ColorAdjustments.swift`、`ColorEditSession.swift`、`ColorImageRenderer.swift`、`ColorCatalog.swift`、`ColorXMPImporter.swift`、`ColorExportCoordinator.swift`；App 下的 `ColorActions.swift`、`ColorEditPanel.swift`、`ColorWorkflowSheets.swift` |
 | 私有人工校准工具 | `Sources/JingXuCalibration/JingXuCalibration.swift`、`Sources/JingXuCore/QualityCalibration.swift` |
+| 系统照片与 iCloud | Core 下的 `SystemPhotoModels.swift`、`ApplePhotoLibraryClient.swift`、`SystemPhotosStore.swift`、`SystemPhotosCoordinator.swift`；App 下的 `SystemPhotosModel.swift`、`SystemPhotosView.swift` |
 | 自动化回归 | `Tests/JingXuChecks/`；入口为 `JingXuChecks.swift` |
 | 打包与发布 | `Scripts/`、`Packaging/`、`.github/workflows/release.yml`、`Tests/ReleasePipeline/` |
 
@@ -43,7 +44,8 @@ Swift Package，工具版本声明为 Swift 6.1，最低 macOS 14。界面使用
 - 索引和分析不修改原照片。导入永不删除来源，保留校验和不覆盖提交；XMP 仅创建新文件，先确认固定清单；已有目标和同目标冲突均跳过，提交必须原子不覆盖。
 - 扫描、导入、分析、来源管理及文件整理接入现有操作互斥。检查实际入口与未完成日志状态，不能只靠禁用按钮防止重入。
 - 文件写入类功能先生成固定清单，展示范围和目标，用户确认后执行；执行时重新核对来源授权、路径边界和文件身份。离线、权限错误、身份不明不能当作“文件不存在”处理。
-- 删除只走系统废纸篓，失败不能退化为永久删除。来源移除、相册删除、失效索引清理与原文件删除是不同操作，保持语义明确。
+- 本地文件删除只走系统废纸篓，失败不能退化为永久删除。系统照片只通过 PhotoKit 删除，由系统「最近删除」提供恢复。来源移除、相册删除、移出相册、失效索引清理和图库照片删除保持独立入口与语义。
+- PhotoKit 写入必须先保存固定清单和提交记录，结果不明时保留记录并阻止自动重试。显示“已加入／保存到系统照片”，不得把系统提交成功等同于 iCloud 同步完成。系统照片不进入本地文件操作。
 - 归档和批量移动使用现有同卷、不覆盖、配套文件分组、备份、日志及恢复机制。保持照片 ID、评分、标签、相册关系和分析；不要用复制后删除绕过跨卷限制。
 - 涉及备份的操作必须在备份成功后执行；事务失败回滚，无法确认文件操作结果时保留日志并停止猜测。数据库备份不能代替文件移动的撤销。
 - 区分“当前可见选择”和“完整筛选范围”：网格每页 200 项，单图可跨页导航；同一筛选跨页保留显式选择，批量移动基于固定的完整选择；清理、归档或重算按各自计划查询范围，不能随手拿界面数组代替完整查询。
@@ -77,6 +79,7 @@ python3 -m unittest discover -s Tests/ReleasePipeline -v
 
 - 测试使用独立临时目录、临时数据库和注入服务，禁止拿真实图库试删除、移动、恢复或重算。覆盖变更相关的成功路径和实际失败风险：取消、权限或备份失败、文件替换、事务失败、中断恢复；完整范围操作还需检查超过 2,000 项的情况。
 - UI 验收素材可用 `swift run JingXuChecks --ui-fixtures` 生成。`swift run JingXuApp` 会打开应用并访问默认图库，不是隔离测试命令；启动前确认测试账户或图库环境已隔离，选择临时照片目录本身并不会隔离数据库。
+- `JINGXU_UI_TEST_ROOT` 模式必须注入 `IsolatedPhotoLibraryClient`；真实 `ApplePhotoLibraryClient` 在初始化 PhotoKit 前拒绝该模式。真实 iCloud 验收使用独立 macOS 用户、专用图库和 Apple 测试账户，假服务检查不能替代真实同步验收。
 - 涉及键盘焦点、快速切图、缩放、Sandbox 授权或废纸篓行为，需在相应实际界面／打包应用验证。CLI 校验通过不等于 UI 或真实 RAW 已验收。
 - 纯文档修改核对路径、命令与 `git diff --check` 即可，无需为文档改动构建应用。交付说明实际执行的检查和未验证项，不复制历史通过记录。
 

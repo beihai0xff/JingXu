@@ -6,7 +6,7 @@ import Foundation
 @MainActor
 public final class CompositionSession: ObservableObject {
     public typealias Detector = @Sendable (CGImage) async throws -> [CGRect]
-    public let snapshot: ColorEditSnapshot
+    public let snapshot: ColorEditingSnapshot
     public let editVersion: UUID
     @Published public private(set) var preview: ColorRenderedImage?
     @Published public private(set) var crop: CropAdjustment
@@ -28,7 +28,7 @@ public final class CompositionSession: ObservableObject {
     public var canApply: Bool { preview != nil && !isLoading && !isApplying && !isAnalyzing }
     public var pixelSize: CGSize? { preview.flatMap { try? crop.pixelRect(in: $0.nativeSize).size } }
 
-    public init(snapshot: ColorEditSnapshot, adjustments: ColorAdjustments, editVersion: UUID,
+    public init(snapshot: ColorEditingSnapshot, adjustments: ColorAdjustments, editVersion: UUID,
                 detector: @escaping Detector = { try await CompositionAnalyzer.shared.regions(in: $0) }) {
         self.snapshot = snapshot; self.editVersion = editVersion; self.detector = detector
         crop = adjustments.crop ?? .full

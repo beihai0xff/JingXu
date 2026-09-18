@@ -14,6 +14,9 @@ enum SidebarDestination: Hashable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    @Published var systemPhotos: SystemPhotosModel?
+    @Published var showsSystemPhotos = false
+    var systemPhotosObservation: AnyCancellable?
     @Published var sources: [SourceRoot] = [] { didSet { if oldValue != sources { automationSelectionToken = UUID() } } }
     @Published var albums: [Album] = []
     @Published var assets: [AssetListItem] = [] {

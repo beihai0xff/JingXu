@@ -210,18 +210,13 @@ public actor AnalysisCoordinator {
             try Task.checkCancellation()
             if let asset = try await repository.asset(id: id), asset.kind == .photo { assets.append(asset) }
         }
-        assets.sort { ($0.capturedAt ?? $0.modifiedAt, $0.id) < ($1.capturedAt ?? $1.modifiedAt, $1.id) }
-        var group: String?
-        for index in 1..<max(1, assets.count) {
-            try Task.checkCancellation()
-            let previous = assets[index - 1], current = assets[index]
-            guard previous.cameraModel == current.cameraModel,
-                  (current.capturedAt ?? current.modifiedAt).timeIntervalSince(previous.capturedAt ?? previous.modifiedAt) <= 2,
-                  let left = try await repository.analysis(for: previous.id)?.featurePrint,
-                  let right = try await repository.analysis(for: current.id)?.featurePrint,
-                  let distance = try? analyzer.featureDistance(left, right), distance < 0.35 else { group = nil; continue }
-            let id = group ?? UUID().uuidString; group = id
-            try await repository.saveSimilarGroup(id, assetIDs: [previous.id, current.id])
+        var items: [SimilarBurstItem] = []
+        for asset in assets {
+            items.append(SimilarBurstItem(id: asset.id, date: asset.capturedAt ?? asset.modifiedAt,
+                camera: asset.cameraModel, feature: try await repository.analysis(for: asset.id)?.featurePrint))
+        }
+        for ids in try SimilarBurstGrouping.groups(items, distance: analyzer.featureDistance) {
+            try await repository.saveSimilarGroup(UUID().uuidString, assetIDs: ids)
         }
     }
 }
