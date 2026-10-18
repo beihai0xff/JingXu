@@ -65,6 +65,10 @@
 
 维护者明确要求“直接继续发布，不用测试”。据此跳过剩余手动界面复查和额外本地测试，按现有 `adhoc` 通道发布 0.9.0（构建 34），保留 GitHub Actions 自带的构建、回归、签名及资产摘要检查。上文 10 月 16 日的结果保留原日期，关键词保存和系统照片额外复查仍列为未验收。真实 PhotoKit、RAW、iCloud、Gatekeeper 安装与覆盖升级的边界不变。最终发布提交与流水线结果以对应 GitHub Release 为准。
 
+2026-10-18 已公开 [v0.9.0 测试版](https://github.com/beihai0xff/JingXu/releases/tag/v0.9.0)，构建 34，源提交为 `861a694de328974c409dc22063b6fb6f75fce628`。[主线 CI](https://github.com/beihai0xff/JingXu/actions/runs/39137507489) 通过全部构建、29 项发布脚本检查和 55 项应用回归；[发布流水线](https://github.com/beihai0xff/JingXu/actions/runs/39138299914) 的 `sign`、`publish`、`update-cask` 均成功。
+
+DMG 与 SHA-256 校验文件均已公开并下载核对，DMG 摘要为 `fbf2819eeeaeef8ba0a511dadc718b57ae2e6deaa6edcad7deb09a12af5c4d82`，与 GitHub 服务端摘要及 Homebrew Cask 一致。README 下载入口与截图说明已同步为 0.9.0。此次没有安装应用或访问真实图库。
+
 ## 验证环境边界
 
 上述界面检查均使用隔离应用，不替换已安装应用，不访问真实图库。真实 PhotoKit 授权、沙盒目录授权、真实 RAW 相机组合及真实 iCloud 跨设备同步需要专用测试账户与图库；假图库与 Core 检查不代表这些外部环境已验收。发布状态以晚间发布准备记录和对应 GitHub Release 为准。
