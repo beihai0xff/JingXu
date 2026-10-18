@@ -42,12 +42,12 @@ public enum PreviewGeometry {
 }
 
 public enum PreviewCanvasRenderer {
-    public static func draw(_ image: CGImage?, in context: CGContext, viewport: CGRect, imageRect: CGRect) {
+    public static func draw(_ image: CGImage?, in context: CGContext, viewport: CGRect, imageRect: CGRect, background: CGColor = CGColor(gray: 0, alpha: 1)) {
         context.saveGState()
         defer { context.restoreGState() }
         context.clip(to: viewport)
         // Every frame is opaque and complete, including while switching image/scale.
-        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.setFillColor(background)
         context.fill(viewport)
         guard let image, !imageRect.isEmpty else { return }
         context.interpolationQuality = .high
@@ -120,6 +120,10 @@ public final class PreviewCanvasView: NSView {
         needsDisplay = true
     }
 
+    public override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance(); needsDisplay = true
+    }
+
     public override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         if actual { perform("actual") }
@@ -153,7 +157,7 @@ public final class PreviewCanvasView: NSView {
 
     public override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
-        PreviewCanvasRenderer.draw(image, in: context, viewport: bounds, imageRect: displayedImageRect)
+        PreviewCanvasRenderer.draw(image, in: context, viewport: bounds, imageRect: displayedImageRect, background: NSColor.windowBackgroundColor.cgColor)
     }
 
     public override func magnify(with event: NSEvent) {

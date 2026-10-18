@@ -98,7 +98,7 @@ struct ComparisonView: View {
         VStack(spacing: 0) {
             HStack {
                 Button("返回网格") { model.closePreview() }
-                if model.currentQuery().similarGroupID != nil { Button("返回原范围") { model.leaveSimilarGroup() } }
+                if model.appliedQuery.similarGroupID != nil { Button("返回原范围") { model.leaveSimilarGroup() } }
                 Button("上一候选") { model.navigatePreview(-1) }.disabled(!model.canNavigatePreview(-1))
                 Button("下一候选") { model.navigatePreview(1) }.disabled(!model.canNavigatePreview(1))
                 Button("设为参考图") { model.promoteComparisonCandidate() }.disabled(!model.previewNavigationEnabled)
@@ -106,7 +106,7 @@ struct ComparisonView: View {
                 Toggle("同步缩放", isOn: $linked).toggleStyle(.checkbox)
                 Button("适应") { transform = CanvasTransform(); transformCommand += 1 }
                 Button("100%") { transform = CanvasTransform(fitted: false); transformCommand += 1 }
-                Button("调色当前照片") {
+                Button("编辑当前照片") {
                     model.transitionPreview { model.comparisonReference = nil; model.clearComparisonPrefetch(); model.beginColorEditing() }
                 }.disabled(!model.canStartColorAction)
             }.padding(10)
@@ -120,18 +120,18 @@ struct ComparisonView: View {
                     ForEach(1...5, id: \.self) { rating in
                         Button { model.updateRating(candidate.rating == rating ? 0 : rating) } label: {
                             Image(systemName: candidate.rating >= rating ? "star.fill" : "star").foregroundStyle(.yellow)
-                        }
+                        }.accessibilityLabel("\(rating) 星")
                     }
                     Button("淘汰并下一张") { model.updateFlag(.rejected, advanceToNext: true) }
                     Button("取消淘汰") { model.updateFlag(.none) }
                     TextField("关键词", text: $model.keywordDraft).onSubmit { Task { _ = await model.flushKeywords() } }
                     Button("保存关键词") { Task { _ = await model.flushKeywords() } }
                 }.padding(10).disabled(model.operationBlockReason(.annotation) != nil)
-                PreviewFilmstrip(items: model.previewFilmstrip, currentID: candidate.id)
+                PreviewFilmstrip(items: model.previewItems, currentID: candidate.id)
             }
             Text(model.activeTaskSummary ?? model.statusText).font(.caption).foregroundStyle(.secondary).padding(6)
         }
-        .background(.black).environment(\.colorScheme, .dark)
+        .background(Color(nsColor: .windowBackgroundColor))
         .onExitCommand { model.closePreview() }
         .accessibilityIdentifier("comparison-view")
     }

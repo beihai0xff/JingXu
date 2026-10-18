@@ -11,6 +11,7 @@ extension AppModel {
     var canStartColorAction: Bool {
         canInteractWithLibrary && colorEditor?.isComposing != true && !isWorking && !isLoadingAssets && !isSavingAnnotation && !isPreparingSelection && !photoShareSession.blocksFileChanges
     }
+    var canExportColor: Bool { canStartColorAction && colorPresetPreview == nil }
     var canInteractWithLibrary: Bool {
         !showsSystemPhotos && systemPhotos?.uploadSnapshots == nil && systemPhotos?.blocksLocalOperations != true &&
         xmpPlan == nil && !isShowingKeywords && !isShowingPhotoShare && (!isWorking || isAnalyzingNewAssets) && importPlan == nil && !isShowingImportReport && !isPreviewTransitioning && colorBatchPlan == nil && colorExportPlan == nil &&
@@ -79,6 +80,7 @@ extension AppModel {
         return try ColorEditSession(repository: store, snapshot: .init(local: snapshot)) { [weak self] in await self?.refreshChangedAssets(ids: [snapshot.asset.id]) }
     }
     func attachColorSession(_ session: ColorEditSession) {
+        colorPresetPreview = nil
         colorEditor = session
         colorEditorObservation = session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         session.start()
@@ -172,31 +174,66 @@ extension AppModel {
         }
     }
     func showColorExport() {
-        guard canStartColorAction, !colorTargetIDs.isEmpty else { return }
-        transitionPreview { self.isShowingColorExport = true }
-    }
-    func prepareColorExport(format: ColorExportFormat) {
-        guard let coordinator = colorExportCoordinator else { return }
-        let panel = NSOpenPanel()
-        panel.title = "选择成片导出目录"; panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let directory = panel.url else { return }
+        guard canExportColor, !colorTargetIDs.isEmpty, let store else { return }
         let ids = colorTargetIDs
-        isShowingColorExport = false
-        startOperation {
-            do { self.colorExportPlan = try await coordinator.prepare(assetIDs: ids, directory: directory, format: format) }
-            catch { self.errorMessage = error.localizedDescription }
+        transitionPreview {
+            self.isPreparingSelection = true
+            Task {
+                defer { self.isPreparingSelection = false }
+                do {
+                    let rows = try await store.assetListItems(ids: ids)
+                    guard rows.count == ids.count, rows.allSatisfy({ $0.kind == .photo }) else { throw ColorEditError("所选照片已变化，请重新选择") }
+                    self.colorExportDraft = rows; self.colorExportDirectory = nil
+                    self.colorExportPlan = nil; self.colorExportError = nil
+                    self.isShowingColorExport = true
+                } catch { self.errorMessage = error.localizedDescription }
+            }
         }
     }
+    func chooseColorExportDirectory(format: ColorExportFormat) {
+        guard isShowingColorExport, !isPreparingColorExport else { return }
+        let panel = NSOpenPanel()
+        panel.title = "选择成片导出目录"; panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
+        panel.directoryURL = colorExportDirectory
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+        colorExportDirectory = directory
+        prepareColorExport(format: format)
+    }
+    func prepareColorExport(format: ColorExportFormat) {
+        guard isShowingColorExport, !isPreparingColorExport, let directory = colorExportDirectory,
+              !colorExportDraft.isEmpty, let coordinator = colorExportCoordinator else { return }
+        colorExportPlan = nil; colorExportError = nil
+        let ids = colorExportDraft.map(\.id), request = UUID()
+        colorExportRequest = request; isPreparingColorExport = true
+        colorExportPreparation = Task {
+            defer { if colorExportRequest == request { isPreparingColorExport = false; colorExportPreparation = nil } }
+            do {
+                try await checkDeletionRecovery()
+                let plan = try await coordinator.prepare(assetIDs: ids, directory: directory, format: format)
+                try Task.checkCancellation()
+                guard colorExportRequest == request, isShowingColorExport else { return }
+                colorExportPlan = plan
+            } catch is CancellationError {} catch {
+                if colorExportRequest == request { colorExportError = error.localizedDescription }
+            }
+        }
+    }
+    func cancelColorExport() {
+        colorExportRequest = UUID(); colorExportPreparation?.cancel(); colorExportPreparation = nil
+        isPreparingColorExport = false; isShowingColorExport = false
+        colorExportDraft = []; colorExportPlan = nil; colorExportDirectory = nil; colorExportError = nil
+    }
     func confirmColorExport(_ plan: ColorExportPlan) {
-        colorExportPlan = nil
-        guard let coordinator = colorExportCoordinator else { return }
+        guard isShowingColorExport, !isPreparingColorExport, colorExportPlan?.id == plan.id,
+              !plan.items.isEmpty, let coordinator = colorExportCoordinator else { return }
+        cancelColorExport()
         startOperation {
             do {
                 let report = try await coordinator.execute(plan) { done, total in
                     await MainActor.run { self.statusText = "正在导出成片 \(done)/\(total)" }
                 }
-                self.statusText = "已导出 \(report.written.count) 张成片"
-                self.errorMessage = "成功 \(report.written.count)，跳过 \(report.skipped.count)，失败 \(report.failed.count)\(report.cancelled ? "；已取消后续导出" : "")\n" + (report.skipped + report.failed).joined(separator: "\n")
+                self.statusText = "已导出 \(report.written.count) 张成片" + (report.cancelled ? "；后续导出已取消" : "")
+                self.colorExportReport = report
             } catch { self.errorMessage = error.localizedDescription }
         }
     }

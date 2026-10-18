@@ -3,7 +3,7 @@ import JingXuCore
 
 extension AppModel {
     var canShowPhotoShare: Bool {
-        canStartColorAction && !isStarting && !isSavingAnnotation && !isShowingColorPresets &&
+        canStartColorAction && colorPresetPreview == nil && !isStarting && !isSavingAnnotation && !isShowingColorPresets &&
         !automationOwnsOperation && errorMessage == nil && !photoShareSession.isActive && !colorTargetIDs.isEmpty
     }
     var fileOperationsBlockedByShare: Bool { isShowingPhotoShare || photoShareSession.blocksFileChanges }

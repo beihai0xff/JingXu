@@ -7,6 +7,10 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showsPreviewFilmstrip = true
     @State private var showsPreviewInspector = false
+    @State private var showsLibraryInspector = false
+    @State private var showsFilters = false
+    @State private var showsViewOptions = false
+    @State private var inspectorTab = PhotoInspectorTab.information
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: model.gridSize, maximum: model.gridSize * 1.35), spacing: 12)]
@@ -23,14 +27,16 @@ struct ContentView: View {
                 NavigationSplitView(columnVisibility: $columnVisibility) {
                     sidebar
                         .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 300)
-                } content: {
-                    libraryGrid
-                        .navigationSplitViewColumnWidth(min: 560, ideal: 760)
                 } detail: {
-                    inspector
-                        .disabled(model.isDeleting)
-                        .navigationSplitViewColumnWidth(min: 270, ideal: 320, max: 420)
+                    HStack(spacing: 0) {
+                        libraryGrid
+                        if showsLibraryInspector {
+                            Divider()
+                            inspector.frame(width: 290).disabled(model.isDeleting)
+                        }
+                    }
                 }
+                .navigationSplitViewStyle(.balanced)
             }
         }
         .toolbar { if !model.showsSystemPhotos { toolbar } }
@@ -169,20 +175,17 @@ struct ContentView: View {
                         .id(item.id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if showsPreviewFilmstrip {
-                        PreviewFilmstrip(items: model.previewFilmstrip, currentID: item.id)
+                        PreviewFilmstrip(items: model.previewItems, currentID: item.id)
                     }
                 }
-                if let draft = model.colorEditor?.composition {
+                if let editor = model.colorEditor {
                     Divider()
-                    CompositionPanel(draft: draft, isBusy: model.isPreviewTransitioning, cancel: { model.colorEditor?.cancelComposition() }, apply: model.applyComposition).frame(width: 310)
-                } else if let editor = model.colorEditor {
-                    Divider()
-                    ColorEditPanel(session: editor, isWorking: model.isWorking, isTransitioning: model.isPreviewTransitioning,
-                            externallyControlled: model.automationOwnsOperation, copyAdjustments: model.copyColorAdjustments,
-                            showPresets: model.showColorPresets, discardStale: model.discardStaleColor)
-                        .id(editor.snapshot.id)
-                        .disabled(model.isPreviewTransitioning)
-                        .frame(width: 310)
+                    PhotoEditingSidebar(session: editor, presetPreview: $model.colorPresetPreview, presets: model.colorPresets,
+                        isWorking: model.isWorking, isTransitioning: model.isPreviewTransitioning,
+                        externallyControlled: model.automationOwnsOperation, beginComposition: model.beginComposition,
+                        applyComposition: model.applyComposition, copyAdjustments: model.copyColorAdjustments,
+                        managePresets: model.showColorPresets, discardStale: model.discardStaleColor)
+                        .id(editor.snapshot.id).frame(width: 290)
                 } else if showsPreviewInspector {
                     Divider()
                     inspector
@@ -195,24 +198,27 @@ struct ContentView: View {
                 statusBar
             }
         }
-        .background(.black)
-        .environment(\.colorScheme, .dark)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var sidebar: some View {
-        List(selection: Binding(get: { model.sidebarSelection }, set: { model.selectSidebar($0) })) {
-            Section {
-                Button("系统照片", systemImage: "photo.on.rectangle") { model.openSystemPhotos() }
-                    .disabled(model.isWorking || !model.canChangeBrowseScope)
-            }
+        VStack(spacing: 0) {
+            WorkspaceSwitcher(systemPhotos: false, selectLocal: {}, selectSystem: model.openSystemPhotos)
+                .disabled(!model.canChangeBrowseScope)
+            List(selection: Binding(get: { model.sidebarSelection }, set: { model.selectSidebar($0) })) {
             Section("图库") {
-                ForEach(SmartCollection.allCases) { collection in
+                ForEach([SmartCollection.all, .recent, .review, .rejected]) { collection in
                     Label(collection.displayName, systemImage: collection.systemImage)
                         .tag(SidebarDestination.smart(collection))
                 }
             }
 
-            Section("来源") {
+            Section("媒体类型") {
+                ForEach([SmartCollection.photos, .raw, .videos]) { collection in
+                    Label(collection.displayName, systemImage: collection.systemImage).tag(SidebarDestination.smart(collection))
+                }
+            }
+            Section("文件夹") {
                 ForEach(model.visibleFolderRows) { row in
                     if row.outline.node != nil {
                         FolderSidebarLabel(row: row)
@@ -252,14 +258,32 @@ struct ContentView: View {
         }
         .listStyle(.sidebar)
         .disabled(!model.canChangeBrowseScope)
+            Label("本机图库 · 原片保留", systemImage: "checkmark.shield")
+                .font(.caption).foregroundStyle(.secondary).padding(12)
+        }
         .navigationTitle("镜序")
     }
 
     private var libraryGrid: some View {
         VStack(spacing: 0) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(model.libraryTitle).font(.title2.weight(.medium))
+                    Text("\(model.matchingAssetCount) 项 · \(model.appliedQuery.sortOrder.displayName)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if model.isBatchSelecting {
+                    Button("全选当前范围") { model.selectAllMatchingPhotos() }
+                        .buttonStyle(.borderless).disabled(!model.canChangeBrowseScope)
+                }
+                Button(model.isBatchSelecting ? "完成选择" : "选择", systemImage: model.isBatchSelecting ? "checkmark" : "checkmark.circle") {
+                    model.changeCheckboxMode(!model.isBatchSelecting)
+                }.disabled(!model.canChangeBrowseScope)
+            }.padding(20)
             FolderScopeBar()
-            filterBar
-            if model.currentQuery().similarGroupID != nil {
+            activeFilters
+            if model.appliedQuery.similarGroupID != nil {
                 HStack { Text("相似连拍组").font(.caption); Spacer(); Button("返回原范围") { model.leaveSimilarGroup() } }.padding(8)
             }
             BatchSelectionBar()
@@ -298,6 +322,8 @@ struct ContentView: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
+                      LazyVStack(spacing: 0) {
+                        if model.hasPreviousPage { loadMore(before: true) }
                         LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
                             ForEach(model.assets) { item in
                                 AssetCell(item: item, size: model.gridSize, isSelected: item.kind == .photo ? model.photoSelection.selectedIDs.contains(item.id) : model.selectedAssetID == item.id)
@@ -334,6 +360,9 @@ struct ContentView: View {
                             }
                             .onChange(of: model.gridSize) { _, _ in model.gridColumns = max(1, Int((geometry.size.width - 16) / (model.gridSize + 12))) }
                         })
+                        if model.hasNextPage { loadMore(before: false) }
+                        else { Text("已显示当前范围全部项目").font(.caption).foregroundStyle(.secondary).padding(16) }
+                      }
                     }
                     .onChange(of: model.selectedAssetID, initial: true) { _, id in
                         if let id { proxy.scrollTo(id) }
@@ -345,36 +374,44 @@ struct ContentView: View {
         }
     }
 
-    private var filterBar: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            BrowseSearchField(text: $model.searchText, changed: { model.scheduleSearch() }, submit: { model.requestFilters() }, composing: { model.searchTask?.cancel() })
-            Picker("图片排序", selection: $model.sortOrder) {
-                ForEach(BrowseSortOrder.allCases) { order in
-                    Text(order.displayName).tag(order)
-                }
+    private func loadMore(before: Bool) -> some View {
+        BrowseLoadMore(title: before ? "载入前面的照片" : "继续滚动浏览 · \(model.browseSummary)",
+            isLoading: model.isLoadingMoreAssets,
+            canLoad: !model.isLoadingAssets && !model.isLoadingMoreAssets && model.browseError == nil,
+            load: { model.loadMoreAssets(before: before) })
+            .id("load-\(before)-\(model.assets.count)")
+    }
+
+    private var activeFilters: some View {
+        HStack(spacing: 8) {
+            if !model.appliedQuery.searchText.isEmpty {
+                FilterChip(title: "搜索：" + model.appliedQuery.searchText) { model.searchText = ""; model.requestFilters() }
             }
-            .labelsHidden()
-            .frame(width: 145)
-            Divider().frame(height: 18)
+            if model.appliedQuery.minimumRating > 0 {
+                FilterChip(title: "\(model.appliedQuery.minimumRating) 星及以上") { model.minimumRating = 0 }
+            }
+            if let flag = model.appliedQuery.flag {
+                FilterChip(title: flag.displayName) { model.flagFilter = nil }
+            }
+            if model.hasUserFilters { Button("清除筛选") { model.clearFilters() }.buttonStyle(.borderless).font(.caption) }
+            Spacer(minLength: 0)
+        }.padding(.horizontal, 20).padding(.bottom, model.hasUserFilters ? 12 : 0)
+            .disabled(!model.canChangeBrowseScope)
+    }
+
+    private var filters: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("筛选照片").font(.headline)
             Picker("最低评分", selection: $model.minimumRating) {
                 Text("全部评分").tag(0)
-                ForEach(1...5, id: \.self) { Text("\($0) 星以上").tag($0) }
+                ForEach(1...5, id: \.self) { Text("\($0) 星及以上").tag($0) }
             }
-            .labelsHidden()
-            .frame(width: 115)
-            Picker("旗标", selection: $model.flagFilter) {
-                Text("全部旗标").tag(AssetFlag?.none)
-                ForEach(AssetFlag.allCases, id: \.self) {
-                    Text($0.displayName).tag(AssetFlag?.some($0))
-                }
+            Picker("照片标记", selection: $model.flagFilter) {
+                Text("全部标记").tag(AssetFlag?.none)
+                ForEach(AssetFlag.allCases, id: \.self) { Text($0.displayName).tag(AssetFlag?.some($0)) }
             }
-            .labelsHidden()
-            .frame(width: 105)
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 42)
-        .disabled(!model.canInteractWithLibrary || model.isSavingAnnotation || model.isShowingKeywords)
+            Button("清除筛选") { model.clearFilters() }
+        }.padding(18).frame(width: 280).disabled(!model.canChangeBrowseScope)
     }
 
     private var statusBar: some View {
@@ -383,8 +420,7 @@ struct ContentView: View {
                 HStack {
                     Text(model.browseSummary).font(.caption).monospacedDigit()
                     Spacer()
-                    Button("上一页") { model.turnPage(-1) }.disabled(!model.hasPreviousPage || !model.canChangeBrowseScope)
-                    Button("下一页") { model.turnPage(1) }.disabled(!model.hasNextPage || !model.canChangeBrowseScope)
+
                 }
             }
             HStack {
@@ -416,11 +452,7 @@ struct ContentView: View {
                 Button("继续") { model.resumeQualityReanalysis() }.buttonStyle(.borderless)
                 Button("取消重算") { model.cancelPausedQualityJob() }.buttonStyle(.borderless)
             }
-            if model.previewAsset == nil {
-                Image(systemName: "photo")
-                Slider(value: $model.gridSize, in: 100...260)
-                    .frame(width: 110)
-            }
+
             }
         }
         .padding(.horizontal, 12)
@@ -432,17 +464,25 @@ struct ContentView: View {
         if let item = model.previewAsset ?? model.selectedAsset {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    LargePreview(item: item)
-                        .onTapGesture { model.openPreview(item) }
-                        .help("点击放大查看原图")
-                    HistogramView(item: item).id(item.id)
-                    Text("质量诊断基于原始照片").font(.caption2).foregroundStyle(.secondary)
-                    Text(item.fileName).font(.headline).textSelection(.enabled)
-                    ratingControl(item)
-                    flagControl(item)
-                    metadataSection(item)
-                    qualitySection(item)
-                    keywordSection(item)
+                    Picker("照片详情", selection: $inspectorTab) {
+                        ForEach(PhotoInspectorTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }.pickerStyle(.segmented).labelsHidden()
+                    if model.previewAsset == nil && model.selectedPhotoIDs.count > 1 {
+                        Text("已选择 \(model.selectedPhotoIDs.count) 张照片").font(.headline)
+                        Text("使用上方操作栏批量评分、整理或导出。").font(.callout).foregroundStyle(.secondary)
+                    } else {
+                        Text(item.fileName).font(.headline).textSelection(.enabled)
+                        if inspectorTab == .information {
+                            ratingControl(item)
+                            flagControl(item)
+                            metadataSection(item)
+                            keywordSection
+                        } else {
+                            HistogramView(item: item).id(item.id)
+                            Text("质量诊断基于原始照片").font(.caption).foregroundStyle(.secondary)
+                            QualityInspector(item: item)
+                        }
+                    }
                     Divider()
                     HStack {
                         Button("在访达中显示") { model.revealSelectedInFinder() }
@@ -513,12 +553,7 @@ struct ContentView: View {
         .font(.caption)
     }
 
-    @ViewBuilder
-    private func qualitySection(_ item: AssetListItem) -> some View {
-        QualityInspector(item: item)
-    }
-
-    private func keywordSection(_ item: AssetListItem) -> some View {
+    private var keywordSection: some View {
         GroupBox("关键词") {
             HStack {
                 TextField("旅行, 人像, 夜景", text: $model.keywordDraft)
@@ -536,10 +571,27 @@ struct ContentView: View {
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
             if model.previewAsset == nil {
-                Button("添加文件夹", systemImage: "folder.badge.plus") { model.chooseAndAddFolder() }
-                    .disabled(model.operationBlockReason(.files) != nil).help(model.operationBlockReason(.files) ?? "添加照片来源")
-                Button("导入", systemImage: "externaldrive.badge.plus") { model.isShowingImport = true }
-                    .disabled(model.operationBlockReason(.files) != nil)
+                BrowseSearchField(text: $model.searchText, changed: { model.scheduleSearch() }, submit: { model.requestFilters() }, composing: { model.searchTask?.cancel() })
+                    .frame(minWidth: 210, idealWidth: 260, maxWidth: 300)
+                    .disabled(!model.canInteractWithLibrary || model.isSavingAnnotation)
+                Menu("添加照片", systemImage: "plus") {
+                    Button("添加文件夹…") { model.chooseAndAddFolder() }
+                    Button("从相机卡导入…") { model.isShowingImport = true }
+                }.disabled(model.operationBlockReason(.files) != nil)
+                Button("筛选", systemImage: "line.3.horizontal.decrease") { showsFilters.toggle() }
+                    .popover(isPresented: $showsFilters) { filters }
+                Button("视图选项", systemImage: "slider.horizontal.3") { showsViewOptions.toggle() }
+                    .labelStyle(.iconOnly)
+                    .popover(isPresented: $showsViewOptions) {
+                        VStack(alignment: .leading, spacing: 18) {
+                            GridViewOptions(size: $model.gridSize, showsFileNames: $model.showsFileNames)
+                            Picker("排序", selection: $model.sortOrder) {
+                                ForEach(BrowseSortOrder.allCases) { Text($0.displayName).tag($0) }
+                            }.disabled(!model.canChangeBrowseScope)
+                        }.padding(18).frame(width: 290)
+                    }
+                Button("照片详情", systemImage: "sidebar.right") { showsLibraryInspector.toggle() }
+                    .labelStyle(.iconOnly).help(showsLibraryInspector ? "隐藏照片详情" : "显示照片详情")
                 Menu("整理") {
                     Button("按日期重新归档…") { model.prepareArchive() }.disabled(model.archivePending)
                     Button("撤销最近一次归档…") { model.resumeArchive(undo: true) }
@@ -601,19 +653,21 @@ private struct AssetCell: View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .topTrailing) {
                 PhotoThumbnail(item: item, size: Int(size), failureChanged: { thumbnailFailed = $0 })
-                    .aspectRatio(1, contentMode: .fit)
+                    .aspectRatio(1.15, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                 HStack(spacing: 4) {
                     if item.isColorEdited { badge("slider.horizontal.3", color: .purple).help("已编辑").accessibilityLabel("已编辑") }
                     if item.kind == .video { badge("video.fill", color: .blue) }
                     if item.hasPendingQualityWarning { badge("exclamationmark.triangle.fill", color: .orange) }
-                    if item.similarGroupID != nil || item.issues.contains(.similarBurst) { badge("square.stack.3d.up", color: .blue) }
+                    if item.similarGroupID != nil || item.issues.contains(.similarBurst) { badge("square.stack.3d.up", color: .blue).help("相似照片").accessibilityLabel("相似照片") }
                     if item.flag == .rejected { badge("xmark", color: .red) }
                 }
                 .padding(7)
             }
-            Text(item.fileName).font(.caption).lineLimit(1)
-                .overlay { if thumbnailFailed { clickHandler } }
+            if model.showsFileNames || thumbnailFailed {
+                Text(item.fileName).font(.caption).lineLimit(1).help(item.fileName)
+                    .overlay { if thumbnailFailed { clickHandler } }
+            }
             HStack(spacing: 4) {
                 if item.rating > 0 {
                     Label("\(item.rating)", systemImage: "star.fill").foregroundStyle(.yellow)
@@ -643,50 +697,5 @@ private struct AssetCell: View {
             .foregroundStyle(.white)
             .padding(5)
             .background(color, in: Circle())
-    }
-}
-
-private struct LargePreview: View {
-    @EnvironmentObject private var model: AppModel
-    let item: AssetListItem
-
-    var body: some View {
-        PhotoThumbnail(item: item, size: 1_024).aspectRatio(4 / 3, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-}
-
-private struct FlowLayout: Layout {
-    var spacing: CGFloat
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        arrange(proposal: proposal, subviews: subviews).size
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let result = arrange(proposal: ProposedViewSize(width: bounds.width, height: bounds.height), subviews: subviews)
-        for (index, point) in result.points.enumerated() {
-            subviews[index].place(at: CGPoint(x: bounds.minX + point.x, y: bounds.minY + point.y), proposal: .unspecified)
-        }
-    }
-
-    private func arrange(proposal: ProposedViewSize, subviews: Subviews) -> (size: CGSize, points: [CGPoint]) {
-        let width = proposal.width ?? .infinity
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var rowHeight: CGFloat = 0
-        var points: [CGPoint] = []
-        for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
-            if x + size.width > width, x > 0 {
-                x = 0
-                y += rowHeight + spacing
-                rowHeight = 0
-            }
-            points.append(CGPoint(x: x, y: y))
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
-        return (CGSize(width: min(width, x), height: y + rowHeight), points)
     }
 }

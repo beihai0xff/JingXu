@@ -427,12 +427,12 @@ public enum SmartCollection: String, CaseIterable, Sendable, Identifiable, Hasha
 
     public var displayName: String {
         switch self {
-        case .all: "所有媒体"
-        case .recent: "最近导入"
+        case .all: "全部项目"
+        case .recent: "最近添加"
         case .photos: "照片"
         case .videos: "视频"
-        case .raw: "RAW"
-        case .review: "待审核建议"
+        case .raw: "RAW 照片"
+        case .review: "待检查建议"
         case .rejected: "已标记淘汰"
         }
     }

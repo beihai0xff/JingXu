@@ -9,7 +9,7 @@ struct CompositionPanel: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("构图").font(.title2.bold())
+                Text("裁剪取景").font(.headline)
                 Text("当前照片 · 裁剪建议").font(.subheadline).foregroundStyle(.secondary)
                 Picker("比例", selection: Binding(get: { draft.ratio }, set: { draft.setRatio($0) })) {
                     ForEach(CompositionRatio.allCases, id: \.self) { ratio in Text(ratio.title).tag(ratio) }
@@ -39,7 +39,7 @@ struct CompositionPanel: View {
                 HStack {
                     Button("取消") { cancel() }.keyboardShortcut(.cancelAction)
                     Spacer()
-                    Button("应用") { apply() }.buttonStyle(.borderedProminent)
+                    Button("应用裁剪") { apply() }.buttonStyle(.borderedProminent)
                         .disabled(!draft.canApply)
                 }
                 Text("应用后保存调整；取消不会改变已有编辑，原片始终保留。").font(.caption2).foregroundStyle(.secondary)
@@ -93,7 +93,7 @@ struct CompositionCanvas: View {
             } else if draft.isLoading {
                 ProgressView("正在读取完整画面…").frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        }.background(.black)
+        }.background(Color(nsColor: .windowBackgroundColor))
     }
     private func drag(size: CGSize, image: CGSize, corner: Int?) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)

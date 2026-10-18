@@ -153,6 +153,10 @@ public actor ApplePhotoLibraryClient: PhotoLibraryClient {
         let lower = min(max(offset, 0), result.count), upper = min(lower + max(0, min(limit, 200)), result.count)
         return SystemPhotoPage(items: (lower..<upper).map { photo(result.object(at: $0)) }, total: result.count)
     }
+    public func photoIDs(albumID: String?) throws -> [String] {
+        let result = try fetch(albumID: albumID)
+        return (0..<result.count).map { result.object(at: $0).localIdentifier }
+    }
     private func fetch(albumID: String?) throws -> PHFetchResult<PHAsset> {
         try requireAccess()
         let options = PHFetchOptions()

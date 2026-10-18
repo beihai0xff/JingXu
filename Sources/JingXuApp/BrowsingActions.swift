@@ -15,9 +15,8 @@ extension AppModel {
     }
     var browseSummary: String {
         let elsewhere = photoSelection.selectedIDs.subtracting(assets.map(\.id)).count
-        return "本页 \(assets.count) 项 · 匹配 \(matchingAssetCount) 项 · 已选 \(selectedPhotoIDs.count) 张" + (elsewhere > 0 ? "（其他页 \(elsewhere) 张）" : "")
+        return "已载入 \(assets.count) / \(matchingAssetCount) 项" + (selectedPhotoIDs.isEmpty ? "" : " · 已选 \(selectedPhotoIDs.count) 张") + (elsewhere > 0 ? "（未载入 \(elsewhere) 张）" : "")
     }
-    func currentQuery() -> BrowseQuery { appliedQuery }
     func draftQuery(destination: SidebarDestination? = nil, includeSubdirectories: Bool? = nil) -> BrowseQuery {
         var query = BrowseQuery(searchText: searchText.trimmingCharacters(in: .whitespacesAndNewlines), minimumRating: minimumRating, flag: flagFilter, sortOrder: sortOrder)
         query.includeSubdirectories = includeSubdirectories ?? self.includeSubdirectories
@@ -48,10 +47,12 @@ extension AppModel {
     }
     func reloadAssets() async {
         let changedScope = pendingQuery != nil
-        await loadBrowsePage(cursor: changedScope ? nil : assets.first.map(BrowseCursor.init), inclusive: !changedScope)
+        await loadBrowsePage(cursor: changedScope ? nil : assets.first.map(BrowseCursor.init), inclusive: !changedScope,
+                             limit: changedScope ? 200 : max(200, assets.count))
     }
-    func loadBrowsePage(cursor: BrowseCursor? = nil, reverse: Bool = false, inclusive: Bool = false, containing: Bool = false) async {
+    func loadBrowsePage(cursor: BrowseCursor? = nil, inclusive: Bool = false, containing: Bool = false, limit: Int = 200) async {
         guard let store else { return }
+        loadMoreTask?.cancel(); loadMoreTask = nil; isLoadingMoreAssets = false
         let query = pendingQuery ?? appliedQuery
         let destination = pendingDestination
         let changesQuery = query != appliedQuery || destination != nil
@@ -61,9 +62,9 @@ extension AppModel {
         do {
             let page: BrowsePage
             if containing, let cursor {
-                page = try await store.browsePageContaining(query, anchor: cursor)
+                page = try await store.browsePageContaining(query, anchor: cursor, limit: limit)
             } else {
-                page = try await store.browsePage(query, cursor: cursor, reverse: reverse, inclusive: inclusive, count: true)
+                page = try await store.browsePage(query, cursor: cursor, inclusive: inclusive, limit: limit, count: true)
             }
             let selected = changesQuery ? [] : selectedPhotoIDs
             let valid = try await store.assetListItems(ids: selected, matching: query)
@@ -100,7 +101,7 @@ extension AppModel {
             retryBrowseAction = { [weak self] in
                 guard let self else { return }
                 self.pendingQuery = query; self.pendingDestination = destination
-                self.browseTask = Task { await self.loadBrowsePage(cursor: cursor, reverse: reverse, inclusive: inclusive, containing: containing) }
+                self.browseTask = Task { await self.loadBrowsePage(cursor: cursor, inclusive: inclusive, containing: containing, limit: limit) }
             }
         }
     }
@@ -111,12 +112,29 @@ extension AppModel {
             else { self.browseTask = Task { await self.reloadAssets() } }
         }
     }
-    func turnPage(_ direction: Int) {
-        guard canChangeBrowseScope else { return }
-        transitionPreview {
-            let cursor = (direction < 0 ? self.assets.first : self.assets.last).map(BrowseCursor.init)
-            self.browseTask?.cancel()
-            self.browseTask = Task { await self.loadBrowsePage(cursor: cursor, reverse: direction < 0) }
+    func loadMoreAssets(before: Bool = false) {
+        guard !isLoadingAssets, !isLoadingMoreAssets, pendingQuery == nil, previewAsset == nil,
+              before ? hasPreviousPage : hasNextPage, let store,
+              let cursor = (before ? assets.first : assets.last).map(BrowseCursor.init) else { return }
+        let query = appliedQuery, request = assetRequestID
+        isLoadingMoreAssets = true
+        loadMoreTask = Task {
+            defer { if assetRequestID == request { isLoadingMoreAssets = false; loadMoreTask = nil } }
+            do {
+                let page = try await store.browsePage(query, cursor: cursor, reverse: before, count: true)
+                try Task.checkCancellation()
+                guard assetRequestID == request, appliedQuery == query else { return }
+                let existing = Set(assets.map(\.id))
+                let additional = page.items.filter { !existing.contains($0.id) }
+                assets = before ? additional + assets : assets + additional
+                if before { hasPreviousPage = page.hasPrevious } else { hasNextPage = page.hasNext }
+                matchingAssetCount = page.total ?? matchingAssetCount
+                browseError = nil; retryBrowseAction = nil
+            } catch is CancellationError {} catch {
+                guard assetRequestID == request else { return }
+                browseError = "载入更多照片失败，已载入照片和选择已保留：\(error.localizedDescription)"
+                retryBrowseAction = { [weak self] in self?.loadMoreAssets(before: before) }
+            }
         }
     }
     func refreshPreviewWindow() async {

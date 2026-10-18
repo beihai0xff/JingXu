@@ -36,6 +36,38 @@ final class KeyboardView: NSView {
 }
 
 extension AppModel {
+    func leavePreviewLevel() {
+        guard !isPreviewTransitioning else { return }
+        if colorEditor?.isComposing == true { colorEditor?.cancelComposition() }
+        else if colorEditor != nil { finishColorEditing() }
+        else if previewAsset != nil { closePreview() }
+        else { photoSelection.clear(); isBatchSelecting = false }
+    }
+
+    func moveGridFocus(by step: Int, extending: Bool) {
+        guard canChangeBrowseScope, !assets.isEmpty else { return }
+        let id = selectedAssetID, request = assetRequestID
+        let index = assets.firstIndex { $0.id == id }
+        let target = index.map { $0 + step } ?? 0
+        let needsMore = (target < 0 && hasPreviousPage) || (target >= assets.count && hasNextPage)
+        let select = {
+            let updated = self.assets.firstIndex { $0.id == id }
+            let destination = updated.map { min(self.assets.count - 1, max(0, $0 + step)) } ?? 0
+            let item = self.assets[destination]
+            if extending { self.clickAsset(item, command: false, shift: true, count: 1) }
+            else { self.transitionPreview { self.selectAsset(item); self.syncKeywordDraft() } }
+        }
+        if needsMore {
+            loadMoreAssets(before: target < 0)
+            let loading = loadMoreTask
+            Task {
+                await loading?.value
+                guard assetRequestID == request, selectedAssetID == id, !assets.isEmpty else { return }
+                select()
+            }
+        } else { select() }
+    }
+
     func handleLibraryKey(code: UInt16, text: String, shift: Bool, command: Bool) -> Bool {
         if colorEditor?.isComposing == true {
             guard !command else { return false }
@@ -44,10 +76,11 @@ extension AppModel {
             return false
         }
         if command {
-            if text == "a", previewAsset == nil { selectVisiblePhotos(); return true }
+            if text == "a", previewAsset == nil { selectAllMatchingPhotos(); return true }
             if text == "z" { performUndo(redo: shift); return true }
             return false
         }
+        if code == 53 { leavePreviewLevel(); return true }
         if let rating = Int(text), (0...5).contains(rating) { updateRating(rating, advanceToNext: shift); return true }
         if code == 51 || code == 117 { updateFlag(.rejected, advanceToNext: annotationTargetIDs.count == 1); return true }
         if text == "u", !shift { updateFlag(.none); return true }
@@ -58,11 +91,7 @@ extension AppModel {
             }
             guard !assets.isEmpty else { return false }
             let step = code == 123 ? -1 : code == 124 ? 1 : code == 125 ? gridColumns : -gridColumns
-            let index = assets.firstIndex { $0.id == selectedAssetID }
-            let target = index.map { min(assets.count - 1, max(0, $0 + step)) } ?? 0
-            let item = assets[target]
-            if shift { clickAsset(item, command: false, shift: true, count: 1) }
-            else { transitionPreview { self.selectAsset(item); self.syncKeywordDraft() } }
+            moveGridFocus(by: step, extending: shift)
             return true
         }
         if code == 49, let item = selectedAsset, previewAsset == nil { openPreview(item); return true }

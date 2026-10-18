@@ -24,7 +24,7 @@ struct JingXuApp: App {
                         }
                     }.padding(32)
                 } else { ContentView().environmentObject(model) }
-            }.frame(minWidth: 1_080, minHeight: 680)
+            }.frame(minWidth: 960, minHeight: 640)
                 .background(ColorWindowGuard(model: model))
                 .onAppear { applicationDelegate.model = model }
         }
@@ -47,7 +47,7 @@ struct JingXuApp: App {
                 Button("照片调色") { model.beginColorEditing() }.disabled(model.previewAsset == nil || !model.canStartColorAction)
                 Button("复制调色参数") { model.copyColorAdjustments() }.keyboardShortcut("c", modifiers: [.command, .option]).disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
                 Button("预设与调色…") { model.showColorPresets() }.disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
-                Button("导出成片…") { model.showColorExport() }.keyboardShortcut("e", modifiers: [.command, .shift]).disabled(model.colorTargetIDs.isEmpty || !model.canStartColorAction)
+                Button("导出成片…") { model.showColorExport() }.keyboardShortcut("e", modifiers: [.command, .shift]).disabled(model.colorTargetIDs.isEmpty || !model.canExportColor)
                 Divider()
                 Button("导出新 XMP…") { model.exportSelectedXMP() }
                     .disabled(model.colorTargetIDs.isEmpty || model.operationBlockReason(.files) != nil)

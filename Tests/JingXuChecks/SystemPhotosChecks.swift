@@ -52,6 +52,8 @@ enum SystemPhotosChecks {
         await f.client.setAuthorization(.limited)
         try check(await f.client.authorization(request: false).canRead, "部分照片授权被当成完全拒绝")
         await f.client.setAuthorization(.authorized)
+        let allIDs = try await f.client.photoIDs(albumID: nil)
+        try check(allIDs.count == 2_005 && Set(allIDs).count == 2_005, "系统照片完整选择被分页截断或重复")
         var selection = PhotoSelectionState()
         for offset in stride(from: 0, to: 2_005, by: 200) {
             let page = try await f.client.page(albumID: nil, offset: offset, limit: 900)
@@ -73,6 +75,8 @@ enum SystemPhotosChecks {
         try await f.coordinator.mutate(SystemPhotoMutationPlan(operation: .removeFromAlbum(id: album.id), photos: subset, album: current))
         try check(try await f.client.photos(ids: subset.map(\.id), albumID: nil).count == 2, "移出相册删除了照片")
         try check(try await f.client.photos(ids: subset.map(\.id), albumID: album.id).isEmpty, "相册移出未更新范围")
+        let albumIDs = try await f.client.photoIDs(albumID: album.id)
+        try check(albumIDs.count == 2_003 && Set(albumIDs).isDisjoint(with: subset.map(\.id)), "系统相册完整选择串入其他范围")
         current = try await f.client.albums()[0]
         let staleDelete = SystemPhotoMutationPlan(operation: .deleteAlbum(id: album.id), album: current)
         try await f.coordinator.mutate(SystemPhotoMutationPlan(operation: .renameAlbum(id: album.id, name: "改名"), album: current))

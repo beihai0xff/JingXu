@@ -36,7 +36,6 @@ struct PreviewFilmstrip: View {
 }
 
 private struct FilmstripCell: View {
-    @EnvironmentObject private var model: AppModel
     let item: AssetListItem
     let selected: Bool
 

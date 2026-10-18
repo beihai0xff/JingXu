@@ -16,6 +16,17 @@ public struct BrowsePage: Sendable {
 }
 
 extension CatalogStore {
+    /// Freeze the entire matching photo selection without loading images or
+    /// truncating the result to the grid's currently loaded window.
+    public func browsePhotoIDs(_ query: BrowseQuery) throws -> [String] {
+        let (sql, arguments) = try Self.assetQuerySQL(query, rejectedOnly: false,
+            photosOnly: true, projection: "a.id", paginated: false)
+        return try dbPool.read { db in
+            try Task.checkCancellation()
+            return try String.fetchAll(db, sql: sql, arguments: arguments)
+        }
+    }
+
     public func browsePage(_ query: BrowseQuery, cursor: BrowseCursor? = nil, reverse: Bool = false,
                            inclusive: Bool = false, photosOnly: Bool = false, limit: Int = 200,
                            count: Bool = false) throws -> BrowsePage {

@@ -119,6 +119,7 @@ public protocol PhotoLibraryClient: Sendable {
     func authorization(request: Bool) async -> SystemPhotoAuthorization
     func albums() async throws -> [SystemPhotoAlbum]
     func page(albumID: String?, offset: Int, limit: Int) async throws -> SystemPhotoPage
+    func photoIDs(albumID: String?) async throws -> [String]
     func photos(ids: [String], albumID: String?) async throws -> [SystemPhoto]
     func index(id: String, albumID: String?) async throws -> Int?
     func image(id: String, pixelSize: Int) async throws -> PreviewImage

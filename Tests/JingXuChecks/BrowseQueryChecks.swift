@@ -75,6 +75,9 @@ enum BrowseQueryChecks {
                                               restored.hasNext == (start + 200 < expected.count), "单图返回的总数或翻页边界错误")
                     }
                 }
+                let allPhotoIDs = try await store.browsePhotoIDs(query)
+                let photoSet = Set(fixtures.filter { $0.kind == .photo }.map(\.id))
+                try ColorChecks.check(allPhotoIDs == expected.filter { photoSet.contains($0) }, "全选当前范围未覆盖完整照片集合或混入视频")
                 let selected = try await store.assetListItems(ids: expected.reversed(), matching: query)
                 try ColorChecks.check(selected.map(\.id) == expected, "跨批次选择排序不一致")
             }
@@ -115,6 +118,8 @@ enum BrowseQueryChecks {
                 let page = try await store.assets(query)
                 let total = try await store.matchingAssetCount(query)
                 try ColorChecks.check(total == page.count, "精简计数改变了筛选结果：\(query)")
+                let fullSelection = try await store.browsePhotoIDs(query)
+                try ColorChecks.check(fullSelection == page.filter { $0.kind == .photo }.map(\.id), "完整选择未遵守目录、相册或筛选条件")
                 let paged = try await store.browsePage(query, limit: 1, count: true)
                 try ColorChecks.check(paged.total == total && paged.items.count == min(1, total), "分页混入其他范围或截断完整计数")
             }

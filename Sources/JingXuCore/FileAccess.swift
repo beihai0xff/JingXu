@@ -65,10 +65,6 @@ public enum MediaSupport {
         "avi", "m4v", "mov", "mp4", "mts", "mxf"
     ]
 
-    public static var supportedExtensions: Set<String> {
-        rawExtensions.union(standardPhotoExtensions).union(videoExtensions)
-    }
-
     public static func kind(for url: URL) -> MediaKind? {
         let ext = url.pathExtension.lowercased()
         if rawExtensions.contains(ext) || standardPhotoExtensions.contains(ext) { return .photo }
@@ -137,12 +133,5 @@ public enum ImportNaming {
         let pieces = value.components(separatedBy: invalid)
         return pieces.joined(separator: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
-    }
-}
-
-public enum AssetLocation {
-    public static func url(for asset: MediaAsset, source: SourceRoot) throws -> URL {
-        let root = try BookmarkStore.resolve(source).url
-        return root.appendingPathComponent(asset.relativePath)
     }
 }

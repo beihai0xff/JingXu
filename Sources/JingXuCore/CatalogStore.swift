@@ -67,14 +67,6 @@ public actor CatalogStore: CatalogRepository {
         try Data().write(to: databaseURL.appendingPathExtension("initialized"), options: .atomic)
     }
 
-    public static func inMemory() throws -> CatalogStore {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("JingXuTests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("sqlite")
-        return try CatalogStore(databaseURL: url)
-    }
-
     static func createCurrentSchema(_ writer: any DatabaseWriter) throws {
         try writer.write { db in
             if try Int.fetchOne(db, sql: "PRAGMA user_version") == CatalogUpgradeCoordinator.schemaVersion { return }

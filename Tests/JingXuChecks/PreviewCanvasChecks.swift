@@ -17,7 +17,7 @@ enum PreviewCanvasChecks {
             space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw Failure(message: "无法创建画布") }
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
-        canvas.draw(canvas.bounds)
+        canvas.effectiveAppearance.performAsCurrentDrawingAppearance { canvas.draw(canvas.bounds) }
         NSGraphicsContext.restoreGraphicsState()
         return context.makeImage()!
     }
@@ -71,6 +71,8 @@ enum PreviewCanvasChecks {
         context.fill(CGRect(origin: .zero, size: size))
         let image = context.makeImage()!
         let canvas = PreviewCanvasView(frame: CGRect(origin: .zero, size: viewport))
+        let blankPixel = Array(try SRGBPixels(capture(canvas)).rgba.prefix(4))
+        try check(blankPixel[3] == 255, "原生画布背景未完全覆盖")
         canvas.setImage(image, assetID: "fixture", nativeSize: CGSize(width: image.width, height: image.height))
         try check(canvas.frame.size == viewport && canvas.fitted, "画布尺寸随原图膨胀")
         let rendered = try capture(canvas)
@@ -105,7 +107,7 @@ enum PreviewCanvasChecks {
         canvas.clearImage()
         try check(canvas.image == nil, "关闭预览未释放图片引用")
         let empty = try SRGBPixels(capture(canvas)).rgba
-        try check(stride(from: 0, to: empty.count, by: 4).allSatisfy { empty[$0] == 0 && empty[$0+1] == 0 && empty[$0+2] == 0 }, "切图清空后残留旧帧")
+        try check(stride(from: 0, to: empty.count, by: 4).allSatisfy { Array(empty[$0..<$0+4]) == blankPixel }, "切图清空后未恢复原生背景或残留旧帧")
         canvas.setImage(image, assetID: "fixture", nativeSize: CGSize(width: image.width, height: image.height))
         try check(canvas.fitted, "换图未恢复适应模式")
     }

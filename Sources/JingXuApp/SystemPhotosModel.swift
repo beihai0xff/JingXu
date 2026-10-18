@@ -17,6 +17,11 @@ final class SystemPhotosModel: ObservableObject {
     @Published var offset = 0
     @Published var total = 0
     @Published var selection = PhotoSelectionState()
+    @Published var isSelecting = false
+    @Published var isLoadingMore = false
+    @Published var browseError: String?
+    private var retryBefore = false
+    @Published var presetPreview: ColorRenderedImage?
     @Published var preview: SystemPhoto?
     @Published var previewImage: PreviewImage?
     @Published var previewIndex = 0
@@ -57,7 +62,7 @@ final class SystemPhotosModel: ObservableObject {
         let temporary = root.appendingPathComponent("SystemPhotosWorking")
         try PhotoWorkspace.removeAbandoned(in: temporary)
         if ProcessInfo.processInfo.environment["JINGXU_UI_TEST_ROOT"] != nil {
-            client = try IsolatedPhotoLibraryClient.fixtures(root: root.appendingPathComponent("SystemPhotoFixtures"))
+            client = try IsolatedPhotoLibraryClient.fixtures(root: root.appendingPathComponent("SystemPhotoFixtures"), count: 405)
         } else { client = try ApplePhotoLibraryClient(temporaryRoot: temporary) }
         store = try SystemPhotosStore(url: root.appendingPathComponent("SystemPhotos.sqlite"))
         coordinator = SystemPhotosCoordinator(client: client, store: store, localStore: localStore, temporaryRoot: temporary)
@@ -111,7 +116,14 @@ final class SystemPhotosModel: ObservableObject {
         if let albumID, !albums.contains(where: { $0.id == albumID }) { self.albumID = nil; offset = 0; selection.clear() }
         var page = try await client.page(albumID: albumID, offset: offset, limit: 200)
         if page.items.isEmpty && offset > 0 { offset = max(0, ((max(1, page.total) - 1) / 200) * 200); page = try await client.page(albumID: albumID, offset: offset, limit: 200) }
-        items = page.items; total = page.total
+        let desiredCount = max(200, items.count)
+        var loaded = page.items
+        while !page.items.isEmpty && loaded.count < desiredCount && offset + loaded.count < page.total {
+            try Task.checkCancellation()
+            page = try await client.page(albumID: albumID, offset: offset + loaded.count, limit: 200)
+            loaded += page.items
+        }
+        items = loaded; total = page.total; browseError = nil
         let valid = try await client.photos(ids: selection.selectedIDs.sorted(), albumID: albumID)
         selection.retain(validIDs: Set(valid.map(\.id)))
         if let preview {
@@ -128,19 +140,19 @@ final class SystemPhotosModel: ObservableObject {
         unresolved = try await store.unresolvedWrites()
         try await reloadAnalysis()
     }
-    func browse(albumID: String?, offset: Int = 0) {
+    func browse(albumID: String?) {
         perform {
             guard await self.flushAndCloseEditor() else { throw ColorEditError("请先处理草稿保存失败") }
             self.preview = nil; self.previewImage = nil; self.conflict = nil
-            if self.albumID != albumID { self.selection.clear() }
-            self.albumID = albumID; self.offset = offset; try await self.reload()
+            if self.albumID != albumID || self.offset != 0 { self.selection.clear(); self.items = [] }
+            self.albumID = albumID; self.offset = 0; try await self.reload()
         }
     }
-    func click(_ photo: SystemPhoto, count: Int = 1) {
+    func click(_ photo: SystemPhoto, command: Bool = false, shift: Bool = false, count: Int = 1) {
         guard canAct else { return }
-        let flags = NSEvent.modifierFlags
-        if selection.click(photo.id, photoIDs: items.map(\.id), command: flags.contains(.command),
-                           shift: flags.contains(.shift), count: count) {
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        if selection.click(photo.id, photoIDs: items.map(\.id), command: command,
+                           shift: shift, checkboxMode: isSelecting, count: count) {
             open(photo, index: offset + (items.firstIndex { $0.id == photo.id } ?? 0))
         }
     }
@@ -158,7 +170,7 @@ final class SystemPhotosModel: ObservableObject {
                 guard previewGeneration == generation else { return }
                 preview = photo; previewIndex = index; previewImage = image
                 let pageOffset = (index / 200) * 200
-                if pageOffset != offset {
+                if index < offset || index >= offset + items.count {
                     let page = try await client.page(albumID: albumID, offset: pageOffset, limit: 200)
                     try Task.checkCancellation()
                     offset = pageOffset; items = page.items; total = page.total
@@ -178,7 +190,78 @@ final class SystemPhotosModel: ObservableObject {
             } catch { self.error = error.localizedDescription }
         }
     }
-    func closePreview() { browse(albumID: albumID, offset: (previewIndex / 200) * 200) }
+    func closePreview() {
+        guard canAct else { return }
+        perform {
+            guard await self.flushAndCloseEditor() else { throw ColorEditError("本机草稿尚未保存") }
+            self.selection.focusID = self.preview?.id
+            self.preview = nil; self.previewImage = nil; self.presetPreview = nil; self.conflict = nil
+        }
+    }
+    func finishEditing() {
+        guard canAct, let editor else { return }
+        perform {
+            editor.cancelComposition()
+            try await editor.withSavedSnapshot { snapshot in
+                let rendered = try await ColorImageRenderer.shared.render(snapshot, adjustments: snapshot.adjustments)
+                self.previewImage = PreviewImage(image: rendered.image, nativeSize: rendered.nativeSize, isEmbedded: false, access: nil)
+            }
+            await self.disposeEditor()
+            self.status = "本机草稿已保留；系统照片仅在明确保存后更新"
+        }
+    }
+    func selectAllPhotos() {
+        guard canAct else { return }
+        perform {
+            let ids = try await self.client.photoIDs(albumID: self.albumID)
+            self.selection.selectAll(ids)
+            self.status = "已选择当前范围的 \(ids.count) 张系统照片"
+        }
+    }
+    func leavePreviewLevel() {
+        if editor?.isComposing == true { editor?.cancelComposition() }
+        else if editor != nil { finishEditing() }
+        else if preview != nil { closePreview() }
+        else { selection.clear(); isSelecting = false }
+    }
+    func moveGridFocus(by step: Int, extending: Bool) {
+        guard canAct, !items.isEmpty else { return }
+        let id = selection.focusID
+        let target = items.firstIndex(where: { $0.id == id }).map { $0 + step } ?? 0
+        perform {
+            if target < 0 && self.offset > 0 { try await self.appendPage(before: true) }
+            else if target >= self.items.count && self.offset + self.items.count < self.total { try await self.appendPage(before: false) }
+            let index = self.items.firstIndex { $0.id == id }
+            let destination = index.map { min(self.items.count - 1, max(0, $0 + step)) } ?? 0
+            let item = self.items[destination]
+            if extending {
+                _ = self.selection.click(item.id, photoIDs: self.items.map(\.id), command: false, shift: true, checkboxMode: false, count: 1)
+            } else { self.selection.selectOnly(item.id) }
+        }
+    }
+    func retryBrowse() { browseError = nil; loadMore(before: retryBefore) }
+    private func appendPage(before: Bool) async throws {
+        let nextOffset = before ? max(0, offset - 200) : offset + items.count
+        let page = try await client.page(albumID: albumID, offset: nextOffset, limit: before ? offset - nextOffset : 200)
+        try Task.checkCancellation()
+        let existing = Set(items.map(\.id))
+        let additional = page.items.filter { !existing.contains($0.id) }
+        items = before ? additional + items : items + additional
+        if before { offset = nextOffset }
+        total = page.total; browseError = nil
+    }
+    func loadMore(before: Bool = false) {
+        guard canAct, preview == nil, !isLoadingMore,
+              before ? offset > 0 : offset + items.count < total else { return }
+        perform {
+            self.isLoadingMore = true
+            defer { self.isLoadingMore = false }
+            do {
+                try await self.appendPage(before: before)
+            } catch is CancellationError { throw CancellationError() }
+            catch { self.retryBefore = before; self.browseError = "载入更多照片失败：\(error.localizedDescription)" }
+        }
+    }
     func beginEditing() {
         guard let preview, preview.canEdit, editor == nil, canAct else { return }
         perform { try await self.loadEditor(preview) }
@@ -188,7 +271,8 @@ final class SystemPhotosModel: ObservableObject {
         do {
             let snapshot = try await editingRepository.open(input)
             let session = try ColorEditSession(repository: editingRepository, snapshot: snapshot, saved: {})
-            editor = session
+            presets = try await localStore.colorPresets()
+            presetPreview = nil; editor = session
             editorObservation = session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
             session.start()
             status = input.usesRenderedBase ? "以其他应用的当前成片为底图；本次编辑前对比不会撤销其效果" : "调整自动保存为本机草稿；点击「保存到系统照片」后更新照片"
@@ -205,10 +289,10 @@ final class SystemPhotosModel: ObservableObject {
         guard let editor else { return }
         editor.dispose()
         if case .systemPhoto(let input) = editor.snapshot.origin { await client.releaseEditingInput(token: input.token) }
-        self.editor = nil; editorObservation = nil
+        self.editor = nil; presetPreview = nil; editorObservation = nil
     }
     func saveEdit() {
-        guard let editor, canAct, conflict == nil, !editor.isComposing else { return }
+        guard let editor, canAct, conflict == nil, presetPreview == nil, !editor.isComposing else { return }
         perform {
             try await editor.withSavedSnapshot { snapshot in
                 self.isSubmitting = true
@@ -220,6 +304,7 @@ final class SystemPhotosModel: ObservableObject {
             self.preview = updated; self.conflict = nil
             self.previewImage = try await self.client.image(id: updated.id, pixelSize: Int.max)
             try await self.loadEditor(updated)
+            self.status = "已保存到系统照片，iCloud 同步由系统处理"
         }
     }
     func discardDraft() {

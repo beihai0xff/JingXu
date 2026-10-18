@@ -33,6 +33,8 @@ final class AppModel: ObservableObject {
     @Published var sortOrder: BrowseSortOrder = .oldestFirst
     @Published var matchingAssetCount = 0
     @Published var isLoadingAssets = false
+    @Published var isLoadingMoreAssets = false
+    var loadMoreTask: Task<Void, Never>?
     var assetRequestID = UUID()
     var folderRequestID = UUID()
     private let browsingDefaults: UserDefaults
@@ -61,11 +63,22 @@ final class AppModel: ObservableObject {
         syncKeywordDraft()
     }
 
-    func selectVisiblePhotos() {
-        guard canChangeBrowseScope else { return }
+    func selectAllMatchingPhotos() {
+        guard canChangeBrowseScope, let store else { return }
         transitionPreview {
-            self.photoSelection.selectAll(self.assets.filter { $0.kind == .photo }.map(\.id))
-            self.syncKeywordDraft()
+            let query = self.appliedQuery
+            let request = self.assetRequestID
+            self.isPreparingSelection = true
+            Task {
+                defer { self.isPreparingSelection = false }
+                do {
+                    let ids = try await store.browsePhotoIDs(query)
+                    guard self.appliedQuery == query, self.assetRequestID == request else { return }
+                    self.photoSelection.selectAll(ids)
+                    self.syncKeywordDraft()
+                    self.statusText = "已选择当前范围的 \(ids.count) 张照片"
+                } catch { self.errorMessage = "选择未完成：\(error.localizedDescription)" }
+            }
         }
     }
     func clearPhotoSelection() {
@@ -113,7 +126,6 @@ final class AppModel: ObservableObject {
     @Published var isShowingKeywords = false
     @Published var isSavingAnnotation = false
     let annotationUndoManager = UndoManager()
-    var undoTask: Task<Void, Never>?
     var keywordSaveTask: Task<Bool, Never>?
     @Published var thumbnailReloadID = UUID()
 
@@ -121,6 +133,7 @@ final class AppModel: ObservableObject {
     @Published var minimumRating = 0
     @Published var flagFilter: AssetFlag?
     @Published var gridSize: CGFloat = 170
+    @Published var showsFileNames = true
     @Published var isWorking = false
     @Published var statusText = "准备就绪" {
         didSet {
@@ -149,6 +162,7 @@ final class AppModel: ObservableObject {
     @Published var sourceMergePlan: SourceMergePlan?
     private let histogramProvider = HistogramProvider()
     private var deletionCoordinator: DeletionCoordinator?
+    @Published var colorPresetPreview: ColorRenderedImage?
     @Published var colorEditor: ColorEditSession?
     @Published var colorPresets: [ColorPreset] = []
     @Published var copiedColorPatch: ColorPatch?
@@ -156,6 +170,13 @@ final class AppModel: ObservableObject {
     @Published var colorBatchPlan: ColorBatchPlan?
     @Published var colorExportPlan: ColorExportPlan?
     @Published var isShowingColorExport = false
+    @Published var colorExportDraft: [AssetListItem] = []
+    @Published var colorExportDirectory: URL?
+    @Published var isPreparingColorExport = false
+    @Published var colorExportError: String?
+    @Published var colorExportReport: ColorExportReport?
+    var colorExportPreparation: Task<Void, Never>?
+    var colorExportRequest = UUID()
     @Published var colorUndoPlan: ColorBatchPlan?
     @Published var isPreviewTransitioning = false
     var colorExportCoordinator: ColorExportCoordinator?
@@ -417,7 +438,7 @@ final class AppModel: ObservableObject {
 
     func prepareMissingAssetCleanup() {
         guard let store else { return }
-        let query = currentQuery()
+        let query = appliedQuery
         startOperation {
             self.statusText = "正在检查当前范围的失效索引…"
             do { self.missingAssetPlan = try await store.prepareMissingAssetCleanup(query) }
@@ -449,7 +470,7 @@ final class AppModel: ObservableObject {
 
     func prepareDeletion() {
         guard !isWorking, let deletionCoordinator else { return }
-        let query = currentQuery()
+        let query = appliedQuery
         startOperation {
             do { self.deletionPlan = try await deletionCoordinator.prepare(query) }
             catch { self.errorMessage = error.localizedDescription }
@@ -536,7 +557,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    var previewFilmstrip: [AssetListItem] { previewItems }
     func selectPreview(id: String) {
         guard previewNavigationEnabled, let item = previewItems.first(where: { $0.id == id }), id != comparisonReference?.id, id != previewAsset?.id else { return }
         switchPreview { item }
@@ -737,7 +757,7 @@ final class AppModel: ObservableObject {
 
     func prepareQualityReanalysis(legacyOnly: Bool = false, assetID: String? = nil) {
         guard let store else { return }
-        let query = legacyOnly ? BrowseQuery() : currentQuery()
+        let query = legacyOnly ? BrowseQuery() : appliedQuery
         startOperation {
             do {
                 if try await store.qualityJobs().contains(where: { $0.isResumable }) {

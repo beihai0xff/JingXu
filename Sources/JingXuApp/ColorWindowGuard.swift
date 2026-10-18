@@ -8,6 +8,7 @@ final class ColorApplicationDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model else { return .terminateNow }
         guard !terminating else { return .terminateCancel }
+        model.cancelColorExport()
         terminating = true; model.isPreviewTransitioning = true
         Task {
             if let photos = model.systemPhotos, !(await photos.prepareForExit()) {
@@ -62,6 +63,7 @@ struct ColorWindowGuard: NSViewRepresentable {
         }
         func windowShouldClose(_ sender: NSWindow) -> Bool {
             if closing { return original?.windowShouldClose?(sender) ?? true }
+            model?.cancelColorExport()
             if let photos = model?.systemPhotos, photos.editor != nil || photos.blocksLocalOperations {
                 Task {
                     guard await photos.prepareForExit() else { return }

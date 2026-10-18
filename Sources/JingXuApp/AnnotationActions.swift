@@ -45,9 +45,6 @@ extension AppModel {
             return true
         } catch { errorMessage = "关键词保存失败，草稿已保留：\(error.localizedDescription)"; return false }
     }
-    func updateKeywords(_ keywords: [String]) {
-        applyAnnotation(.init(keywords: .replace(keywords)), title: "替换关键词")
-    }
     func updateRating(_ rating: Int, advanceToNext: Bool = false) {
         applyAnnotation(.init(rating: rating), title: "设置评分", advance: advanceToNext)
     }
@@ -116,8 +113,8 @@ extension AppModel {
         annotationUndoManager.registerUndo(withTarget: self) { $0.invertAnnotation(entry) }
         annotationUndoManager.setActionName(entry.title)
         isSavingAnnotation = true
-        undoTask = Task {
-            defer { isSavingAnnotation = false; undoTask = nil; objectWillChange.send() }
+        Task {
+            defer { isSavingAnnotation = false; objectWillChange.send() }
             do {
                 entry.change = try await store.invertAnnotations(entry.change)
                 await refreshChangedAssets(ids: entry.change.ids, membershipChanged: hasUserFilters || appliedQuery.albumID != nil || appliedQuery.collection == .rejected)

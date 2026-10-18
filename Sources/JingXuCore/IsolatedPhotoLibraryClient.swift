@@ -18,7 +18,6 @@ public actor IsolatedPhotoLibraryClient: PhotoLibraryClient {
     private var collections: [String: (String, Set<String>)] = [:]
     private var handler: (@Sendable (SystemPhotoChange) -> Void)?
     private var status: SystemPhotoAuthorization = .authorized
-    private var nextFailure: Error?
     private var commitFailure: String?
     private var downloadFailures: [String: String] = [:]
     private var tokens = Set<UUID>()
@@ -30,19 +29,19 @@ public actor IsolatedPhotoLibraryClient: PhotoLibraryClient {
         self.root = root
         for (photo, url) in photos { entries[photo.id] = Entry(photo: photo, original: url, displayed: url) }
     }
-    public static func fixtures(root: URL) throws -> IsolatedPhotoLibraryClient {
+    public static func fixtures(root: URL, count: Int = 9) throws -> IsolatedPhotoLibraryClient {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         var photos: [(SystemPhoto, URL)] = []
-        for index in 0..<9 {
+        for index in 0..<count {
             let url = root.appendingPathComponent("样片-\(index + 1).png")
             let width = 640, height = 420
             let space = CGColorSpace(name: CGColorSpace.sRGB)!
             guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                 space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw CocoaError(.fileWriteUnknown) }
-            context.setFillColor(CGColor(red: CGFloat(index % 3) / 3 + 0.12, green: CGFloat(index / 3) / 3 + 0.12, blue: 0.35, alpha: 1))
+            context.setFillColor(CGColor(red: CGFloat(index % 3) / 3 + 0.12, green: CGFloat((index % 9) / 3) / 3 + 0.12, blue: 0.35, alpha: 1))
             context.fill(CGRect(x: 0, y: 0, width: width, height: height))
             context.setFillColor(CGColor(gray: 0.9, alpha: 1))
-            context.fillEllipse(in: CGRect(x: 90 + index * 27, y: 100, width: 170, height: 170))
+            context.fillEllipse(in: CGRect(x: 90 + (index % 9) * 27, y: 100, width: 170, height: 170))
             guard let image = context.makeImage(), let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else { throw CocoaError(.fileWriteUnknown) }
             CGImageDestinationAddImage(destination, image, nil)
             guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
@@ -53,7 +52,6 @@ public actor IsolatedPhotoLibraryClient: PhotoLibraryClient {
         return IsolatedPhotoLibraryClient(root: root, photos: photos)
     }
     public func setAuthorization(_ status: SystemPhotoAuthorization) { self.status = status; handler?(.changed) }
-    public func failNext(_ error: Error) { nextFailure = error }
     public func failAfterNextCommit(_ message: String) { commitFailure = message }
     public func failDownload(id: String, message: String?) { downloadFailures[id] = message }
     public func delayDownloads(_ delay: Duration) { downloadDelay = delay }
@@ -73,7 +71,6 @@ public actor IsolatedPhotoLibraryClient: PhotoLibraryClient {
     private func check() throws {
         guard status.canRead else { throw ColorEditError("未获得照片权限") }
         guard available else { throw ColorEditError("隔离图库不可用") }
-        if let error = nextFailure { nextFailure = nil; throw error }
     }
     public func authorization(request: Bool) -> SystemPhotoAuthorization { status }
     public func albums() throws -> [SystemPhotoAlbum] {
@@ -85,6 +82,10 @@ public actor IsolatedPhotoLibraryClient: PhotoLibraryClient {
         let list = list(albumID: albumID)
         let start = min(max(offset, 0), list.count), end = min(start + max(0, min(limit, 200)), list.count)
         return SystemPhotoPage(items: Array(list[start..<end]), total: list.count)
+    }
+    public func photoIDs(albumID: String?) throws -> [String] {
+        try check()
+        return list(albumID: albumID).map(\.id)
     }
     private func list(albumID: String?) -> [SystemPhoto] {
         entries.values.map(\.photo).filter { albumID == nil || collections[albumID!]?.1.contains($0.id) == true }

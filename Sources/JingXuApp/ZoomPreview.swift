@@ -21,71 +21,35 @@ struct ZoomPreview: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Button { model.closePreview() } label: {
-                    Label("返回网格", systemImage: "square.grid.2x2")
-                        .labelStyle(.iconOnly)
-                }.help("返回网格（Esc）")
+                Button("返回", systemImage: "chevron.left") {
+                    model.leavePreviewLevel()
+                }.help(model.colorEditor == nil ? "返回图库（Esc）" : "完成编辑并返回单图")
                 Divider().frame(height: 16)
-                Button { model.navigatePreview(-1) } label: {
-                    Label("上一张", systemImage: "chevron.left").labelStyle(.iconOnly)
-                }.disabled(!model.canNavigatePreview(-1)).help("上一张（←）")
-                Text(item.fileName).lineLimit(1)
-                    .monospacedDigit().font(.caption).foregroundStyle(.secondary)
-                    .help(item.fileName)
-                Button { model.navigatePreview(1) } label: {
-                    Label("下一张", systemImage: "chevron.right").labelStyle(.iconOnly)
-                }.disabled(!model.canNavigatePreview(1)).help("下一张（→）")
-                Menu("\(item.rating) 星") {
-                    ForEach(0...5, id: \.self) { value in Button(value == 0 ? "无评分" : "\(value) 星") { model.updateRating(value) } }
-                }.help("0–5 评分；Shift 加数字评分并下一张").disabled(model.colorEditor?.isComposing == true)
-                if item.flag == .rejected {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red).accessibilityLabel("已淘汰").help("已淘汰（U 取消）")
-                }
-                Spacer()
-                Button("构图") { model.beginComposition() }
-                    .disabled(!model.canStartColorAction).help("为当前照片推荐取景，并手动裁剪")
-                Button(model.colorEditor == nil ? "调色" : "完成调色") {
+                Button { model.navigatePreview(-1) } label: { Image(systemName: "chevron.left") }
+                    .disabled(!model.canNavigatePreview(-1)).accessibilityLabel("上一张")
+                Text(item.fileName).lineLimit(1).font(.callout).foregroundStyle(.secondary).help(item.fileName)
+                Button { model.navigatePreview(1) } label: { Image(systemName: "chevron.right") }
+                    .disabled(!model.canNavigatePreview(1)).accessibilityLabel("下一张")
+                Spacer(minLength: 8)
+                Button(model.colorEditor == nil ? "编辑" : "完成编辑", systemImage: model.colorEditor == nil ? "slider.horizontal.3" : "checkmark") {
                     if model.colorEditor == nil { model.beginColorEditing() } else { model.finishColorEditing() }
-                }.disabled(!model.canStartColorAction)
-                Button("导出成片…") { model.showColorExport() }.disabled(!model.canStartColorAction)
-                Button { model.showPhotoShare() } label: {
-                    Label("分享…", systemImage: "square.and.arrow.up").labelStyle(.iconOnly)
-                }.disabled(!model.canShowPhotoShare).help("分享当前照片")
-                if originalPreview?.isEmbedded == true {
-                    Text("嵌入预览").font(.caption).foregroundStyle(.secondary)
-                        .help("当前显示文件内嵌预览；100% 按原片尺寸显示，细节受嵌入预览分辨率限制")
+                }.buttonStyle(.borderedProminent).disabled(!model.canStartColorAction)
+                Button("导出", systemImage: "square.and.arrow.down") { model.showColorExport() }.disabled(!model.canExportColor)
+                Button { model.showPhotoShare() } label: { Image(systemName: "square.and.arrow.up") }
+                    .disabled(!model.canShowPhotoShare).help("分享当前照片").accessibilityLabel("分享照片")
+                if model.colorEditor == nil {
+                    Button { showsInspector.toggle() } label: { Image(systemName: "sidebar.right") }
+                        .help(showsInspector ? "隐藏照片详情" : "显示照片详情").accessibilityLabel("照片详情")
                 }
-                Button("适应") { action = "fit"; command += 1 }.help("适应窗口，完整显示照片").disabled(model.colorEditor?.isComposing == true)
-                Button("100%") { action = "actual"; command += 1 }
-                    .help("按屏幕物理像素查看").disabled(model.colorEditor?.isComposing == true)
-                Button { action = "out"; command += 1 } label: {
-                    Label("缩小", systemImage: "minus").labelStyle(.iconOnly)
-                }.help("缩小").disabled(model.colorEditor?.isComposing == true)
-                Button { action = "in"; command += 1 } label: {
-                    Label("放大", systemImage: "plus").labelStyle(.iconOnly)
-                }.help("放大").disabled(model.colorEditor?.isComposing == true)
-                Divider().frame(height: 16)
-                Button { showsFilmstrip.toggle() } label: {
-                    Label("胶片栏", systemImage: "rectangle.bottomthird.inset.filled")
-                        .labelStyle(.iconOnly)
-                        .foregroundStyle(showsFilmstrip ? Color.accentColor : Color.primary)
-                }.help(showsFilmstrip ? "隐藏胶片栏" : "显示胶片栏")
-                Button { showsInspector.toggle() } label: {
-                    Label("照片信息", systemImage: "info.circle")
-                        .labelStyle(.iconOnly)
-                        .foregroundStyle(showsInspector ? Color.accentColor : Color.primary)
-                }.help(showsInspector ? "隐藏照片信息" : "显示照片信息")
-            }
-            .buttonStyle(.borderless).controlSize(.small)
-            .padding(.horizontal, 12).frame(height: 36)
-            .background(Color(nsColor: .controlBackgroundColor))
+            }.buttonStyle(.borderless).controlSize(.small)
+                .padding(.horizontal, 16).frame(height: 52)
+                .background(Color(nsColor: .controlBackgroundColor))
             if let draft = model.colorEditor?.composition {
                 CompositionCanvas(draft: draft)
             } else {
-                ZoomScroll(image: model.colorEditor?.result?.image ?? image, assetID: item.id,
-                    nativeSize: model.colorEditor?.result?.nativeSize ?? nativeSize,
-                    action: action, command: command, onExit: { model.closePreview() })
+                ZoomScroll(image: model.colorPresetPreview?.image ?? model.colorEditor?.result?.image ?? image, assetID: item.id,
+                    nativeSize: model.colorPresetPreview?.nativeSize ?? model.colorEditor?.result?.nativeSize ?? nativeSize,
+                    action: action, command: command, onExit: model.leavePreviewLevel)
                     .overlay {
                         if model.colorEditor != nil {
                             if model.colorEditor?.result == nil && model.colorEditor?.renderError == nil {
@@ -104,11 +68,36 @@ struct ZoomPreview: View {
                         }
                     }
             }
+            HStack(spacing: 10) {
+                Button("适应") { action = "fit"; command += 1 }
+                Button("100%") { action = "actual"; command += 1 }
+                Button { action = "out"; command += 1 } label: { Image(systemName: "minus") }.accessibilityLabel("缩小")
+                Button { action = "in"; command += 1 } label: { Image(systemName: "plus") }.accessibilityLabel("放大")
+                if originalPreview?.isEmbedded == true {
+                    Text("嵌入预览").font(.caption).foregroundStyle(.secondary)
+                        .help("按原片尺寸显示；细节受内嵌预览分辨率限制")
+                }
+                Spacer()
+                if model.colorEditor == nil {
+                    ForEach(1...5, id: \.self) { value in
+                        Button { model.updateRating(item.rating == value ? 0 : value) } label: {
+                            Image(systemName: value <= item.rating ? "star.fill" : "star")
+                                .foregroundStyle(value <= item.rating ? Color.accentColor : .secondary)
+                        }.accessibilityLabel("\(value) 星")
+                    }
+                    Button(item.flag == .rejected ? "取消淘汰" : "淘汰", systemImage: "xmark.circle") {
+                        model.updateFlag(item.flag == .rejected ? .none : .rejected)
+                    }.disabled(model.operationBlockReason(.annotation) != nil)
+                }
+                Button { showsFilmstrip.toggle() } label: { Image(systemName: "rectangle.bottomthird.inset.filled") }
+                    .accessibilityLabel("切换胶片栏").help(showsFilmstrip ? "隐藏胶片栏" : "显示胶片栏")
+            }.buttonStyle(.borderless).controlSize(.small).padding(.horizontal, 16).frame(height: 42)
+                .disabled(model.colorEditor?.isComposing == true)
+                .background(Color(nsColor: .controlBackgroundColor))
         }
         .onExitCommand {
             guard !model.isPreviewTransitioning else { return }
-            if model.colorEditor?.isComposing == true { model.colorEditor?.cancelComposition() }
-            else { model.closePreview() }
+            model.leavePreviewLevel()
         }
         .onDisappear { loadGeneration = UUID(); image = nil; originalPreview = nil; nativeSize = .zero; imageAssetID = nil }
         .onChange(of: model.colorEditor?.result.map { ObjectIdentifier($0.image) }) { _, _ in
@@ -169,7 +158,7 @@ final class PhotoScrollView: NSScrollView {
         super.init(frame: frame)
         hasVerticalScroller = false; hasHorizontalScroller = false
         allowsMagnification = false
-        backgroundColor = .black
+        backgroundColor = .windowBackgroundColor
         documentView = photo
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) unavailable") }

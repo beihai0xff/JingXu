@@ -44,6 +44,7 @@ struct PhotoThumbnail: View {
     var failureChanged: (Bool) -> Void = { _ in }
     @State private var image: NSImage?
     @State private var failure: String?
+    @State private var failureDetail: String?
     @State private var retry = 0
     var body: some View {
         ZStack {
@@ -57,7 +58,7 @@ struct PhotoThumbnail: View {
                         Button("重试") { retry += 1 }.font(.caption)
                         Button("重新授权…") { model.reauthorizeThumbnailSource(item) }.font(.caption)
                     }
-                }.padding(5).help(failure)
+                }.padding(5).help(failureDetail ?? failure)
             } else { ProgressView().controlSize(.small) }
         }
         .contextMenu {
@@ -65,14 +66,17 @@ struct PhotoThumbnail: View {
             Button("重新授权来源…") { model.reauthorizeThumbnailSource(item) }
         }
         .task(id: "\(item.id)-\(item.fileVersion)-\(item.colorRevision)-\(size)-\(scale)-\(retry)-\(model.thumbnailReloadID)") {
-            image = nil; failure = nil; failureChanged(false)
+            image = nil; failure = nil; failureDetail = nil; failureChanged(false)
             do {
                 let result = try await model.thumbnail(for: item, pixelSize: size, scale: scale)
                 guard !Task.isCancelled else { return }
                 image = result
             } catch is CancellationError {} catch {
                 guard !Task.isCancelled else { return }
-                failure = error.localizedDescription
+                failureDetail = error.localizedDescription
+                failure = (error as NSError).domain == "QLThumbnailErrorDomain"
+                    ? "无法生成缩略图，请重试或查看原片"
+                    : error.localizedDescription
                 failureChanged(true)
             }
         }

@@ -7,19 +7,12 @@ struct ColorEditPanel: View {
     let isTransitioning: Bool
     let externallyControlled: Bool
     let copyAdjustments: () -> Void
-    let showPresets: () -> Void
     let discardStale: () -> Void
     @FocusState private var focusedParameter: ColorParameter?
     @State private var histogramIsDragging = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text("调色").font(.title2.bold())
-                    if session.isRendering { ProgressView().controlSize(.small) }
-                    Spacer()
-                    Text(session.isSaving ? "正在保存…" : session.isDirty ? "未保存" : session.snapshot.isSystemPhoto ? "草稿已保存" : "已保存").font(.caption).foregroundStyle(.secondary)
-                }
                 HStack {
                     Button("撤销") { session.undo() }.disabled(!session.history.canUndo)
                     Button("重做") { session.redo() }.disabled(!session.history.canRedo)
@@ -48,50 +41,44 @@ struct ColorEditPanel: View {
                         Button("放弃旧调整…") { discardStale() }
                     }
                 }
-                if let result = session.result {
-                    ColorHistogram(session: session, result: result.histogram,
-                        enabled: session.usable && !isWorking && !isTransitioning &&
-                            !externallyControlled && !session.isExternallyControlled && !session.isComposing,
-                        prepare: {
-                            histogramIsDragging = true
-                            focusedParameter = nil
-                            session.endGesture()
-                        }, finished: { histogramIsDragging = false })
-                        .id(session.snapshot.id)
-                }
-                ForEach(ColorGroup.allCases, id: \.self) { group in
-                    GroupBox(group.title) {
-                        VStack(spacing: 10) {
-                            if group == .whiteBalance {
-                                HStack {
-                                    Text(session.isRAW ? "RAW · 绝对色温" : "普通图片 · 相对调整").font(.caption2).foregroundStyle(.secondary)
-                                    Spacer()
-                                    Button("拍摄时") { session.asShot() }.font(.caption)
-                                }
-                            }
-                            ForEach(ColorParameter.allCases.filter { $0.group == group }, id: \.self) { p in
-                                VStack(spacing: 2) {
-                                    HStack {
-                                        Text(p.title).font(.caption)
-                                        Spacer()
-                                        TextField(p.title, value: Binding(get: { session.displayValue(p) }, set: { session.change(p, value: $0) }), format: .number.precision(.fractionLength(p == .exposure ? 2 : 0)))
-                                            .textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing).frame(width: 74)
-                                            .focused($focusedParameter, equals: p)
-                                            .onSubmit { session.endGesture() }
-                                        Button { session.reset(p) } label: { Image(systemName: "arrow.counterclockwise") }.buttonStyle(.borderless).help("重置\(p.title)")
-                                    }
-                                    Slider(value: Binding(get: { session.displayValue(p) }, set: { session.change(p, value: $0) }),
-                                        in: p.range(isRAW: session.isRAW), step: p == .exposure ? 0.01 : 1,
-                                        onEditingChanged: { editing in if editing { session.beginGesture() } else { session.endGesture() } })
-                                        .accessibilityLabel(p.title)
-                                }
-                            }
-                        }.padding(.vertical, 4)
-                    }.disabled(session.result == nil || isWorking || isTransitioning)
+                DisclosureGroup("直方图") {
+                    if let result = session.result {
+                        ColorHistogram(session: session, result: result.histogram,
+                            enabled: session.usable && !isWorking && !isTransitioning && !externallyControlled && !session.isExternallyControlled,
+                            prepare: { histogramIsDragging = true; focusedParameter = nil; session.endGesture() },
+                            finished: { histogramIsDragging = false })
+                    }
                 }
                 HStack {
+                    Text("明暗").font(.headline)
+                    Spacer()
+                    Button("重置") {
+                        var values = session.adjustments
+                        for p in ColorParameter.allCases where p.group == .tone { values[p] = 0 }
+                        session.apply(values)
+                    }.buttonStyle(.borderless).font(.caption)
+                }.padding(.top, 8)
+                ForEach([ColorParameter.exposure, .contrast, .highlights, .shadows], id: \.self) { parameter($0) }
+                DisclosureGroup("白色与黑色") {
+                    VStack(spacing: 10) { parameter(.whites); parameter(.blacks) }.padding(.top, 10)
+                }
+                Divider()
+                DisclosureGroup("白平衡") {
+                    VStack(spacing: 10) {
+                        HStack {
+                            Text(session.isRAW ? "RAW · 绝对色温" : "普通图片 · 相对调整").font(.caption).foregroundStyle(.secondary)
+                            Spacer(); Button("拍摄时") { session.asShot() }.font(.caption)
+                        }
+                        parameter(.temperature); parameter(.tint)
+                    }.padding(.top, 10)
+                }
+                Divider()
+                DisclosureGroup("色彩") {
+                    VStack(spacing: 10) { parameter(.saturation); parameter(.vibrance) }.padding(.top, 10)
+                }
+                Divider()
+                HStack {
                     Button("复制调整") { copyAdjustments() }
-                    Button("预设…") { showPresets() }
                     Spacer()
                 }.disabled(!session.usable)
                 Button(session.snapshot.isSystemPhoto ? "重置镜序调整" : "恢复原图") { session.resetAll() }.disabled(session.result == nil || isTransitioning)
@@ -101,6 +88,25 @@ struct ColorEditPanel: View {
             .disabled(isWorking || isTransitioning || externallyControlled || session.isExternallyControlled || session.isComposing)
             .onChange(of: focusedParameter) { previous, _ in if previous != nil && !histogramIsDragging { session.endGesture() } }
     }
+    private func parameter(_ p: ColorParameter) -> some View {
+        VStack(spacing: 2) {
+            HStack {
+                Text(p.title).font(.callout)
+                Spacer()
+                TextField(p.title, value: Binding(get: { session.displayValue(p) }, set: { session.change(p, value: $0) }),
+                    format: .number.precision(.fractionLength(p == .exposure ? 2 : 0)))
+                    .textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing).frame(width: 68)
+                    .focused($focusedParameter, equals: p).onSubmit { session.endGesture() }
+                Button { session.reset(p) } label: { Image(systemName: "arrow.counterclockwise") }
+                    .buttonStyle(.borderless).help("重置\(p.title)").accessibilityLabel("重置\(p.title)")
+            }
+            Slider(value: Binding(get: { session.displayValue(p) }, set: { session.change(p, value: $0) }),
+                in: p.range(isRAW: session.isRAW), step: p == .exposure ? 0.01 : 1,
+                onEditingChanged: { editing in if editing { session.beginGesture() } else { session.endGesture() } })
+                .accessibilityLabel(p.title)
+        }.disabled(session.result == nil || isWorking || isTransitioning)
+    }
+
 }
 
 /// ButtonStyle follows mouse and keyboard press state, including dragging outside the button.
