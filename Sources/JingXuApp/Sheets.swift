@@ -22,12 +22,17 @@ struct ImportSheet: View {
             GroupBox("来源") {
                 VStack(alignment: .leading, spacing: 10) {
                     if !model.volumeMonitor.volumes.isEmpty {
-                        Picker("检测到的外接卷", selection: $sourceURL) {
-                            Text("请选择").tag(URL?.none)
+                        Menu("检测到的外接卷") {
                             ForEach(model.volumeMonitor.volumes, id: \.self) { volume in
-                                Text(volume.lastPathComponent).tag(URL?.some(volume))
+                                Button(volume.lastPathComponent) {
+                                    if let selected = chooseDirectory(title: "授权访问相机卡或来源文件夹", startingAt: volume) {
+                                        sourceURL = selected
+                                    }
+                                }
                             }
                         }
+                        Text("选择外接卷后，请在系统窗口确认目录以授予访问权限。")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     pathPicker(title: "相机卡或来源文件夹", url: sourceURL) { sourceURL = chooseDirectory(title: "选择相机卡或来源文件夹") }
                 }
@@ -75,9 +80,10 @@ struct ImportSheet: View {
         }
     }
 
-    private func chooseDirectory(title: String) -> URL? {
+    private func chooseDirectory(title: String, startingAt directory: URL? = nil) -> URL? {
         let panel = NSOpenPanel()
         panel.title = title
+        panel.directoryURL = directory
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false

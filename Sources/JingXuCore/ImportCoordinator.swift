@@ -30,24 +30,33 @@ public actor ImportCoordinator: Importing {
         guard !running else { throw ColorEditError("正在导入，请等待当前任务完成") }
         let sourceLease = PreviewAccessLease(url: sourceURL), targetLease = PreviewAccessLease(url: targetURL)
         defer { withExtendedLifetime((sourceLease, targetLease)) {} }
-        let sourceIdentity = try Self.directoryIdentity(sourceURL), targetIdentity = try Self.directoryIdentity(targetURL)
+        let sourceIdentity = try Self.preflight("访问来源目录") { try Self.directoryIdentity(sourceURL) }
+        let targetIdentity = try Self.preflight("访问目标目录") { try Self.directoryIdentity(targetURL) }
         let source = URL(fileURLWithPath: sourceIdentity.path), target = URL(fileURLWithPath: targetIdentity.path)
         guard !source.pathComponents.starts(with: target.pathComponents), !target.pathComponents.starts(with: source.pathComponents) else {
             throw ColorEditError("来源与目标不能相同，也不能互相包含")
         }
-        let sourceRoot = SourceRoot(name: source.lastPathComponent, bookmarkData: try BookmarkStore.makeBookmark(for: source), pathHint: source.path)
-        let targetRoot = SourceRoot(name: target.lastPathComponent, bookmarkData: try BookmarkStore.makeBookmark(for: target), pathHint: target.path)
+        // The picker URLs carry the sandbox grant; canonical paths are only for identity checks.
+        let sourceBookmark = try Self.preflight("保存来源授权") { try BookmarkStore.makeBookmark(for: sourceURL) }
+        let targetBookmark = try Self.preflight("保存目标授权") { try BookmarkStore.makeBookmark(for: targetURL) }
+        let sourceRoot = SourceRoot(name: source.lastPathComponent, bookmarkData: sourceBookmark, pathHint: source.path)
+        let targetRoot = SourceRoot(name: target.lastPathComponent, bookmarkData: targetBookmark, pathHint: target.path)
         var existingDirectories: [String: SourceIdentity] = [:], directory = target
         var relative = ""
         for part in try Self.parts(folder) {
             relative = relative.isEmpty ? part : relative + "/" + part
             directory.appendPathComponent(part)
-            if try Self.exists(directory) { existingDirectories[relative] = try Self.directoryIdentity(directory) }
+            let exists = try Self.preflight("检查目标目录") { try Self.exists(directory) }
+            if exists {
+                existingDirectories[relative] = try Self.preflight("检查目标目录") { try Self.directoryIdentity(directory) }
+            }
         }
         let destination = target.appendingPathComponent(folder)
-        let entries = try Self.exists(destination) ? FileManager.default.contentsOfDirectory(at: destination, includingPropertiesForKeys: nil) : []
+        let entries = try Self.preflight("读取目标批次目录") {
+            try Self.exists(destination) ? FileManager.default.contentsOfDirectory(at: destination, includingPropertiesForKeys: nil) : []
+        }
         let destinationFamilies = Dictionary(grouping: entries, by: { Self.fold(Self.familyStem($0)) })
-        _ = try FileManager.default.contentsOfDirectory(atPath: source.path)
+        _ = try Self.preflight("读取来源目录") { try FileManager.default.contentsOfDirectory(atPath: source.path) }
         var issues: [ImportIssue] = [], allFiles: [URL] = []
         guard let enumerator = FileManager.default.enumerator(at: source, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { url, error in
             issues.append(.init(path: FileIdentity.relativePath(of: url, under: source), stage: .directory, reason: error.localizedDescription)); return true
@@ -228,7 +237,7 @@ public actor ImportCoordinator: Importing {
             }
             try Task.checkCancellation()
             stage = .index
-            report.source = try await repository.registerSource(at: destination)
+            report.source = try await repository.registerSource(at: target.url.appendingPathComponent(plan.relativeFolder))
             report.scanReport = try await scanner.scan(source: report.source!, progress: nil)
             if let scan = report.scanReport {
                 report.issues += scan.failures.map { .init(path: $0.path, stage: .index, reason: $0.reason) }
@@ -263,6 +272,11 @@ public actor ImportCoordinator: Importing {
         return directory
     }
     static func fold(_ value: String) -> String { value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX")) }
+    private static func preflight<T>(_ stage: String, _ action: () throws -> T) throws -> T {
+        do { return try action() }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw ColorEditError("\(stage)失败：\(error.localizedDescription)") }
+    }
     static func familyStem(_ url: URL) -> String {
         let base = url.deletingPathExtension()
         if url.pathExtension.lowercased() == "xmp", MediaSupport.kind(for: base) != nil { return base.deletingPathExtension().lastPathComponent }

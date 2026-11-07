@@ -65,6 +65,11 @@ import GRDB
         let lowSpace = ImportCoordinator(repository: f.store, scanner: DefaultSourceScanner(repository: f.store), capacity: { _ in 0 })
         do { _ = try await lowSpace.prepare(from: f.card, to: f.target, batchName: "space"); throw ColorChecks.Failure(description: "容量不足未拒绝") }
         catch is CocoaError {}
+        let missing = f.root.appendingPathComponent("missing")
+        do { _ = try await f.importer.prepare(from: missing, to: f.target, batchName: "missing"); throw ColorChecks.Failure(description: "未报告来源目录错误") }
+        catch let error as ColorEditError { try ColorChecks.check(error.message.hasPrefix("访问来源目录失败"), "来源错误未标明阶段") }
+        do { _ = try await f.importer.prepare(from: f.card, to: missing, batchName: "missing"); throw ColorChecks.Failure(description: "未报告目标目录错误") }
+        catch let error as ColorEditError { try ColorChecks.check(error.message.hasPrefix("访问目标目录失败"), "目标错误未标明阶段") }
         for target in [f.card, f.card.appendingPathComponent("denied")] {
             do { _ = try await f.importer.prepare(from: f.card, to: target, batchName: "invalid"); throw ColorChecks.Failure(description: "允许来源目标重叠") }
             catch is ColorEditError {}

@@ -44,7 +44,12 @@ fi
 swift --version
 python3 -m unittest discover -s Tests/ReleasePipeline -v
 # Pin dependency resolution and architecture in both configurations and all modes.
-SWIFT_OPTIONS=(--arch arm64 --disable-automatic-resolution)
+# Swift 6.4's default swiftbuild engine fails to initialize with the local SDK;
+# keep the same working engine for check and both packaging modes.
+SWIFT_OPTIONS=(--arch arm64 --disable-automatic-resolution --build-system native)
+if [[ -n "${SDKROOT:-}" ]]; then
+  SWIFT_OPTIONS+=(--sdk "$SDKROOT")
+fi
 swift build -c debug "${SWIFT_OPTIONS[@]}"
 swift build -c release "${SWIFT_OPTIONS[@]}"
 BINARY_DIR=$(swift build -c release "${SWIFT_OPTIONS[@]}" --show-bin-path)

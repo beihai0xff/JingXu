@@ -35,13 +35,14 @@ extension CatalogStore {
     public func registerSource(at url: URL) throws -> SourceRoot {
         let identity = try SourceIdentity.resolve(url)
         let canonicalURL = URL(fileURLWithPath: identity.path, isDirectory: true)
+        let bookmarkURL = url.standardizedFileURL.path == identity.path ? url : canonicalURL
         let existing = try sources().sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
         for var source in existing {
             let savedIdentity = source.directoryIdentityJSON.flatMap { $0.data(using: .utf8) }.flatMap { try? JSONDecoder().decode(SourceIdentity.self, from: $0) }
             let resolved = (try? BookmarkStore.resolve(source).url) ?? URL(fileURLWithPath: source.pathHint)
             let other = (try? SourceIdentity.resolve(resolved)) ?? savedIdentity
             guard let other, identity.matches(other) else { continue }
-            source.bookmarkData = try BookmarkStore.makeBookmark(for: canonicalURL)
+            source.bookmarkData = try BookmarkStore.makeBookmark(for: bookmarkURL)
             source.pathHint = identity.path; source.isOnline = true
             source.volumeIdentifier = identity.volume
             source.directoryIdentityJSON = String(decoding: try JSONEncoder().encode(identity), as: UTF8.self)
@@ -52,7 +53,7 @@ extension CatalogStore {
         if existing.contains(where: { URL(fileURLWithPath: $0.pathHint).standardizedFileURL.path == url.standardizedFileURL.path }) {
             throw NSError(domain: "JingXu", code: 2, userInfo: [NSLocalizedDescriptionKey: "已有同路径来源无法验证，请先重新连接来源或移除失效记录。"])
         }
-        var source = SourceRoot(name: canonicalURL.lastPathComponent, bookmarkData: try BookmarkStore.makeBookmark(for: canonicalURL), pathHint: identity.path, volumeIdentifier: identity.volume)
+        var source = SourceRoot(name: canonicalURL.lastPathComponent, bookmarkData: try BookmarkStore.makeBookmark(for: bookmarkURL), pathHint: identity.path, volumeIdentifier: identity.volume)
         source.directoryIdentityJSON = String(decoding: try JSONEncoder().encode(identity), as: UTF8.self)
         try upsertSource(source)
         return source

@@ -100,6 +100,7 @@ elif name == 'ditto': pathlib.Path(args[-1]).write_text('fixture zip')
         for cmd in check_swift:
             if cmd[1] == 'build':
                 self.assertIn('--disable-automatic-resolution', cmd)
+                self.assertEqual(cmd[cmd.index('--build-system')+1], 'native')
                 self.assertEqual(cmd[cmd.index('--arch')+1], 'arm64')
         self.assertFalse(any(cmd[0] in ('security', 'xcrun') for cmd in self.commands()))
         resources = self.root / 'captured/镜序.app/Contents/Resources'

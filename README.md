@@ -8,7 +8,7 @@
 
 本地处理 · 无需镜序账户 · 非破坏式调色
 
-**[下载 v0.9.0 测试版（Apple Silicon）](https://github.com/beihai0xff/JingXu/releases/download/v0.9.0/JingXu-0.9.0-test.34-macOS-arm64.dmg)** · [所有版本与更新说明](https://github.com/beihai0xff/JingXu/releases)
+**[下载 v0.9.2 测试版（Apple Silicon）](https://github.com/beihai0xff/JingXu/releases/download/v0.9.2/JingXu-0.9.2-test.36-macOS-arm64.dmg)** · [所有版本与更新说明](https://github.com/beihai0xff/JingXu/releases)
 
 [下载安装](#下载安装) · [快速上手](#快速上手) · [界面预览](#界面预览) · [常见问题](#常见问题) · [使用帮助](#使用帮助)
 
@@ -16,11 +16,11 @@
 
 需要 **macOS 14 Sonoma 或更新版本、Apple Silicon（M 系列芯片）Mac**。当前安装包不支持 Intel Mac。
 
-1. [下载 DMG 安装包](https://github.com/beihai0xff/JingXu/releases/download/v0.9.0/JingXu-0.9.0-test.34-macOS-arm64.dmg)。
+1. [下载 DMG 安装包](https://github.com/beihai0xff/JingXu/releases/download/v0.9.2/JingXu-0.9.2-test.36-macOS-arm64.dmg)。
 2. 打开 DMG，将「镜序.app」拖入「应用程序」。
 3. 从「应用程序」打开镜序，添加一个照片文件夹即可开始。
 
-> 当前提供的是未经 Apple 公证的测试版，macOS 可能阻止打开。安装前请阅读 [v0.9.0 发布说明](https://github.com/beihai0xff/JingXu/releases/tag/v0.9.0)；若系统拒绝启动，不要关闭系统安全保护。
+> 当前提供的是未经 Apple 公证的测试版，macOS 可能阻止打开。安装前请阅读 [v0.9.2 发布说明](https://github.com/beihai0xff/JingXu/releases/tag/v0.9.2)；若系统拒绝启动，不要关闭系统安全保护。
 
 <details>
 <summary>使用 Homebrew 安装</summary>
@@ -71,7 +71,7 @@ brew upgrade --cask beihai0xff/jingxu/jingxu
 
 照片已在电脑或外接硬盘上：点击「添加文件夹…」，选择照片所在目录并授权访问。照片仍留在原位置。
 
-照片还在相机卡上：选择「从相机卡导入」，指定目标文件夹，核对导入清单后开始复制。
+照片还在相机卡上：选择「从相机卡导入」，在系统窗口确认相机卡和目标文件夹的访问权限，核对导入清单后开始复制。
 
 ### 2. 挑选喜欢的照片
 
