@@ -41,7 +41,40 @@ private struct TestTrash: TrashService {
 private enum JingXuChecks {
     static func main() async throws {
         setenv("SWIFTNIO_STRICT", "1", 1)
+        if CommandLine.arguments.contains("--browsing-profile-fixture") {
+            print(try await BrowsingPerformanceProfile.fixture().path)
+            return
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--scrolling-profile"), CommandLine.arguments.count > index + 2 {
+            let mode = CommandLine.arguments[index + 2]
+            guard ["whole", "window"].contains(mode) else {
+                throw CheckFailure(description: "用法：--scrolling-profile <合成素材目录> <whole|window>")
+            }
+            try await BrowsingPerformanceProfile.scrolling(root: URL(fileURLWithPath: CommandLine.arguments[index + 1]), bounded: mode == "window")
+            return
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--browsing-profile"), CommandLine.arguments.count > index + 3 {
+            guard let count = Int(CommandLine.arguments[index + 2]), ["whole", "changed"].contains(CommandLine.arguments[index + 3])
+            else { throw CheckFailure(description: "用法：--browsing-profile <合成素材目录> <200|2000|10000> <whole|changed>") }
+            try await BrowsingPerformanceProfile.run(root: URL(fileURLWithPath: CommandLine.arguments[index + 1]), count: count,
+                wholeRange: CommandLine.arguments[index + 3] == "whole")
+            return
+        }
+        if CommandLine.arguments.contains("--incremental-browsing-checks") {
+            try await IncrementalBrowsingChecks.progress()
+            try await WorkflowChecks.pagination()
+            return
+        }
+        if CommandLine.arguments.contains("--optimization-safety-checks") {
+            try await OptimizationSafetyChecks.run()
+            try await ArchiveChecks.run()
+            try await ArchiveChecks.scaleAndRecovery()
+            try await BatchMoveChecks.run()
+            try await ColorChecks.exporting()
+            return
+        }
         if CommandLine.arguments.contains("--system-photos-checks") {
+            try await SystemPhotoPreviewChecks.run()
             try await SystemPhotosChecks.run()
             print("系统照片隔离、跨页选择、相册、上传、草稿、冲突、分析与恢复检查通过")
             return
@@ -156,6 +189,9 @@ private enum JingXuChecks {
             return
         }
         let checks: [(String, () async throws -> Void)] = [
+            ("文件状态不明暂停、恢复及 2001 项导出免解码", OptimizationSafetyChecks.run),
+            ("系统照片可靠切换、草稿重开、取消与按需画质", SystemPhotoPreviewChecks.run),
+            ("分析提交 ID 与取消后最终增量刷新", IncrementalBrowsingChecks.progress),
             ("系统照片端到端、2005 项固定范围、授权、下载、取消、冲突与提交恢复", SystemPhotosChecks.run),
             ("构图几何、主体保护与裁剪参数", { try CompositionChecks.geometry() }),
             ("裁剪方向、预览、缩略图及成片导出", CompositionChecks.rendering),

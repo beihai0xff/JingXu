@@ -37,6 +37,14 @@ public struct AnnotationChangeSet: Sendable {
     public let patch: AnnotationPatch
     public let changes: [Change]
     public var ids: [String] { changes.map { $0.after.assetID } }
+    public func affectsMembership(of query: BrowseQuery) -> Bool {
+        changes.contains { change in
+            (change.before.rating != change.after.rating && query.minimumRating > 0) ||
+            (change.before.flag != change.after.flag && (query.flag != nil || query.collection == .rejected)) ||
+            (change.before.keywords != change.after.keywords && !query.searchText.isEmpty) ||
+            (change.albumBefore != change.albumAfter && patch.albumID == query.albumID)
+        }
+    }
 }
 
 extension CatalogStore {

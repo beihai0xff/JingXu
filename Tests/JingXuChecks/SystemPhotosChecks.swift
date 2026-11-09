@@ -61,7 +61,36 @@ enum SystemPhotosChecks {
             selection.selectAll(page.items.map(\.id))
         }
         let selected = try await f.client.photos(ids: selection.selectedIDs.sorted(), albumID: nil)
+        try check(try await f.client.matchingPhotoIDs(Array(selection.selectedIDs) + ["missing"], albumID: nil) == selection.selectedIDs, "ID 校验丢失完整选择")
         try check(selected.count == 2_005, "跨页显式选择丢失")
+        var windowItems = try await f.client.page(albumID: nil, offset: 0, limit: 200).items
+        var windowOffset = 0
+        while windowOffset + windowItems.count < allIDs.count {
+            let next = windowOffset + windowItems.count
+            let page = try await f.client.page(albumID: nil, offset: next, limit: 200)
+            guard let window = SystemPhotoBrowseWindow(items: windowItems, offset: windowOffset,
+                page: page, pageOffset: next, before: false, columns: 3) else {
+                throw ColorChecks.Failure(description: "系统照片稳定页面被误判为顺序变化")
+            }
+            windowItems = window.items; windowOffset = window.offset
+            try check(windowItems.count <= 600 && windowItems.map(\.id) == Array(allIDs[windowOffset..<windowOffset + windowItems.count]),
+                      "系统照片向后滚动窗口超限、重复或错位")
+        }
+        while windowOffset > 0 {
+            let previous = max(0, windowOffset - 200)
+            let page = try await f.client.page(albumID: nil, offset: previous, limit: windowOffset - previous)
+            guard let window = SystemPhotoBrowseWindow(items: windowItems, offset: windowOffset,
+                page: page, pageOffset: previous, before: true, columns: 3) else {
+                throw ColorChecks.Failure(description: "系统照片反向页面被误判为顺序变化")
+            }
+            windowItems = window.items; windowOffset = window.offset
+            try check(windowItems.count <= 600 && windowItems.map(\.id) == Array(allIDs[windowOffset..<windowOffset + windowItems.count]),
+                      "系统照片向前滚动窗口超限、重复或错位")
+        }
+        try check(windowOffset == 0 && selection.selectedIDs.count == 2_005, "反向滚动丢失窗口外选择")
+        let duplicate = SystemPhotoPage(items: [windowItems[0]], total: 2_005)
+        try check(SystemPhotoBrowseWindow(items: windowItems, offset: windowOffset, page: duplicate,
+                                          pageOffset: 0, before: true, columns: 3) == nil, "系统照片顺序漂移未请求重定位")
         let boundary = try await f.client.page(albumID: nil, offset: 200, limit: 1).items[0]
         try check(try await f.client.index(id: boundary.id, albumID: nil) == 200, "单图跨页导航位置错误")
         try await f.coordinator.mutate(SystemPhotoMutationPlan(operation: .createAlbum("独立相册")))
@@ -76,6 +105,7 @@ enum SystemPhotosChecks {
         try check(try await f.client.photos(ids: subset.map(\.id), albumID: nil).count == 2, "移出相册删除了照片")
         try check(try await f.client.photos(ids: subset.map(\.id), albumID: album.id).isEmpty, "相册移出未更新范围")
         let albumIDs = try await f.client.photoIDs(albumID: album.id)
+        try check(try await f.client.matchingPhotoIDs(subset.map(\.id), albumID: album.id).isEmpty, "ID 校验未过滤相册范围")
         try check(albumIDs.count == 2_003 && Set(albumIDs).isDisjoint(with: subset.map(\.id)), "系统相册完整选择串入其他范围")
         current = try await f.client.albums()[0]
         let staleDelete = SystemPhotoMutationPlan(operation: .deleteAlbum(id: album.id), album: current)

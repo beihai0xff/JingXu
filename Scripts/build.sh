@@ -14,6 +14,31 @@ MODE="${1:-check}"
 cd "$PROJECT_DIR"
 BUILD_TEMP=$(mktemp -d "${TMPDIR:-/tmp}/jingxu-build.XXXXXX")
 trap 'rm -rf "$BUILD_TEMP"' EXIT
+environment_failure() {
+  cat "$BUILD_TEMP/environment.log" >&2
+  print -u2 "Developer：${BUILD_DEVELOPER:-未解析}；SDK：${SDKROOT:-随所选工具链解析}"
+  print -u2 '构建环境不可用，尚未开始编译或打包。请检查所选 Xcode 的许可证，以及 Swift 与 SDK 是否匹配。'
+  print -u2 '可显式设置 DEVELOPER_DIR 和 SDKROOT 后重试；本脚本不会接受许可证或切换全局工具链。'
+  print -u2 '许可证问题可由用户运行 sudo xcodebuild -license 处理；已验证的 SDK 配置见 Documentation/ReleasePipeline.md。'
+  exit 1
+}
+BUILD_DEVELOPER="${DEVELOPER_DIR:-$(xcode-select -p 2>"$BUILD_TEMP/environment.log")}" || environment_failure
+BUILD_SWIFT=$(xcrun --find swift 2>"$BUILD_TEMP/environment.log") || environment_failure
+BUILD_SWIFTC=$(xcrun --find swiftc 2>"$BUILD_TEMP/environment.log") || environment_failure
+BUILD_SDK="${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path 2>"$BUILD_TEMP/environment.log")}" || environment_failure
+[[ -d "$BUILD_SDK" ]] || { print -u2 "SDK 不存在：$BUILD_SDK，请修正 SDKROOT。"; exit 1; }
+print "Developer：$BUILD_DEVELOPER"
+print "Swift：$BUILD_SWIFT"
+print "SDK：${BUILD_SDK:A}"
+"$BUILD_SWIFT" --version 2>"$BUILD_TEMP/environment.log" || environment_failure
+cat > "$BUILD_TEMP/SwiftUIProbe.swift" <<'SWIFT'
+import SwiftUI
+struct BuildEnvironmentProbe: View {
+    @State private var value = 0
+    var body: some View { Text("\(value)") }
+}
+SWIFT
+"$BUILD_SWIFTC" -typecheck -target arm64-apple-macosx14.0 -sdk "$BUILD_SDK" "$BUILD_TEMP/SwiftUIProbe.swift" >"$BUILD_TEMP/environment.log" 2>&1 || environment_failure
 python3 Scripts/release-metadata.py --mode "$MODE" --output "$BUILD_TEMP"
 VERSION=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Packaging/Info.plist)
 BUILD=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' Packaging/Info.plist)
@@ -41,7 +66,6 @@ if [[ "$MODE" != check ]]; then
   [[ ! -e "$OUTPUT_DMG" && ! -e "${OUTPUT_DMG}.sha256" ]] || { print -u2 '版本产物已存在，请先归档或使用新版本。'; exit 1; }
 fi
 
-swift --version
 python3 -m unittest discover -s Tests/ReleasePipeline -v
 # Pin dependency resolution and architecture in both configurations and all modes.
 # Swift 6.4's default swiftbuild engine fails to initialize with the local SDK;
@@ -50,9 +74,9 @@ SWIFT_OPTIONS=(--arch arm64 --disable-automatic-resolution --build-system native
 if [[ -n "${SDKROOT:-}" ]]; then
   SWIFT_OPTIONS+=(--sdk "$SDKROOT")
 fi
-swift build -c debug "${SWIFT_OPTIONS[@]}"
-swift build -c release "${SWIFT_OPTIONS[@]}"
-BINARY_DIR=$(swift build -c release "${SWIFT_OPTIONS[@]}" --show-bin-path)
+"$BUILD_SWIFT" build -c debug "${SWIFT_OPTIONS[@]}"
+"$BUILD_SWIFT" build -c release "${SWIFT_OPTIONS[@]}"
+BINARY_DIR=$("$BUILD_SWIFT" build -c release "${SWIFT_OPTIONS[@]}" --show-bin-path)
 "${BINARY_DIR}/JingXuChecks"
 if [[ "$MODE" == check ]]; then
   print '构建与回归检查通过。'

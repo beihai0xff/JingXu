@@ -53,10 +53,10 @@ struct JingXuApp: App {
                     .disabled(model.colorTargetIDs.isEmpty || model.operationBlockReason(.files) != nil)
             }
             CommandGroup(after: .sidebar) {
-                Button(model.annotationTargetIDs.count > 1 ? "淘汰所选照片（Delete）" : "淘汰并下一张（Delete）") { model.flagFromMenu(.rejected) }
-                    .disabled(model.annotationTargetIDs.isEmpty || model.operationBlockReason(.annotation) != nil || model.colorEditor != nil)
+                Button(model.annotationTargetCount > 1 ? "淘汰所选照片（Delete）" : "淘汰并下一张（Delete）") { model.flagFromMenu(.rejected) }
+                    .disabled(model.annotationTargetCount == 0 || model.operationBlockReason(.annotation) != nil || model.colorEditor != nil)
                 Button("取消淘汰标记（U）") { model.flagFromMenu(.none) }
-                    .disabled(model.annotationTargetIDs.isEmpty || model.operationBlockReason(.annotation) != nil || model.colorEditor != nil)
+                    .disabled(model.annotationTargetCount == 0 || model.operationBlockReason(.annotation) != nil || model.colorEditor != nil)
                 Divider()
                 Button("重新分析当前范围…") { model.prepareQualityReanalysis() }.disabled(model.operationBlockReason(.files) != nil)
                 Button("重新分析全部旧结果…") { model.prepareQualityReanalysis(legacyOnly: true) }.disabled(model.operationBlockReason(.files) != nil)

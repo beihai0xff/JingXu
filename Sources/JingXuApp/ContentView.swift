@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var showsFilters = false
     @State private var showsViewOptions = false
     @State private var inspectorTab = PhotoInspectorTab.information
+    @State private var gridScrollID: String?
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: model.gridSize, maximum: model.gridSize * 1.35), spacing: 12)]
@@ -322,11 +323,14 @@ struct ContentView: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                      LazyVStack(spacing: 0) {
-                        if model.hasPreviousPage { loadMore(before: true) }
                         LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
+                          Section {
+                            ForEach(0..<model.gridLeadingCells, id: \.self) { _ in
+                                Color.clear.frame(height: model.gridSize).accessibilityHidden(true)
+                            }
                             ForEach(model.assets) { item in
                                 AssetCell(item: item, size: model.gridSize, isSelected: item.kind == .photo ? model.photoSelection.selectedIDs.contains(item.id) : model.selectedAssetID == item.id)
+                                    .id(item.id)
                                     .overlay(alignment: .topLeading) {
                                         if model.isBatchSelecting && item.kind == .photo {
                                             Image(systemName: model.photoSelection.selectedIDs.contains(item.id) ? "checkmark.circle.fill" : "circle")
@@ -352,18 +356,42 @@ struct ContentView: View {
                                         }
                                     }
                             }
-                        }
+                          } header: {
+                            if model.hasPreviousPage { loadMore(before: true) }
+                          } footer: {
+                            if model.hasNextPage { loadMore(before: false) }
+                            else { Text("已显示当前范围全部项目").font(.caption).foregroundStyle(.secondary).padding(16) }
+                          }
+                        }.scrollTargetLayout()
                         .padding(14)
                         .background(GeometryReader { geometry in
                             Color.clear.onChange(of: geometry.size.width, initial: true) { _, width in
-                                model.gridColumns = max(1, Int((width - 16) / (model.gridSize + 12)))
+                                model.updateGridColumns(Int((width - 16) / (model.gridSize + 12)))
                             }
-                            .onChange(of: model.gridSize) { _, _ in model.gridColumns = max(1, Int((geometry.size.width - 16) / (model.gridSize + 12))) }
+                            .onChange(of: model.gridSize) { _, _ in model.updateGridColumns(Int((geometry.size.width - 16) / (model.gridSize + 12))) }
                         })
-                        if model.hasNextPage { loadMore(before: false) }
-                        else { Text("已显示当前范围全部项目").font(.caption).foregroundStyle(.secondary).padding(16) }
-                      }
+                    }.scrollPosition(id: $gridScrollID)
+                    .onChange(of: model.gridTrimRevision) { _, _ in
+                        let anchor = [gridScrollID, model.gridTrimFallbackID].compactMap { $0 }
+                            .first { model.loadedAssets.contains($0) }
+                        if let anchor {
+                            gridScrollID = anchor
+                            let revision = model.gridTrimRevision
+                            DispatchQueue.main.async {
+                                if model.gridTrimRevision == revision { proxy.scrollTo(anchor, anchor: .top) }
+                            }
+                        }
                     }
+                    .onChange(of: model.gridJumpRevision, initial: true) { _, _ in
+                        if let id = model.gridJumpID {
+                            gridScrollID = id
+                            let revision = model.gridJumpRevision
+                            DispatchQueue.main.async {
+                                if model.gridJumpRevision == revision { proxy.scrollTo(id, anchor: .center) }
+                            }
+                        }
+                    }
+                    .onChange(of: model.appliedQuery) { _, _ in gridScrollID = nil }
                     .onChange(of: model.selectedAssetID, initial: true) { _, id in
                         if let id { proxy.scrollTo(id) }
                     }
@@ -467,8 +495,8 @@ struct ContentView: View {
                     Picker("照片详情", selection: $inspectorTab) {
                         ForEach(PhotoInspectorTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }.pickerStyle(.segmented).labelsHidden()
-                    if model.previewAsset == nil && model.selectedPhotoIDs.count > 1 {
-                        Text("已选择 \(model.selectedPhotoIDs.count) 张照片").font(.headline)
+                    if model.previewAsset == nil && model.photoSelection.selectedIDs.count > 1 {
+                        Text("已选择 \(model.photoSelection.selectedIDs.count) 张照片").font(.headline)
                         Text("使用上方操作栏批量评分、整理或导出。").font(.callout).foregroundStyle(.secondary)
                     } else {
                         Text(item.fileName).font(.headline).textSelection(.enabled)

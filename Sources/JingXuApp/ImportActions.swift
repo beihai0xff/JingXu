@@ -25,7 +25,7 @@ extension AppModel {
     func confirmImport() {
         guard let importer, let plan = importPlan else { return }
         importPlan = nil
-        startOperation {
+        startOperation { [self] in
             do {
                 let report = try await importer.execute(plan) { [weak self] value in
                     await MainActor.run {
@@ -53,11 +53,10 @@ extension AppModel {
         let refresh = BrowseRefreshGate()
         try await analysisCoordinator.analyzePending(sourceID: sourceID) { [weak self] value in
             await MainActor.run { self?.analysisProgress = value }
-            if await refresh.shouldRefresh(completed: value.completed, total: value.total) {
-                await self?.refreshAnalysisResults()
-            }
+            let ids = await refresh.ingest(value)
+            // Cancellation must still publish changes committed before the cancellation.
+            await Task { @MainActor [weak self] in await self?.refreshAnalysisResults(ids: ids) }.value
             await MainActor.run { self?.statusText = "正在分析 \(value.completed)/\(value.total)：\(value.currentFile)" }
         }
-        await reloadAssets()
     }
 }

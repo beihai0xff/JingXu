@@ -16,6 +16,21 @@ public struct BrowsePage: Sendable {
 }
 
 extension CatalogStore {
+    /// Validate explicit selection without hydrating metadata, diagnostics or edits.
+    public func matchingPhotoIDs(_ ids: [String], matching query: BrowseQuery) throws -> Set<String> {
+        let unique = Array(Set(ids)).sorted()
+        return try dbPool.read { db in
+            var result = Set<String>()
+            for start in stride(from: 0, to: unique.count, by: 400) {
+                try Task.checkCancellation()
+                let chunk = Array(unique[start..<min(start + 400, unique.count)])
+                let (sql, args) = try Self.assetQuerySQL(query, rejectedOnly: false, photosOnly: true,
+                    projection: "a.id", paginated: false, assetIDs: chunk)
+                result.formUnion(try String.fetchAll(db, sql: sql, arguments: args))
+            }
+            return result
+        }
+    }
     /// Freeze the entire matching photo selection without loading images or
     /// truncating the result to the grid's currently loaded window.
     public func browsePhotoIDs(_ query: BrowseQuery) throws -> [String] {

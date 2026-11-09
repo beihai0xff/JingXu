@@ -64,7 +64,7 @@ struct ColorWindowGuard: NSViewRepresentable {
         func windowShouldClose(_ sender: NSWindow) -> Bool {
             if closing { return original?.windowShouldClose?(sender) ?? true }
             model?.cancelColorExport()
-            if let photos = model?.systemPhotos, photos.editor != nil || photos.blocksLocalOperations {
+            if let photos = model?.systemPhotos, photos.preview != nil || photos.blocksLocalOperations {
                 Task {
                     guard await photos.prepareForExit() else { return }
                     self.closing = true; sender.performClose(nil)

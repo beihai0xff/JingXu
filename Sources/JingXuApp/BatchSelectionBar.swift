@@ -9,7 +9,7 @@ struct BatchSelectionBar: View {
     @State private var confirmsReplace = false
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if !model.selectedPhotoIDs.isEmpty {
+            if !model.photoSelection.selectedIDs.isEmpty {
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 10) { selectionSummary; Spacer(minLength: 8); actions }
                     VStack(alignment: .leading, spacing: 10) {
@@ -45,7 +45,7 @@ struct BatchSelectionBar: View {
     }
     private var selectionSummary: some View {
         HStack(spacing: 12) {
-            Text("已选 \(model.selectedPhotoIDs.count) 张").font(.callout.weight(.medium)).monospacedDigit()
+            Text("已选 \(model.photoSelection.selectedIDs.count) 张").font(.callout.weight(.medium)).monospacedDigit()
             Button("取消选择") { model.clearPhotoSelection(); model.changeCheckboxMode(false) }
                 .buttonStyle(.borderless).disabled(!model.canChangeBrowseScope)
         }.fixedSize()
@@ -53,7 +53,8 @@ struct BatchSelectionBar: View {
 
     private var actions: some View {
         Group {
-            if model.selectedPhotoIDs.count == 1, let item = model.selectedAsset {
+            if model.photoSelection.selectedIDs.count == 1,
+               let item = model.selectedAsset, model.photoSelection.selectedIDs.contains(item.id) {
                 Button("查看", systemImage: "arrow.up.left.and.arrow.down.right") { model.openPreview(item) }
                     .disabled(!model.canChangeBrowseScope)
             }
@@ -65,7 +66,7 @@ struct BatchSelectionBar: View {
             Button("淘汰", systemImage: "xmark.circle") { model.updateFlag(.rejected) }
                 .help("标记淘汰，保留原文件；可撤销")
                 .disabled(model.operationBlockReason(.annotation) != nil)
-            if model.selectedPhotoIDs.count == 2 {
+            if model.photoSelection.selectedIDs.count == 2 {
                 Button("比较", systemImage: "rectangle.split.2x1") { model.compareSelected() }
                     .disabled(model.operationBlockReason(.browse) != nil)
             }

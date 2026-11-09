@@ -139,15 +139,18 @@ struct ZoomScroll: NSViewRepresentable {
     let action: String
     let command: Int
     let onExit: () -> Void
+    var onTransformChange: ((CanvasTransform) -> Void)? = nil
     func makeNSView(context: Context) -> PhotoScrollView { PhotoScrollView() }
     func updateNSView(_ view: PhotoScrollView, context: Context) {
         view.photo.onExit = onExit
+        view.photo.onTransformChange = onTransformChange
         view.photo.setImage(image, assetID: assetID, nativeSize: nativeSize)
         if view.lastCommand != command { view.lastCommand = command; view.photo.perform(action) }
     }
     static func dismantleNSView(_ view: PhotoScrollView, coordinator: ()) {
         view.photo.clearImage()
         view.photo.onExit = nil
+        view.photo.onTransformChange = nil
     }
 }
 

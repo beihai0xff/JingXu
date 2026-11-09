@@ -19,12 +19,14 @@ final class AppModel: ObservableObject {
     var systemPhotosObservation: AnyCancellable?
     @Published var sources: [SourceRoot] = [] { didSet { if oldValue != sources { automationSelectionToken = UUID() } } }
     @Published var albums: [Album] = []
-    @Published var assets: [AssetListItem] = [] {
-        didSet {
-            let previous = Dictionary(uniqueKeysWithValues: oldValue.map { ($0.id, $0.fileVersion) })
-            if assets.contains(where: { previous[$0.id] != nil && previous[$0.id] != $0.fileVersion }) { automationSelectionToken = UUID() }
-        }
-    }
+    @Published var loadedAssets = LoadedAssetList()
+    var assets: [AssetListItem] { loadedAssets.items }
+    @Published var gridLeadingCells = 0
+    @Published var gridTrimRevision = 0
+    var gridTrimFallbackID: String?
+    @Published var gridJumpRevision = 0
+    var gridJumpID: String?
+    @Published var focusedAsset: AssetListItem?
     @Published var sidebarSelection: SidebarDestination? = .smart(.all)
     @Published var folderRoots: [CatalogFolderNode] = []
     @Published var folderOutline: [CatalogFolderOutline] = []
@@ -56,8 +58,9 @@ final class AppModel: ObservableObject {
             transitionPreview { self.clickAsset(item, command: command, shift: shift, count: count) }
             return
         }
-        let open = photoSelection.click(item.id, photoIDs: assets.filter { $0.kind == .photo }.map(\.id),
+        let open = photoSelection.click(item.id, photoIDs: loadedAssets.photoIDs,
                                         command: command, shift: shift, checkboxMode: isBatchSelecting, count: count)
+        focusedAsset = item
         NSApp.keyWindow?.makeFirstResponder(nil)
         if open { openPreview(item) }
         syncKeywordDraft()
@@ -83,7 +86,7 @@ final class AppModel: ObservableObject {
     }
     func clearPhotoSelection() {
         guard canChangeBrowseScope else { return }
-        transitionPreview { self.photoSelection.clear(); self.syncKeywordDraft() }
+        transitionPreview { self.photoSelection.clear(); self.focusedAsset = nil; self.syncKeywordDraft() }
     }
     func changeCheckboxMode(_ enabled: Bool) {
         guard canChangeBrowseScope else { return }
@@ -209,7 +212,9 @@ final class AppModel: ObservableObject {
     }
 
     var selectedAsset: AssetListItem? {
-        assets.first { $0.id == selectedAssetID }
+        guard let id = selectedAssetID else { return nil }
+        return loadedAssets.index(of: id).map { assets[$0] }
+            ?? (focusedAsset?.id == id ? focusedAsset : nil)
     }
 
     init() {
@@ -507,6 +512,7 @@ final class AppModel: ObservableObject {
         }
     }
     func presentPreview(_ item: AssetListItem) {
+        focusedAsset = item
         previewAsset = item
         previewItems = assets.filter { $0.kind == .photo }
         previewHasPrevious = hasPreviousPage; previewHasNext = hasNextPage
@@ -516,6 +522,7 @@ final class AppModel: ObservableObject {
     func selectAsset(_ item: AssetListItem) {
         guard !automationOwnsOperation else { return }
         photoSelection.selectOnly(item.id, isPhoto: item.kind == .photo)
+        focusedAsset = item
         NSApp.keyWindow?.makeFirstResponder(nil)
     }
     func closePreview() {
@@ -565,7 +572,7 @@ final class AppModel: ObservableObject {
         guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil,
               !isShowingImport, !isShowingAlbumCreator else { return }
         guard NSApp.keyWindow?.title == "镜序" else { return }
-        updateFlag(flag, advanceToNext: flag == .rejected && annotationTargetIDs.count == 1)
+        updateFlag(flag, advanceToNext: flag == .rejected && annotationTargetCount == 1)
     }
     func loadOriginal(_ item: AssetListItem) async throws -> PreviewImage {
         guard let store, let asset = try await store.asset(id: item.id),
@@ -690,7 +697,7 @@ final class AppModel: ObservableObject {
 
     func addFolder(_ url: URL) {
         guard let store, let scanner, analysisCoordinator != nil else { return }
-        startOperation {
+        startOperation { [self] in
             self.lastScanReport = nil
             do {
                 let source = try await store.registerSource(at: url)
@@ -703,7 +710,6 @@ final class AppModel: ObservableObject {
                 await MainActor.run { self.scanProgress = nil; self.lastScanReport = report }
                 await self.reloadAll()
                 try await self.analyzeNewAssets(sourceID: report.sourceID)
-                await self.reloadAll()
             } catch is CancellationError {
                 await Task { await self.reloadAll() }.value
                 await MainActor.run { self.statusText = "操作已取消" }
@@ -725,7 +731,7 @@ final class AppModel: ObservableObject {
 
     private func addFolderFromExistingSource(_ source: SourceRoot) {
         guard let scanner, analysisCoordinator != nil else { return }
-        startOperation {
+        startOperation { [self] in
             self.lastScanReport = nil
             do {
                 let report = try await scanner.scan(source: source) { [weak self] progress in
@@ -734,7 +740,6 @@ final class AppModel: ObservableObject {
                 await MainActor.run { self.scanProgress = nil; self.lastScanReport = report }
                 await self.reloadAll()
                 try await self.analyzeNewAssets(sourceID: report.sourceID)
-                await self.reloadAll()
             } catch is CancellationError {
                 await Task { await self.reloadAll() }.value
                 self.statusText = "操作已取消"
@@ -812,11 +817,14 @@ final class AppModel: ObservableObject {
     }
 
     private func runQualityJob(_ id: String) async throws {
+        let refresh = BrowseRefreshGate()
         try await reanalysisCoordinator?.run(jobID: id) { [weak self] progress in
             await MainActor.run {
                 self?.analysisProgress = progress
                 self?.statusText = "质量重算 \(progress.completed)/\(progress.total) · \(progress.currentFile)"
             }
+            let ids = await refresh.ingest(progress)
+            await Task { @MainActor [weak self] in await self?.refreshAnalysisResults(ids: ids) }.value
         }
     }
 
@@ -828,7 +836,6 @@ final class AppModel: ObservableObject {
                 statusText = "重算\(state)：\(job.completed)/\(job.total)，失败 \(job.failed) 项"
             }
         } catch { errorMessage = "读取重算进度失败：\(error.localizedDescription)" }
-        await reloadAssets()
     }
 
     func resolveSuggestion(accepted: Bool, assetID: String) {
@@ -837,7 +844,7 @@ final class AppModel: ObservableObject {
         Task {
             do {
                 _ = try await store.saveQualityReview(assetID: assetID, state: accepted ? .accepted : .ignored)
-                await reloadAssets()
+                await refreshChangedAssets(ids: [assetID], membershipChanged: appliedQuery.collection == .review || appliedQuery.collection == .rejected || appliedQuery.flag != nil)
             } catch { errorMessage = "审核结果保存失败：\(error.localizedDescription)" }
         }
     }
@@ -956,14 +963,14 @@ final class AppModel: ObservableObject {
     }
 
     func prepareBatchMove() {
-        guard canStartColorAction, !selectedPhotoIDs.isEmpty, let archiveCoordinator, let store else { return }
+        guard canStartColorAction, !photoSelection.selectedIDs.isEmpty, let archiveCoordinator, let store else { return }
         let panel = NSOpenPanel()
         panel.title = "选择移动目标目录（同一磁盘）"
         panel.message = "移动已选照片及明确关联的 XMP。RAW/JPEG 配对须全部选中。不会覆盖已有文件。"
         panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        let selected = Set(selectedPhotoIDs)
+        let selected = photoSelection.selectedIDs
         startOperation {
             do {
                 guard !(try await store.qualityJobs()).contains(where: { $0.job.state != .completed && $0.job.state != .cancelled }) else {
