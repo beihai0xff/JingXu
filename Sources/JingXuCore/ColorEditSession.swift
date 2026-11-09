@@ -4,6 +4,8 @@ import Foundation
 
 @MainActor
 public final class ColorEditSession: ObservableObject {
+    public enum DisplayQuality: Sendable { case preview, full }
+    public private(set) var displayQuality: DisplayQuality
     @Published public private(set) var snapshot: ColorEditingSnapshot
     @Published public private(set) var adjustments: ColorAdjustments {
         didSet { if adjustments != oldValue { editVersion = UUID() } }
@@ -33,11 +35,13 @@ public final class ColorEditSession: ObservableObject {
     public var isDirty: Bool { snapshot.adjustments != adjustments }
     public var usable: Bool { result != nil && renderError == nil }
 
-    public init(repository: any ColorEditingRepository, snapshot: ColorEditingSnapshot, saved: @escaping @MainActor () async -> Void) throws {
+    public init(repository: any ColorEditingRepository, snapshot: ColorEditingSnapshot,
+                displayQuality: DisplayQuality = .full, initialResult: ColorRenderedImage? = nil,
+                saved: @escaping @MainActor () async -> Void) throws {
         self.repository = repository; self.snapshot = snapshot; self.saved = saved
-        adjustments = snapshot.adjustments
+        adjustments = snapshot.adjustments; self.displayQuality = displayQuality; result = initialResult
     }
-    public func start() { render(interactive: false) }
+    public func start() { if result == nil { render(interactive: false) } }
     public func beginComparison() {
         guard !disposed, !isExternallyControlled, !isComposing, !comparing, usable else { return }
         comparisonReturnResult = result
@@ -123,7 +127,7 @@ public final class ColorEditSession: ObservableObject {
                 let small = try await ColorImageRenderer.shared.render(snapshot, adjustments: values, maximumDimension: 2048)
                 guard let self, !Task.isCancelled, self.generation == token, !self.disposed else { return }
                 self.result = small
-                if !interactive {
+                if !interactive && self.displayQuality == .full {
                     let full = try await ColorImageRenderer.shared.render(snapshot, adjustments: values)
                     guard !Task.isCancelled, self.generation == token, !self.disposed else { return }
                     self.result = full
@@ -135,6 +139,21 @@ public final class ColorEditSession: ObservableObject {
             }
         }
     }
+    /// A share/100% request waits for the saved revision, never a scaled or stale frame.
+    public func fullResolution() async throws -> ColorRenderedImage {
+        rendering?.cancel(); generation = UUID(); isRendering = false
+        var full: ColorRenderedImage?
+        try await withSavedSnapshot { snapshot in
+            self.rendering?.cancel(); self.generation = UUID(); self.isRendering = false
+            full = try await ColorImageRenderer.shared.render(snapshot, adjustments: snapshot.adjustments)
+            try Task.checkCancellation()
+            guard !self.disposed else { throw CancellationError() }
+        }
+        guard let full else { throw CancellationError() }
+        displayQuality = .full; result = full; renderError = nil
+        return full
+    }
+
     /// Coalesces concurrent navigation, timer and termination flushes without cancelling a database commit.
     public func flush() async -> Bool {
         autoSave?.cancel(); autoSave = nil
@@ -168,7 +187,8 @@ public final class ColorEditSession: ObservableObject {
         comparing = false; comparisonReturnResult = nil
         cancelComposition()
         disposed = true; autoSave?.cancel(); rendering?.cancel(); generation = UUID(); result = nil
-        Task { await ColorImageRenderer.shared.release() }
+        let input = snapshot.input
+        Task { await ColorImageRenderer.shared.release(input: input) }
     }
 
     public enum ExternalChange: Sendable { case set(ColorAdjustments), undo, redo }

@@ -55,6 +55,7 @@ public actor QualityReanalysisCoordinator {
         if !Task.isCancelled { cancelRequested = false }
         defer { activeJob = nil; cancelRequested = false }
         var eligible = false
+        var completed = 0, total = 0
         do {
             guard let snapshot = try await store.qualityJobs().first(where: { $0.id == jobID }), snapshot.isResumable else {
                 throw CatalogUpgradeError.blocked("任务不存在或已结束，不能继续")
@@ -65,13 +66,17 @@ public actor QualityReanalysisCoordinator {
                   try FileHasher.sha256(of: URL(fileURLWithPath: payload.backupPath)) == payload.backupSHA256
             else { throw CatalogUpgradeError.blocked("重算备份缺失、校验失败或任务版本不兼容，未开始") }
             try await store.setQualityJobState(jobID, state: .running)
-            var completed = snapshot.completed
+            completed = snapshot.completed; total = snapshot.total
             while let next = try await store.nextQualityJobItem(jobID) {
                 try Task.checkCancellation()
                 if cancelRequested { throw CancellationError() }
                 let name = try await store.asset(id: next.assetID)?.fileName ?? "已移除的照片"
                 await progress?(AnalysisProgress(total: snapshot.total, completed: completed, currentFile: name))
-                let success = try await analyzer.analyzeOne(assetID: next.assetID)
+                let finishedCount = completed, plannedCount = total
+                let success = try await analyzer.analyzeOne(assetID: next.assetID) {
+                    // Publish only committed writes, including when the queue receipt later fails.
+                    await progress?(AnalysisProgress(total: plannedCount, completed: finishedCount, currentFile: name, changedAssetIDs: [next.assetID]))
+                }
                 let reason = success ? nil : (try await store.analysis(for: next.assetID)?.analysisError ?? "照片已移除或不可用")
                 try await store.finishQualityJobItem(jobID, ordinal: next.ordinal, error: reason)
                 completed += 1
@@ -80,12 +85,17 @@ public actor QualityReanalysisCoordinator {
             if cancelRequested { throw CancellationError() }
             // Grouping remains informational and does not rewrite quality results or user review.
             let ids = try await store.qualityJobAssetIDs(jobID)
-            try await analyzer.groupSimilarBursts(assetIDs: ids)
+            let finishedCount = completed, plannedCount = total
+            try await analyzer.groupSimilarBursts(assetIDs: ids) { changed in
+                await progress?(AnalysisProgress(total: plannedCount, completed: finishedCount, currentFile: "整理相似连拍", changedAssetIDs: changed))
+            }
             try await store.setQualityJobState(jobID, state: .completed)
-            await progress?(AnalysisProgress(total: snapshot.total, completed: snapshot.total, currentFile: ""))
+            await progress?(AnalysisProgress(total: total, completed: completed, currentFile: "", isFinished: true))
         } catch is CancellationError {
+            await progress?(AnalysisProgress(total: total, completed: completed, currentFile: "", isFinished: true))
             if eligible { try await store.setQualityJobState(jobID, state: cancelRequested ? .cancelled : .paused) }
         } catch {
+            await progress?(AnalysisProgress(total: total, completed: completed, currentFile: "", isFinished: true))
             if eligible { try await store.setQualityJobState(jobID, state: .failed, error: error.localizedDescription) }
             throw error
         }

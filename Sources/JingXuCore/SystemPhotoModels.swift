@@ -45,6 +45,31 @@ public struct SystemPhotoPage: Sendable {
     public init(items: [SystemPhoto], total: Int) { self.items = items; self.total = total }
 }
 
+/// A nearby PhotoKit page window. A duplicate means the fetch order changed
+/// between requests and the caller must re-anchor instead of guessing offsets.
+public struct SystemPhotoBrowseWindow: Sendable {
+    public let items: [SystemPhoto]
+    public let offset: Int
+    public let total: Int
+    public init?(items current: [SystemPhoto], offset currentOffset: Int, page: SystemPhotoPage,
+                 pageOffset: Int, before: Bool, columns: Int, capacity: Int = 600) {
+        let existing = Set(current.map(\.id))
+        let incoming = page.items.map(\.id)
+        guard !incoming.isEmpty, Set(incoming).count == incoming.count,
+              incoming.allSatisfy({ !existing.contains($0) }) else { return nil }
+        var merged = before ? page.items + current : current + page.items
+        var start = before ? pageOffset : currentOffset
+        let overflow = merged.count - capacity
+        if overflow > 0 {
+            let width = max(1, columns)
+            let removed = min(merged.count - 1, ((overflow + width - 1) / width) * width)
+            if before { merged.removeLast(removed) }
+            else { merged.removeFirst(removed); start += removed }
+        }
+        items = merged; offset = start; total = page.total
+    }
+}
+
 public struct SystemPhotoEditInput: Sendable {
     public let photo: SystemPhoto
     public let renderInput: ColorRenderInput
@@ -121,6 +146,7 @@ public protocol PhotoLibraryClient: Sendable {
     func page(albumID: String?, offset: Int, limit: Int) async throws -> SystemPhotoPage
     func photoIDs(albumID: String?) async throws -> [String]
     func photos(ids: [String], albumID: String?) async throws -> [SystemPhoto]
+    func matchingPhotoIDs(_ ids: [String], albumID: String?) async throws -> Set<String>
     func index(id: String, albumID: String?) async throws -> Int?
     func image(id: String, pixelSize: Int) async throws -> PreviewImage
     func editingInput(photo: SystemPhoto) async throws -> SystemPhotoEditInput

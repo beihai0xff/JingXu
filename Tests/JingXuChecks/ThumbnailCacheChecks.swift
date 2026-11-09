@@ -65,8 +65,10 @@ enum ThumbnailCacheChecks {
         try await cache.invalidate(assetIDs: Set((0..<1000).map { "asset-\($0)" }))
         try ColorChecks.check(await cache.diskBytes == 4000, "按照片清理数量错误")
         let gate = BrowseRefreshGate(), now = ContinuousClock.now
-        try ColorChecks.check(await gate.shouldRefresh(completed: 0, total: 10, now: now) == false, "刷新未限速")
-        try ColorChecks.check(await gate.shouldRefresh(completed: 1, total: 10, now: now.advanced(by: .seconds(1))), "分析期间没有刷新")
-        try ColorChecks.check(await gate.shouldRefresh(completed: 10, total: 10, now: now.advanced(by: .milliseconds(1001))), "结束未强制刷新")
+        try ColorChecks.check(await gate.ingest(.init(total: 10, completed: 1, currentFile: "", changedAssetIDs: ["a"]), now: now).isEmpty, "刷新未限速")
+        let first = await gate.ingest(.init(total: 10, completed: 2, currentFile: "", changedAssetIDs: ["b"]), now: now.advanced(by: .seconds(1)))
+        try ColorChecks.check(Set(first) == ["a", "b"], "分析期间未合并实际变化")
+        let final = await gate.ingest(.init(total: 10, completed: 3, currentFile: "", changedAssetIDs: ["c"], isFinished: true), now: now.advanced(by: .milliseconds(1001)))
+        try ColorChecks.check(final == ["c"], "提前结束未强制刷新")
     }
 }

@@ -14,7 +14,17 @@ zsh Scripts/build.sh release  # 完成同样检查，再签名、公证并生成
 
 省略参数等同于 `check`。三种模式使用相同的 arm64 编译参数和 `Package.resolved`，构建全部 target，直接执行已构建的 Release 版 `JingXuChecks`。两种打包模式共用应用组装、SwiftPM 资源复制、DMG 与 SHA-256 生成，仅签名、公证和安装说明不同。打包入口不推送标签或创建 Release；已有版本产物须先归档或使用新版本。
 
-CI 的构建和签名作业固定使用 `macos-26` 与 Xcode 26.6（`DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer`），与本机生成和验证锁文件的工具链一致。本地开发也使用 Xcode 26.6；`Package.swift` 的 6.1 声明是清单语言版本。Swift 6.1 与 6.3 对依赖 traits 的解析结果不同，不能混用锁文件，也不能在 CI 中临时开启自动解析绕过固定依赖检查。统一入口使用 SwiftPM `native` 构建引擎；本机需要指定已有 SDK 时可设置标准环境变量 `SDKROOT`，三种模式沿用同一 SDK。应用最低运行系统仍为 macOS 14。
+CI 的构建和签名作业固定使用 `macos-26` 与 Xcode 26.6（`DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer`）。`Package.swift` 的 6.1 声明是清单语言版本。Swift 6.1 与 6.3 对依赖 traits 的解析结果不同，不能混用锁文件，也不能在 CI 中临时开启自动解析绕过固定依赖检查。统一入口使用 SwiftPM `native` 构建引擎；显式指定 `SDKROOT` 时三种模式沿用同一 SDK。应用最低运行系统仍为 macOS 14。
+
+入口先输出实际 Developer、Swift 和 SDK 路径，并编译最小 SwiftUI `@State` 探针。许可证或宏与 SDK 不匹配时在完整构建前停止；不会自动接受许可证或改变全局 `xcode-select`。本机已验证的 CLT / Swift 6.4 与 macOS 26.5 SDK 组合可显式指定：
+
+```sh
+DEVELOPER_DIR=/Library/Developer/CommandLineTools \
+SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk \
+zsh Scripts/build.sh check
+```
+
+路径须在本机存在；选择其他工具链时先通过同一预检。SDK 默认软链接可能随安装变化，不代表其与当前 Swift 兼容。
 
 发布通道由工作流中的 `RELEASE_MODE` 显式指定，当前为 `adhoc`。它直接调用 `build.sh adhoc`，不读取证书或公证凭据。`release` 通道由 `Scripts/ci-package-app.sh` 准备、清理临时签名凭据，再调用 `build.sh release`。构建和打包逻辑只维护在 `build.sh`；正式签名失败不切换通道。
 

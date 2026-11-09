@@ -41,6 +41,7 @@ class BuildTests(unittest.TestCase):
                         DEVELOPER_TEAM_ID='TEAM', NOTARY_KEYCHAIN_PROFILE='fixture',
                         NOTARY_KEYCHAIN_PATH=str(self.root / 'fixture.keychain-db'))
         self.env.pop('GITHUB_OUTPUT', None)
+        self.env['SDKROOT'] = str(self.root)
         mock = '''#!PYTHON
 import json, os, pathlib, plistlib, shutil, sys
 root = pathlib.Path(os.environ['BUILD_FIXTURE'])
@@ -65,6 +66,8 @@ elif name == 'swift':
         checks.chmod(0o755)
 elif name == 'security': print('Developer ID Application: Fixture (TEAM)')
 elif name == 'codesign' and '-dv' in args: print('TeamIdentifier=TEAM', file=sys.stderr)
+elif name == 'xcrun' and args[:1] == ['--find']:
+    print(root / 'bin' / args[1])
 elif name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
     is_dmg = args[2].endswith('.dmg')
     rejected = failure == ('dmg-notary' if is_dmg else 'app-notary')
@@ -74,7 +77,7 @@ elif name == 'hdiutil' and args[0] == 'create':
     pathlib.Path(args[-1]).write_text('fixture dmg')
 elif name == 'ditto': pathlib.Path(args[-1]).write_text('fixture zip')
 '''.replace('PYTHON', sys.executable)
-        for name in ('git', 'swift', 'security', 'codesign', 'xcrun', 'hdiutil', 'ditto', 'spctl'):
+        for name in ('git', 'swift', 'swiftc', 'security', 'codesign', 'xcrun', 'hdiutil', 'ditto', 'spctl'):
             path = self.bin / name
             path.write_text(mock)
             path.chmod(0o755)
@@ -102,7 +105,9 @@ elif name == 'ditto': pathlib.Path(args[-1]).write_text('fixture zip')
                 self.assertIn('--disable-automatic-resolution', cmd)
                 self.assertEqual(cmd[cmd.index('--build-system')+1], 'native')
                 self.assertEqual(cmd[cmd.index('--arch')+1], 'arm64')
-        self.assertFalse(any(cmd[0] in ('security', 'xcrun') for cmd in self.commands()))
+        self.assertFalse(any(cmd[0] == 'security' or (cmd[0] == 'xcrun' and cmd[1:2] != ['--find']) for cmd in self.commands()))
+        probe = next(cmd for cmd in self.commands() if cmd[0] == 'swiftc')
+        self.assertEqual(probe[probe.index('-sdk') + 1], self.env['SDKROOT'])
         resources = self.root / 'captured/镜序.app/Contents/Resources'
         self.assertEqual((self.root / 'captured/应用程序').readlink(), Path('/Applications'))
         self.assertEqual(resources.stat().st_mode & 0o777, 0o755)
@@ -129,7 +134,7 @@ elif name == 'ditto': pathlib.Path(args[-1]).write_text('fixture zip')
         self.assertIn('使用 Developer ID 签名并经 Apple 公证', (self.root / 'outputs/RELEASE.md').read_text())
 
     def test_build_or_checks_failure_never_packages(self):
-        for stage in ('python', 'debug', 'release', 'checks'):
+        for stage in ('xcrun', 'swiftc', 'python', 'debug', 'release', 'checks'):
             with self.subTest(stage=stage):
                 self.log.unlink(missing_ok=True)
                 self.env['BUILD_FAIL'] = stage
@@ -152,12 +157,20 @@ elif name == 'ditto': pathlib.Path(args[-1]).write_text('fixture zip')
         artifact.write_text('existing')
         self.assertNotEqual(self.run_build('adhoc').returncode, 0)
         self.assertEqual(artifact.read_text(), 'existing')
-        self.assertFalse(any(cmd[0] == 'swift' for cmd in self.commands()))
+        self.assertFalse(any(cmd[:2] == ['swift', 'build'] for cmd in self.commands()))
 
     def test_missing_identity_fails_before_build(self):
         self.env.pop('DEVELOPER_ID_APPLICATION')
         self.assertNotEqual(self.run_build('release').returncode, 0)
-        self.assertFalse(any(cmd[0] == 'swift' for cmd in self.commands()))
+        self.assertFalse(any(cmd[:2] == ['swift', 'build'] for cmd in self.commands()))
+
+    def test_environment_failure_explains_and_stops_before_build(self):
+        self.env['BUILD_FAIL'] = 'swiftc'
+        result = self.run_build('check')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('DEVELOPER_DIR', result.stderr)
+        self.assertIn('Developer：', result.stderr)
+        self.assertFalse(any(cmd[:2] == ['swift', 'build'] for cmd in self.commands()))
 
 
 if __name__ == '__main__':

@@ -106,7 +106,9 @@ enum WorkflowChecks {
         }
         _ = try await store.upsertAssets(assets)
         let query = BrowseQuery(sourceID: source.id)
-        var seen = Set<String>(), cursor: BrowseCursor?, times: [Double] = []
+        try await IncrementalBrowsingChecks.browsing(store: store, query: query)
+        var seen = Set<String>(), orderedIDs: [String] = [], cursor: BrowseCursor?, times: [Double] = []
+        var window = LoadedAssetList()
         var previousLast: AssetListItem?
         while true {
             let start = ContinuousClock.now
@@ -115,7 +117,14 @@ enum WorkflowChecks {
             times.append(Double(duration.seconds) * 1000 + Double(duration.attoseconds) / 1e15)
             try check(page.items.count <= 200, "分页超过 200 项")
             try check(page.total == 100_000, "分页截断匹配总数")
-            for item in page.items { try check(seen.insert(item.id).inserted, "游标分页重复照片") }
+            for item in page.items {
+                try check(seen.insert(item.id).inserted, "游标分页重复照片")
+                orderedIDs.append(item.id)
+            }
+            if cursor == nil { window.replace(page.items) }
+            else { window.appendWindow(page.items, before: false, columns: 3) }
+            try check(window.items.count <= 600 && window.items.map(\.id) == Array(orderedIDs.suffix(window.items.count)),
+                      "十万项向后滚动窗口超限、重复或错位")
             if let first = page.items.first, let previousLast {
                 let backwards = try await store.browsePage(query, cursor: BrowseCursor(first), reverse: true, limit: 1)
                 try check(backwards.items.last?.id == previousLast.id, "反向分页跳过边界")
@@ -125,6 +134,19 @@ enum WorkflowChecks {
             cursor = page.items.last.map(BrowseCursor.init)
         }
         try check(seen.count == 100_000, "大图库分页漏项")
+        var reverseStart = orderedIDs.count - window.items.count
+        var reverseSeen = Set(window.items.map(\.id))
+        while reverseStart > 0 {
+            let page = try await store.browsePage(query, cursor: BrowseCursor(window.items[0]), reverse: true)
+            let oldCount = window.items.count
+            let removed = window.appendWindow(page.items, before: true, columns: 3)
+            reverseStart -= window.items.count + removed - oldCount
+            try check(reverseStart >= 0 && window.items.count <= 600 &&
+                      window.items.map(\.id) == Array(orderedIDs[reverseStart..<reverseStart + window.items.count]),
+                      "十万项反向滚动窗口超限、重复或错位")
+            for item in page.items { try check(reverseSeen.insert(item.id).inserted, "反向滚动重复载入照片") }
+        }
+        try check(reverseStart == 0 && reverseSeen.count == 100_000, "反向滚动未回到起点")
         let literals = try await store.browsePage(BrowseQuery(searchText: "%_"))
         try check(literals.items.map(\.id) == [assets[0].id], "搜索将百分号或下划线解释为通配符")
         let ids = [assets[0].id, assets[2001].id, assets[99_999].id]
@@ -155,7 +177,7 @@ enum WorkflowChecks {
         source.directoryIdentityJSON = String(decoding: try JSONEncoder().encode(SourceIdentity.resolve(URL(fileURLWithPath: source.pathHint))), as: UTF8.self)
         try await store.upsertSource(source)
         var snapshots: [ColorEditSnapshot] = []
-        for index in 0..<405 {
+        for index in 0..<1_005 {
             snapshots.append(try await ColorChecks.fixture(store: store, source: source, name: String(format: "照片-%03d.png", index), orientation: index.isMultiple(of: 3) ? 6 : 1))
         }
         for snapshot in snapshots.prefix(4) {

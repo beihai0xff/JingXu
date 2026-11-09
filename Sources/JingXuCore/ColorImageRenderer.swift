@@ -69,10 +69,17 @@ public actor ColorImageRenderer {
     private var input: Input?
     public init() {}
     public func release() { input = nil; context.clearCaches() }
+    public func release(input access: ColorRenderInput) {
+        guard input?.key == Self.key(access) else { return }
+        release()
+    }
     public func validateSource(_ snapshot: ColorEditSnapshot) throws { _ = try ColorSourceAccess(snapshot) }
 
+    private static func key(_ access: ColorRenderInput) -> String {
+        "\(access.id)-\(access.url.path)-\(access.fingerprint.identifier ?? "")-\(access.fingerprint.size)-\(access.fingerprint.modifiedAt.timeIntervalSince1970)-\(access.orientation ?? 0)"
+    }
     private func load(_ access: ColorRenderInput) throws -> Input {
-        let key = "\(access.id)-\(access.url.path)-\(access.fingerprint.identifier ?? "")-\(access.fingerprint.size)-\(access.fingerprint.modifiedAt.timeIntervalSince1970)-\(access.orientation ?? 0)"
+        let key = Self.key(access)
         if let input, input.key == key { return input }
         input = nil
         try Task.checkCancellation()

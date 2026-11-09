@@ -185,6 +185,18 @@ public actor ApplePhotoLibraryClient: PhotoLibraryClient {
         var seen = Set<String>()
         return ids.filter { seen.insert($0).inserted }.compactMap { values[$0] }
     }
+    public func matchingPhotoIDs(_ ids: [String], albumID: String?) throws -> Set<String> {
+        try requireAccess()
+        let members = try albumID.map { PHAsset.fetchAssets(in: try album($0), options: nil) }
+        let found = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        var result = Set<String>()
+        for index in 0..<found.count {
+            let item = found.object(at: index)
+            if item.mediaType == .image && item.sourceType.contains(.typeUserLibrary),
+               members == nil || members?.index(of: item) != NSNotFound { result.insert(item.localIdentifier) }
+        }
+        return result
+    }
     public func validate(photo expected: SystemPhoto) throws {
         let current = photo(try asset(expected.id))
         guard current.modifiedAt == expected.modifiedAt, current.width == expected.width, current.height == expected.height,
@@ -196,6 +208,7 @@ public actor ApplePhotoLibraryClient: PhotoLibraryClient {
         options.isNetworkAccessAllowed = true; options.deliveryMode = .highQualityFormat; options.resizeMode = .fast
         let size = pixelSize == Int.max ? PHImageManagerMaximumSize : CGSize(width: pixelSize, height: pixelSize)
         let manager = manager
+        let nativeSize = CGSize(width: value.pixelWidth, height: value.pixelHeight)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 request.install(continuation)
@@ -206,7 +219,8 @@ public actor ApplePhotoLibraryClient: PhotoLibraryClient {
                     guard let image, let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
                         request.finish(.failure(ColorEditError("无法获取照片，可能尚未从 iCloud 下载"))); return
                     }
-                    request.finish(.success(PreviewImage(image: cg, nativeSize: CGSize(width: cg.width, height: cg.height), isEmbedded: false, access: nil)))
+                    let dimensions = pixelSize == Int.max ? CGSize(width: cg.width, height: cg.height) : nativeSize
+                    request.finish(.success(PreviewImage(image: cg, nativeSize: dimensions, isEmbedded: false, access: nil)))
                 }
                 request.onCancel { manager.cancelImageRequest(identifier) }
             }

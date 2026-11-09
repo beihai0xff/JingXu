@@ -18,6 +18,7 @@ struct SystemPhotosView: View {
     @State private var showsShare = false
     @State private var shareImage: CGImage?
     @State private var infoTab = PhotoInspectorTab.information
+    @State private var gridScrollID: String?
 
     var body: some View {
         Group {
@@ -82,10 +83,10 @@ struct SystemPhotosView: View {
         .sheet(isPresented: $photos.showsPresets) { SystemPhotoPresetsSheet(photos: photos) }
         .sheet(item: $photos.inspectedWrite) { record in SystemPhotoWriteSheet(photos: photos, record: record) }
         .modifier(SystemPhotosErrorPresentation(photos: photos))
-        .background(LibraryKeyboardHandler(enabled: photos.connected && !photos.isBusy && !photos.isNavigating && photos.mutationPlan == nil && photos.analysisPlan == nil && !photos.showsPresets && !showsShare) { code, text, shift, command in
+        .background(LibraryKeyboardHandler(enabled: photos.connected && !photos.isBusy && photos.mutationPlan == nil && photos.analysisPlan == nil && !photos.showsPresets && !showsShare) { code, text, shift, command in
             if command {
                 if text == "a", photos.preview == nil { photos.selectAllPhotos(); return true }
-                if text == "z", photos.editor != nil { if shift { photos.editor?.redo() } else { photos.editor?.undo() }; return true }
+                if text == "z", photos.editor != nil { model.performUndo(redo: shift); return true }
                 return false
             }
             if code == 53 { photos.leavePreviewLevel(); return true }
@@ -97,9 +98,7 @@ struct SystemPhotosView: View {
                     photos.moveGridFocus(by: code == 123 ? -1 : code == 124 ? 1 : code == 125 ? model.gridColumns : -model.gridColumns, extending: shift)
                     return true
                 }
-                if code == 49, let item = photos.items.first(where: { $0.id == photos.selection.focusID }) {
-                    photos.open(item, index: photos.offset + (photos.items.firstIndex { $0.id == item.id } ?? 0)); return true
-                }
+                if code == 49, photos.selection.focusID != nil { photos.openFocusedPhoto(); return true }
             }
             return false
         })
@@ -146,6 +145,15 @@ struct SystemPhotosView: View {
                 }
             } else if let photo = photos.preview { singlePhoto(photo) }
             else { grid }
+            if photos.previewSession.failedIndex != nil {
+                HStack {
+                    Text("照片未切换，当前画面与草稿已保留").font(.callout)
+                    Button("重试读取") { photos.retryPreview() }
+                    if photos.previewSession.failedPhoto != nil {
+                        Button("放弃目标草稿并重载…") { photos.discardDraft() }
+                    }
+                }.padding(8).disabled(!photos.canAct)
+            }
             if let conflict = photos.conflict {
                 HStack {
                     Text(conflict).font(.callout).foregroundStyle(.orange)
@@ -159,16 +167,16 @@ struct SystemPhotosView: View {
                 }.padding(6)
             }
             HStack {
-                if photos.isBusy || photos.isNavigating { ProgressView().controlSize(.small) }
+                if photos.isBusy || photos.isNavigating || photos.previewSession.isLoadingFullImage { ProgressView().controlSize(.small) }
                 Text(photos.status).font(.caption).lineLimit(2).help(photos.status)
                 Spacer()
-                if photos.isBusy || photos.isNavigating {
+                if photos.isBusy || photos.isNavigating || photos.previewSession.isLoadingFullImage {
                     Button(photos.isSubmitting ? "正在提交" : "取消／暂停") { photos.cancel() }.disabled(photos.isSubmitting)
                 } else if let job = photos.job, job.isResumable {
                     Button("继续分析（\(job.remaining.count)）") { photos.analyze(job) }.disabled(!photos.canAct)
                     Button("结束任务…") { photos.endAnalysis() }
                 }
-                if photos.preview == nil { Text("已载入 \(photos.items.count) / \(photos.total) 张").font(.caption).foregroundStyle(.secondary) }
+                if photos.preview == nil { Text("当前载入 \(photos.items.count) / 匹配 \(photos.total) 张").font(.caption).foregroundStyle(.secondary) }
             }.padding(10).background(.bar)
             if let job = photos.job, !job.failures.isEmpty {
                 DisclosureGroup("未完成 \(job.failures.count) 项 · 查看原因") {
@@ -197,7 +205,7 @@ struct SystemPhotosView: View {
                 }
                 Button("从系统图库删除…", role: .destructive) { photos.prepareMutation(.deletePhotos) }
             } label: { Image(systemName: "ellipsis").accessibilityLabel("更多系统照片操作") }.menuIndicator(.hidden)
-        }.disabled(!photos.canAct || photos.targetIDs.isEmpty || photos.editor?.isComposing == true)
+        }.disabled(!photos.canAct || !photos.hasTargets || photos.editor?.isComposing == true)
     }
 
     private var grid: some View {
@@ -227,9 +235,11 @@ struct SystemPhotosView: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(spacing: 0) {
-                            if photos.offset > 0 { loadMore(before: true) }
                             LazyVGrid(columns: [GridItem(.adaptive(minimum: model.gridSize, maximum: model.gridSize * 1.35), spacing: 12)], spacing: 14) {
+                              Section {
+                                ForEach(0..<(photos.offset % max(1, photos.gridColumns)), id: \.self) { _ in
+                                    Color.clear.frame(height: model.gridSize).accessibilityHidden(true)
+                                }
                                 ForEach(photos.items) { photo in
                                     SystemPhotoCell(photo: photo, client: photos.client, selected: photos.selection.selectedIDs.contains(photo.id),
                                         showsName: model.showsFileNames, selecting: photos.isSelecting)
@@ -238,17 +248,47 @@ struct SystemPhotosView: View {
                                         }
                                         .id(photo.id)
                                 }
-                            }.padding(20)
+                              } header: {
+                                if photos.offset > 0 { loadMore(before: true) }
+                              } footer: {
+                                if photos.offset + photos.items.count < photos.total { loadMore(before: false) }
+                                else { Text("已显示当前范围全部照片").font(.caption).foregroundStyle(.secondary).padding(16) }
+                              }
+                            }.scrollTargetLayout().padding(20)
                                 .background(GeometryReader { geometry in
                                     Color.clear.onChange(of: geometry.size.width, initial: true) { _, width in
-                                        model.gridColumns = max(1, Int((width - 28) / (model.gridSize + 12)))
+                                        model.updateGridColumns(Int((width - 28) / (model.gridSize + 12)))
+                                        photos.gridColumns = model.gridColumns
                                     }
-                                    .onChange(of: model.gridSize) { _, _ in model.gridColumns = max(1, Int((geometry.size.width - 28) / (model.gridSize + 12))) }
+                                    .onChange(of: model.gridSize) { _, _ in
+                                        model.updateGridColumns(Int((geometry.size.width - 28) / (model.gridSize + 12)))
+                                        photos.gridColumns = model.gridColumns
+                                    }
                                 })
-                            if photos.offset + photos.items.count < photos.total { loadMore(before: false) }
-                            else { Text("已显示当前范围全部照片").font(.caption).foregroundStyle(.secondary).padding(16) }
+                    }.scrollPosition(id: $gridScrollID)
+                        .onChange(of: photos.gridTrimRevision) { _, _ in
+                            let anchor = [gridScrollID, photos.gridTrimFallbackID].compactMap { $0 }
+                                .first { id in photos.items.contains(where: { $0.id == id }) }
+                            if let anchor {
+                                gridScrollID = anchor
+                                let revision = photos.gridTrimRevision
+                                DispatchQueue.main.async {
+                                    if photos.gridTrimRevision == revision { proxy.scrollTo(anchor, anchor: .top) }
+                                }
+                            }
                         }
-                    }.onChange(of: photos.selection.focusID, initial: true) { _, id in if let id { proxy.scrollTo(id) } }
+                        .onChange(of: photos.gridJumpRevision, initial: true) { _, _ in
+                            if let id = photos.gridJumpID {
+                                gridScrollID = id
+                                let revision = photos.gridJumpRevision
+                                DispatchQueue.main.async {
+                                    if photos.gridJumpRevision == revision { proxy.scrollTo(id, anchor: .center) }
+                                }
+                            }
+                        }
+                        .onChange(of: gridScrollID) { _, id in photos.visibleGridID = id }
+                        .onChange(of: photos.albumID) { _, _ in gridScrollID = nil }
+                        .onChange(of: photos.selection.focusID, initial: true) { _, id in if let id { proxy.scrollTo(id) } }
                 }
             }
         }
@@ -267,34 +307,36 @@ struct SystemPhotosView: View {
             HStack(spacing: 12) {
                 Button("返回", systemImage: "chevron.left") { photos.leavePreviewLevel() }
                 Divider().frame(height: 16)
-                Button { photos.navigate(-1) } label: { Image(systemName: "chevron.left") }.accessibilityLabel("上一张").disabled(photos.previewIndex == 0)
+                Button { photos.navigate(-1) } label: { Image(systemName: "chevron.left") }.accessibilityLabel("上一张").disabled(photos.navigationIndex == 0 || !photos.canNavigate)
                 Text(photo.name).font(.callout).lineLimit(1).help(photo.name)
-                Button { photos.navigate(1) } label: { Image(systemName: "chevron.right") }.accessibilityLabel("下一张").disabled(photos.previewIndex + 1 >= photos.total)
+                if photos.previewSession.hasDraft { Text("本机草稿 · 未保存到系统照片").font(.caption).foregroundStyle(.orange) }
+                Button { photos.navigate(1) } label: { Image(systemName: "chevron.right") }.accessibilityLabel("下一张").disabled(photos.navigationIndex + 1 >= photos.total || !photos.canNavigate)
                 Spacer()
                 if photos.editor == nil {
-                    Button("编辑", systemImage: "slider.horizontal.3") { photos.beginEditing() }.buttonStyle(.borderedProminent).disabled(!photo.canEdit)
+                    Button("编辑", systemImage: "slider.horizontal.3") { photos.beginEditing() }.buttonStyle(.borderedProminent).disabled(!photo.canEdit || !photos.canAct)
                     Button { showsInspector.toggle() } label: { Image(systemName: "sidebar.right") }.accessibilityLabel("照片详情")
                 } else {
                     Button("保存到系统照片") { photos.saveEdit() }.buttonStyle(.borderedProminent)
                         .disabled(photos.conflict != nil || photos.editor?.isComposing == true || photos.presetPreview != nil || !photos.canAct)
-                    Button("完成") { photos.finishEditing() }.disabled(photos.editor?.isComposing == true)
+                    Button("完成") { photos.finishEditing() }.disabled(photos.editor?.isComposing == true || !photos.canAct)
                 }
-                Button { shareImage = displayedImage; showsShare = shareImage != nil } label: { Image(systemName: "square.and.arrow.up") }
-                    .accessibilityLabel("分享当前画面").disabled(displayedImage == nil || photos.editor?.isRendering == true || photos.presetPreview != nil)
+                Button { photos.prepareFullImage { shareImage = $0; showsShare = true } } label: { Image(systemName: "square.and.arrow.up") }
+                    .accessibilityLabel("分享当前画面").disabled(displayedImage == nil || !photos.canAct || photos.editor?.isComposing == true || photos.presetPreview != nil)
                 Menu { Button("分析当前照片…") { photos.prepareAnalysis() } } label: { Image(systemName: "ellipsis") }.menuIndicator(.hidden)
             }.buttonStyle(.borderless).controlSize(.small).padding(.horizontal, 16).frame(height: 52)
-                .disabled(photos.isBusy || photos.isNavigating)
+                .disabled(photos.isBusy)
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
                     if let draft = photos.editor?.composition { CompositionCanvas(draft: draft) }
                     else {
                         ZoomScroll(image: displayedImage, assetID: photo.id,
                             nativeSize: photos.presetPreview?.nativeSize ?? photos.editor?.result?.nativeSize ?? photos.previewImage?.nativeSize ?? .zero,
-                            action: canvasAction, command: canvasCommand, onExit: photos.leavePreviewLevel)
+                            action: canvasAction, command: canvasCommand, onExit: photos.leavePreviewLevel,
+                            onTransformChange: photos.updatePreviewDetail)
                     }
                     HStack {
                         Button("适应") { canvasAction = "fit"; canvasCommand += 1 }
-                        Button("100%") { canvasAction = "actual"; canvasCommand += 1 }
+                        Button("100%") { photos.prepareFullImage { _ in canvasAction = "actual"; canvasCommand += 1 } }.disabled(!photos.canAct)
                         Spacer()
                         Text("\(photos.previewIndex + 1) / \(photos.total) 张").font(.caption).foregroundStyle(.secondary)
                         Button { showsFilmstrip.toggle() } label: { Image(systemName: "rectangle.bottomthird.inset.filled") }.accessibilityLabel("切换胶片栏")
@@ -310,7 +352,8 @@ struct SystemPhotosView: View {
                         managePresets: photos.showPresets, discardStale: photos.discardDraft).id(editor.snapshot.id).frame(width: 290)
                 } else if showsInspector { Divider(); information(photo).frame(width: 270) }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            if photos.isNavigating { ProgressView("正在读取照片…").padding(8) }
+            if photos.isNavigating { ProgressView("正在读取照片或恢复本机草稿，可取消…").padding(8) }
+            else if photos.previewSession.isLoadingFullImage { ProgressView("正在准备完整画质，可取消…").padding(8) }
         }
     }
     private func filmstrip(current: SystemPhoto) -> some View {
@@ -323,7 +366,7 @@ struct SystemPhotosView: View {
                         }.buttonStyle(.plain).accessibilityLabel("查看 " + item.name).id(item.id)
                     }
                 }.padding(8)
-            }.frame(height: 76).disabled(photos.isBusy || photos.isNavigating)
+            }.frame(height: 76).disabled(!photos.canNavigate)
                 .onAppear { proxy.scrollTo(current.id, anchor: .center) }
                 .onChange(of: current.id) { _, id in proxy.scrollTo(id, anchor: .center) }
         }

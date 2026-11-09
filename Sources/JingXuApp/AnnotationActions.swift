@@ -9,6 +9,7 @@ import JingXuCore
 
 extension AppModel {
     var annotationTargetIDs: [String] { previewAsset.map { [$0.id] } ?? selectedPhotoIDs }
+    var annotationTargetCount: Int { previewAsset == nil ? photoSelection.selectedIDs.count : 1 }
     func syncKeywordDraft() {
         let item = previewAsset ?? selectedAsset
         guard keywordDraft == keywordSaved else { return }
@@ -41,7 +42,7 @@ extension AppModel {
             let set = try await store.applyAnnotations(ids: [id], patch: .init(keywords: .replace(KeywordEdit.parse(draft))))
             recordAnnotationUndo(set, title: "修改关键词")
             if keywordTargetID == id { keywordSaved = draft }
-            await refreshChangedAssets(ids: [id], membershipChanged: !appliedQuery.searchText.isEmpty)
+            await refreshChangedAssets(ids: set.ids, membershipChanged: set.affectsMembership(of: appliedQuery))
             return true
         } catch { errorMessage = "关键词保存失败，草稿已保留：\(error.localizedDescription)"; return false }
     }
@@ -74,10 +75,7 @@ extension AppModel {
                 let set = try await store.applyAnnotations(ids: targets, patch: patch)
                 committed = true
                 recordAnnotationUndo(set, title: title)
-                let membership = (patch.rating != nil && query.minimumRating > 0) ||
-                    (patch.flag != nil && (query.flag != nil || query.collection == .rejected)) ||
-                    (patch.keywords != nil && !query.searchText.isEmpty) || (patch.albumID != nil && query.albumID == patch.albumID)
-                await refreshChangedAssets(ids: targets, membershipChanged: membership)
+                await refreshChangedAssets(ids: set.ids, membershipChanged: set.affectsMembership(of: appliedQuery))
                 recordResult("\(title)：\(targets.count) 张")
                 if patch.keywords != nil, let id = keywordTargetID, targets.contains(id), let row = try await store.assetListItem(id: id) {
                     keywordSaved = row.keywords.joined(separator: ", "); keywordDraft = keywordSaved
@@ -117,7 +115,7 @@ extension AppModel {
             defer { isSavingAnnotation = false; objectWillChange.send() }
             do {
                 entry.change = try await store.invertAnnotations(entry.change)
-                await refreshChangedAssets(ids: entry.change.ids, membershipChanged: hasUserFilters || appliedQuery.albumID != nil || appliedQuery.collection == .rejected)
+                await refreshChangedAssets(ids: entry.change.ids, membershipChanged: entry.change.affectsMembership(of: appliedQuery))
                 recordResult("已撤销／重做：\(entry.title)")
                 syncKeywordDraft()
             } catch {
@@ -127,13 +125,13 @@ extension AppModel {
         }
     }
     func performUndo(redo: Bool = false) {
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+            if redo { editor.undoManager?.redo() } else { editor.undoManager?.undo() }
+            return
+        }
         if showsSystemPhotos {
             guard let photos = systemPhotos, photos.canAct, let editor = photos.editor else { return }
             if redo { editor.redo() } else { editor.undo() }
-            return
-        }
-        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
-            if redo { editor.undoManager?.redo() } else { editor.undoManager?.undo() }
             return
         }
         guard !isSavingAnnotation, !isPreviewTransitioning, !automationOwnsOperation else { return }

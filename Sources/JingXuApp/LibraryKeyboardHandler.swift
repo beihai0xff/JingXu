@@ -47,11 +47,24 @@ extension AppModel {
     func moveGridFocus(by step: Int, extending: Bool) {
         guard canChangeBrowseScope, !assets.isEmpty else { return }
         let id = selectedAssetID, request = assetRequestID
-        let index = assets.firstIndex { $0.id == id }
+        let index = id.flatMap { loadedAssets.index(of: $0) }
+        if let id, index == nil, let focus = focusedAsset, focus.id == id {
+            let query = appliedQuery
+            Task {
+                await loadBrowsePage(cursor: BrowseCursor(focus), containing: true)
+                guard appliedQuery == query, browseError == nil else { return }
+                if loadedAssets.contains(id) { moveGridFocus(by: step, extending: extending) }
+                else {
+                    selectedAssetID = nil; focusedAsset = nil
+                    moveGridFocus(by: step, extending: extending)
+                }
+            }
+            return
+        }
         let target = index.map { $0 + step } ?? 0
         let needsMore = (target < 0 && hasPreviousPage) || (target >= assets.count && hasNextPage)
         let select = {
-            let updated = self.assets.firstIndex { $0.id == id }
+            let updated = id.flatMap { self.loadedAssets.index(of: $0) }
             let destination = updated.map { min(self.assets.count - 1, max(0, $0 + step)) } ?? 0
             let item = self.assets[destination]
             if extending { self.clickAsset(item, command: false, shift: true, count: 1) }
@@ -82,7 +95,7 @@ extension AppModel {
         }
         if code == 53 { leavePreviewLevel(); return true }
         if let rating = Int(text), (0...5).contains(rating) { updateRating(rating, advanceToNext: shift); return true }
-        if code == 51 || code == 117 { updateFlag(.rejected, advanceToNext: annotationTargetIDs.count == 1); return true }
+        if code == 51 || code == 117 { updateFlag(.rejected, advanceToNext: annotationTargetCount == 1); return true }
         if text == "u", !shift { updateFlag(.none); return true }
         if [123, 124, 125, 126].contains(code) {
             if previewAsset != nil {

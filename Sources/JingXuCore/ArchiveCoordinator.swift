@@ -81,11 +81,13 @@ public actor ArchiveCoordinator {
     private let store: CatalogStore
     private let journalURL: URL
     private let mover: any ArchiveMover
+    private let presence: FilePresenceProbe
     private let dateReader: @Sendable (URL) -> String?
     private var busy = false
     public init(store: CatalogStore, journalURL: URL, mover: any ArchiveMover = SameVolumeArchiveMover(),
+                presence: @escaping FilePresenceProbe = FilePresenceReader.read,
                 dateReader: @escaping @Sendable (URL) -> String? = ArchiveDate.read) {
-        self.store = store; self.journalURL = journalURL; self.mover = mover; self.dateReader = dateReader
+        self.store = store; self.journalURL = journalURL; self.mover = mover; self.presence = presence; self.dateReader = dateReader
     }
 
     public func hasPending() throws -> Bool {
@@ -116,7 +118,7 @@ public actor ArchiveCoordinator {
                     let old = try url(reversed ? file.to : file.from, root: reversed ? targetRoot : root)
                     let target = try url(reversed ? file.from : file.to, root: reversed ? root : targetRoot)
                     if old != target {
-                        guard (try? FileManager.default.attributesOfItem(atPath: old.path)) == nil else { throw CocoaError(.fileLocking) }
+                        guard try presence(old) == .missing else { throw CocoaError(.fileLocking) }
                     }
                     try verify(file, at: target)
                 }
@@ -148,7 +150,7 @@ public actor ArchiveCoordinator {
     }
 
     private func load() throws -> ArchivePlan? {
-        guard FileManager.default.fileExists(atPath: journalURL.path) else { return nil }
+        guard try presence(journalURL) == .present else { return nil }
         return try JSONDecoder().decode(ArchivePlan.self, from: Data(contentsOf: journalURL))
     }
 
@@ -199,7 +201,7 @@ public actor ArchiveCoordinator {
         for (index, part) in parts.enumerated() {
             current.appendPathComponent(String(part))
             if index == parts.count - 1 { break }
-            if createParents && !FileManager.default.fileExists(atPath: current.path) {
+            if try createParents && presence(current) == .missing {
                 try FileManager.default.createDirectory(at: current, withIntermediateDirectories: false)
             }
             let attributes = try FileManager.default.attributesOfItem(atPath: current.path)
@@ -341,9 +343,9 @@ public actor ArchiveCoordinator {
                             }
                             let outputRoot = targetSource.map { URL(fileURLWithPath: $0.pathHint) } ?? root
                             if outputRoot == root && files.allSatisfy({ $0.from == $0.to }) { break }
-                            if files.allSatisfy({ file in
+                            if try files.allSatisfy({ file in
                                 let target = outputRoot.appendingPathComponent(file.to)
-                                return !reservedTargets.contains(target.path) && !reserved.contains(file.to) && (target == root.appendingPathComponent(file.from) || (try? FileManager.default.attributesOfItem(atPath: target.path)) == nil)
+                                return try !reservedTargets.contains(target.path) && !reserved.contains(file.to) && (target == root.appendingPathComponent(file.from) || presence(target) == .missing)
                             }) { break }
                             suffix += 1
                         }
@@ -425,7 +427,7 @@ public actor ArchiveCoordinator {
                         try verify(file, at: from)
                         if file.from != file.to || fromRoot != toRoot {
                             let to = toRoot.appendingPathComponent(file.to)
-                            guard (try? FileManager.default.attributesOfItem(atPath: to.path)) == nil else { throw CocoaError(.fileWriteFileExists) }
+                            guard try presence(to) == .missing else { throw CocoaError(.fileWriteFileExists) }
                         }
                     }
                 }
@@ -435,7 +437,7 @@ public actor ArchiveCoordinator {
                     for file in moves where file.from != file.to || fromRoot != toRoot {
                         let from = try url(file.from, root: fromRoot, createParents: true)
                         let to = try url(file.to, root: toRoot, createParents: true)
-                        if (try? FileManager.default.attributesOfItem(atPath: from.path)) != nil {
+                        if try presence(from) == .present {
                             try verify(file, at: from)
                             try save(plan)
                             try mover.move(from, to)
@@ -446,12 +448,30 @@ public actor ArchiveCoordinator {
                             try verify(file, at: to)
                         }
                     }
+                    for file in moves where file.from != file.to || fromRoot != toRoot {
+                        guard try presence(url(file.from, root: fromRoot)) == .missing else { throw CocoaError(.fileLocking) }
+                        try verify(file, at: url(file.to, root: toRoot))
+                    }
                     try await store.commitArchive(group.files, reversed: reversing, destination: group.destination)
                     plan.groups[index].state = reversing ? "undone" : "done"
                     try save(plan)
                     report.completed += moves.count
                 } catch {
                     let failure = error
+                    // Before choosing a rollback direction, prove where every member is.
+                    // Unknown permissions, I/O or identity leave the original phase durable.
+                    do {
+                        for file in moves where file.from != file.to || fromRoot != toRoot {
+                            let from = try url(file.from, root: fromRoot)
+                            let to = try url(file.to, root: toRoot)
+                            let original = try presence(from), destination = try presence(to)
+                            guard original != destination else { throw CocoaError(.fileLocking) }
+                            try verify(file, at: original == .present ? from : to)
+                        }
+                    } catch {
+                        report.warnings.append("文件状态无法确认，整理已暂停：\(error.localizedDescription)。日志已保留，请恢复授权或连接后继续。")
+                        return report
+                    }
                     // Persist the rollback direction before touching any file. A second interruption
                     // can then finish rollback rather than accidentally completing the forward move.
                     plan.groups[index].state = reversing ? "rollbackUndo" : "rollbackForward"
@@ -460,8 +480,9 @@ public actor ArchiveCoordinator {
                         for file in moves.reversed() where file.from != file.to || fromRoot != toRoot {
                             let from = try url(file.from, root: fromRoot, createParents: true)
                             let to = try url(file.to, root: toRoot, createParents: true)
-                            if (try? FileManager.default.attributesOfItem(atPath: from.path)) != nil {
+                            if try presence(from) == .present {
                                 try verify(file, at: from)
+                                guard try presence(to) == .missing else { throw CocoaError(.fileLocking) }
                             } else {
                                 try verify(file, at: to)
                                 try mover.move(to, from)

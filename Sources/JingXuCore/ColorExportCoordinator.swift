@@ -25,11 +25,19 @@ public struct ColorExportReport: Sendable {
 
 public actor ColorExportCoordinator {
     public typealias Encoder = @Sendable (ColorEditSnapshot, ColorAdjustments, ColorExportFormat, URL) async throws -> Void
+    public typealias Preflight = @Sendable (ColorEditSnapshot, ColorAdjustments) async throws -> Void
     private let store: CatalogStore
     private let encode: Encoder
+    private let preflight: Preflight
+    private let presence: FilePresenceProbe
     private var running = false
-    public init(store: CatalogStore, encode: Encoder? = nil) {
+    public init(store: CatalogStore, encode: Encoder? = nil, preflight: Preflight? = nil,
+                presence: @escaping FilePresenceProbe = FilePresenceReader.read) {
         self.store = store
+        self.presence = presence
+        self.preflight = preflight ?? { snapshot, adjustments in
+            _ = try await ColorImageRenderer.shared.render(snapshot, adjustments: adjustments, maximumDimension: 64)
+        }
         self.encode = encode ?? { snapshot, adjustments, format, url in
             try await ColorImageRenderer.shared.encode(snapshot, adjustments: adjustments, format: format, to: url)
         }
@@ -39,18 +47,25 @@ public actor ColorExportCoordinator {
         let lease = PreviewAccessLease(url: directory)
         defer { withExtendedLifetime(lease) {} }
         var plan = ColorExportPlan(directory: directory, identity: try SourceIdentity.resolve(directory), format: format)
+        guard access(directory.path, W_OK | X_OK) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
         var targets = Set<String>()
         for id in Array(Set(assetIDs)).sorted() {
             try Task.checkCancellation()
             do {
                 let snapshot = try await store.colorSnapshot(assetID: id)
                 let adjustments = try snapshot.adjustments
-                _ = try await ColorImageRenderer.shared.render(snapshot, adjustments: adjustments, maximumDimension: 64)
                 let stem = (snapshot.asset.fileName as NSString).deletingPathExtension
+                guard !stem.isEmpty, !snapshot.asset.fileName.contains("/"), !snapshot.asset.fileName.contains("\0") else {
+                    throw ColorEditError("输出文件名无效，未读取图片")
+                }
                 let destination = directory.appendingPathComponent(stem + "-调色." + format.fileExtension)
                 let key = destination.lastPathComponent.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
-                guard targets.insert(key).inserted else { plan.skipped.append("\(snapshot.asset.fileName)：批次目标重名"); continue }
-                guard !Self.exists(destination) else { plan.skipped.append("\(destination.lastPathComponent)：目标已存在"); continue }
+                guard !targets.contains(key) else { plan.skipped.append("\(snapshot.asset.fileName)：批次目标重名"); continue }
+                guard try presence(destination) == .missing else { plan.skipped.append("\(destination.lastPathComponent)：目标已存在"); continue }
+                try await preflight(snapshot, adjustments)
+                targets.insert(key)
                 plan.items.append(ColorExportItem(snapshot: snapshot, adjustments: adjustments, destination: destination))
             } catch is CancellationError { throw CancellationError() }
             catch { plan.skipped.append("\((try? await store.asset(id: id))?.fileName ?? id)：\(error.localizedDescription)") }
@@ -73,7 +88,7 @@ public actor ColorExportCoordinator {
                 guard item.destination.deletingLastPathComponent().standardizedFileURL.pathComponents == plan.directory.standardizedFileURL.pathComponents,
                       try SourceIdentity.resolve(plan.directory) == plan.identity else { throw ColorEditError("导出目标越界或目录已变化") }
                 try await store.validateColorSnapshot(item.snapshot)
-                if Self.exists(item.destination) { report.skipped.append("\(item.destination.lastPathComponent)：目标已存在"); continue }
+                if try presence(item.destination) == .present { report.skipped.append("\(item.destination.lastPathComponent)：目标已存在"); continue }
                 try await encode(item.snapshot, item.adjustments, plan.format, temporary)
                 try Task.checkCancellation()
                 try await store.validateColorSnapshot(item.snapshot)
@@ -90,10 +105,5 @@ public actor ColorExportCoordinator {
             await progress(index + 1, plan.items.count)
         }
         return report
-    }
-    private static func exists(_ url: URL) -> Bool {
-        // lstat also sees dangling symlinks. Other errors are checked again by no-replace publication.
-        var info = stat()
-        return lstat(url.path, &info) == 0
     }
 }

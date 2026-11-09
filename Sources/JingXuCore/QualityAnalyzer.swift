@@ -152,8 +152,11 @@ public struct AnalysisProgress: Sendable, Equatable {
     public var total: Int
     public var completed: Int
     public var currentFile: String
-    public init(total: Int, completed: Int, currentFile: String) {
+    public var changedAssetIDs: [String]
+    public var isFinished: Bool
+    public init(total: Int, completed: Int, currentFile: String, changedAssetIDs: [String] = [], isFinished: Bool = false) {
         self.total = total; self.completed = completed; self.currentFile = currentFile
+        self.changedAssetIDs = changedAssetIDs; self.isFinished = isFinished
     }
 }
 public typealias AnalysisProgressHandler = @Sendable (AnalysisProgress) async -> Void
@@ -171,17 +174,29 @@ public actor AnalysisCoordinator {
     }
 
     public func analyze(assetIDs: [String], progress: AnalysisProgressHandler? = nil) async throws {
-        for (index, id) in assetIDs.enumerated() {
-            try Task.checkCancellation()
-            let name = try await repository.asset(id: id)?.fileName ?? ""
-            await progress?(AnalysisProgress(total: assetIDs.count, completed: index, currentFile: name))
-            _ = try await analyzeOne(assetID: id)
+        var completed = 0
+        do {
+            for id in assetIDs {
+                try Task.checkCancellation()
+                let name = try await repository.asset(id: id)?.fileName ?? ""
+                await progress?(AnalysisProgress(total: assetIDs.count, completed: completed, currentFile: name))
+                let nextCompleted = completed + 1
+                _ = try await analyzeOne(assetID: id) {
+                    await progress?(AnalysisProgress(total: assetIDs.count, completed: nextCompleted, currentFile: name, changedAssetIDs: [id]))
+                }
+                completed += 1
+            }
+            try await groupSimilarBursts(assetIDs: assetIDs) { ids in
+                await progress?(AnalysisProgress(total: assetIDs.count, completed: assetIDs.count, currentFile: "整理相似连拍", changedAssetIDs: ids))
+            }
+        } catch {
+            await progress?(AnalysisProgress(total: assetIDs.count, completed: completed, currentFile: "", isFinished: true))
+            throw error
         }
-        try await groupSimilarBursts(assetIDs: assetIDs)
-        await progress?(AnalysisProgress(total: assetIDs.count, completed: assetIDs.count, currentFile: ""))
+        await progress?(AnalysisProgress(total: assetIDs.count, completed: completed, currentFile: "", isFinished: true))
     }
 
-    @discardableResult public func analyzeOne(assetID: String) async throws -> Bool {
+    @discardableResult public func analyzeOne(assetID: String, committed: @Sendable () async -> Void = {}) async throws -> Bool {
         try Task.checkCancellation()
         guard let asset = try await repository.asset(id: assetID), asset.kind == .photo else { return false }
         do {
@@ -196,15 +211,17 @@ public actor AnalysisCoordinator {
             try Task.checkCancellation()
             guard let fingerprint = result.fingerprint, fingerprint.matches(try AnalysisFingerprint(url: url)) else { throw QualityAnalysisError.changedFile }
             try await repository.saveComputedAnalysis(result, expectedAsset: asset, fileURL: url)
+            await committed()
             return true
         } catch is CancellationError { throw CancellationError() }
         catch {
             try await repository.recordAnalysisFailure(assetID: asset.id, reason: error.localizedDescription, fingerprint: AnalysisFingerprint(asset: asset))
+            await committed()
             return false
         }
     }
 
-    public func groupSimilarBursts(assetIDs: [String]) async throws {
+    public func groupSimilarBursts(assetIDs: [String], changed: @Sendable ([String]) async -> Void = { _ in }) async throws {
         var assets: [MediaAsset] = []
         for id in assetIDs {
             try Task.checkCancellation()
@@ -216,7 +233,9 @@ public actor AnalysisCoordinator {
                 camera: asset.cameraModel, feature: try await repository.analysis(for: asset.id)?.featurePrint))
         }
         for ids in try SimilarBurstGrouping.groups(items, distance: analyzer.featureDistance) {
+            try Task.checkCancellation()
             try await repository.saveSimilarGroup(UUID().uuidString, assetIDs: ids)
+            await changed(ids)
         }
     }
 }

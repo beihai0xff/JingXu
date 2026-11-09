@@ -1,7 +1,12 @@
 import AppKit
 import JingXuCore
+import SwiftUI
 
 extension AppModel {
+    func updateGridColumns(_ value: Int) {
+        let count = max(1, value)
+        if gridColumns != count { gridColumns = count; gridLeadingCells = 0 }
+    }
     var activeTaskSummary: String? {
         guard isWorking else { return nil }
         if let progress = importProgress { return "导入 \(progress.completedFiles + progress.skippedFiles)/\(progress.totalFiles)：\(progress.currentFile)" }
@@ -14,8 +19,10 @@ extension AppModel {
         if operationResults.first != value { operationResults.insert(value, at: 0); operationResults = Array(operationResults.prefix(20)) }
     }
     var browseSummary: String {
-        let elsewhere = photoSelection.selectedIDs.subtracting(assets.map(\.id)).count
-        return "已载入 \(assets.count) / \(matchingAssetCount) 项" + (selectedPhotoIDs.isEmpty ? "" : " · 已选 \(selectedPhotoIDs.count) 张") + (elsewhere > 0 ? "（未载入 \(elsewhere) 张）" : "")
+        let selected = photoSelection.selectedIDs
+        let inWindow = loadedAssets.photoIDs.reduce(0) { $0 + (selected.contains($1) ? 1 : 0) }
+        let elsewhere = selected.count - inWindow
+        return "当前载入 \(assets.count) / 匹配 \(matchingAssetCount) 项" + (selected.isEmpty ? "" : " · 已选 \(selected.count) 张") + (elsewhere > 0 ? "（窗口外 \(elsewhere) 张）" : "")
     }
     func draftQuery(destination: SidebarDestination? = nil, includeSubdirectories: Bool? = nil) -> BrowseQuery {
         var query = BrowseQuery(searchText: searchText.trimmingCharacters(in: .whitespacesAndNewlines), minimumRating: minimumRating, flag: flagFilter, sortOrder: sortOrder)
@@ -48,7 +55,7 @@ extension AppModel {
     func reloadAssets() async {
         let changedScope = pendingQuery != nil
         await loadBrowsePage(cursor: changedScope ? nil : assets.first.map(BrowseCursor.init), inclusive: !changedScope,
-                             limit: changedScope ? 200 : max(200, assets.count))
+                             limit: changedScope ? 200 : min(600, max(200, assets.count)))
     }
     func loadBrowsePage(cursor: BrowseCursor? = nil, inclusive: Bool = false, containing: Bool = false, limit: Int = 200) async {
         guard let store else { return }
@@ -66,11 +73,12 @@ extension AppModel {
             } else {
                 page = try await store.browsePage(query, cursor: cursor, inclusive: inclusive, limit: limit, count: true)
             }
-            let selected = changesQuery ? [] : selectedPhotoIDs
-            let valid = try await store.assetListItems(ids: selected, matching: query)
+            let selected = changesQuery ? [] : Array(photoSelection.selectedIDs)
+            let valid = try await store.matchingPhotoIDs(selected, matching: query)
             let previousPreview = previewAsset?.id
             let previousReference = comparisonReference?.id
-            let targets = [previousPreview, previousReference].compactMap { $0 }
+            let previousFocus = selectedAssetID
+            let targets = [previousPreview, previousReference, previousFocus].compactMap { $0 }
             let refreshed = try await store.assetListItems(ids: targets)
             guard assetRequestID == request, !Task.isCancelled else { return }
             appliedQuery = query; pendingQuery = nil; pendingDestination = nil
@@ -78,19 +86,27 @@ extension AppModel {
             includeSubdirectories = query.includeSubdirectories
             persistBrowsePreference()
             if changesQuery {
-                photoSelection.clear(); previewAsset = nil; comparisonReference = nil; clearComparisonPrefetch(); previewItems = []
+                photoSelection.clear(); focusedAsset = nil; previewAsset = nil; comparisonReference = nil; clearComparisonPrefetch(); previewItems = []
+                gridLeadingCells = 0; gridJumpID = nil
                 automationSelectionToken = UUID()
             } else {
-                photoSelection.retain(validIDs: Set(valid.filter { $0.kind == .photo }.map(\.id)))
+                photoSelection.retain(validIDs: valid)
                 if previewAsset?.id == previousPreview { previewAsset = refreshed.first { $0.id == previousPreview } }
                 if comparisonReference?.id == previousReference { comparisonReference = refreshed.first { $0.id == previousReference } }
                 if comparisonReference == nil { clearComparisonPrefetch() }
+                focusedAsset = refreshed.first { $0.id == previousFocus }
             }
             let changedCount = matchingAssetCount != (page.total ?? 0)
             resultsChanged = !changesQuery && (resultsChanged || (isWorking && cursor != nil && changedCount))
-            assets = page.items; matchingAssetCount = page.total ?? 0
+            if containing { gridLeadingCells = 0 }
+            if loadedAssets.replace(page.items) { automationSelectionToken = UUID() }
+            matchingAssetCount = page.total ?? 0
             hasPreviousPage = page.hasPrevious; hasNextPage = page.hasNext
-            if let anchor = cursor, assets.contains(where: { $0.id == anchor.id }), previewAsset == nil { selectedAssetID = anchor.id }
+            if containing, let anchor = cursor, loadedAssets.contains(anchor.id), previewAsset == nil {
+                selectedAssetID = anchor.id
+                focusedAsset = assets[loadedAssets.index(of: anchor.id)!]
+                gridJumpID = anchor.id; gridJumpRevision += 1
+            }
             if previewAsset != nil { await refreshPreviewWindow() }
             guard assetRequestID == request, !Task.isCancelled else { return }
             syncKeywordDraft()
@@ -118,16 +134,32 @@ extension AppModel {
               let cursor = (before ? assets.first : assets.last).map(BrowseCursor.init) else { return }
         let query = appliedQuery, request = assetRequestID
         isLoadingMoreAssets = true
-        loadMoreTask = Task {
+        loadMoreTask = Task { [self] in
             defer { if assetRequestID == request { isLoadingMoreAssets = false; loadMoreTask = nil } }
             do {
-                let page = try await store.browsePage(query, cursor: cursor, reverse: before, count: true)
+                let page = try await store.browsePage(query, cursor: cursor, reverse: before)
                 try Task.checkCancellation()
                 guard assetRequestID == request, appliedQuery == query else { return }
-                let existing = Set(assets.map(\.id))
-                let additional = page.items.filter { !existing.contains($0.id) }
-                assets = before ? additional + assets : assets + additional
-                if before { hasPreviousPage = page.hasPrevious } else { hasNextPage = page.hasNext }
+                let focus = selectedAsset
+                let oldCount = assets.count
+                let fallback = before ? assets.first?.id : assets.last?.id
+                let columns = max(1, gridColumns)
+                let removed = withTransaction(Transaction(animation: nil)) {
+                    loadedAssets.appendWindow(page.items, before: before, columns: columns)
+                }
+                let added = assets.count + removed - oldCount
+                if before && added > 0 {
+                    gridLeadingCells = (gridLeadingCells + columns - added % columns) % columns
+                }
+                if removed > 0 { gridTrimFallbackID = fallback; gridTrimRevision += 1 }
+                if focusedAsset == nil { focusedAsset = focus }
+                if before {
+                    hasPreviousPage = page.hasPrevious
+                    if removed > 0 { hasNextPage = true }
+                } else {
+                    hasNextPage = page.hasNext
+                    if removed > 0 { hasPreviousPage = true }
+                }
                 matchingAssetCount = page.total ?? matchingAssetCount
                 browseError = nil; retryBrowseAction = nil
             } catch is CancellationError {} catch {
@@ -152,18 +184,28 @@ extension AppModel {
     }
     func refreshChangedAssets(ids: [String], membershipChanged: Bool = false) async {
         guard let store else { return }
+        if membershipChanged { await reloadAssets(); return }
+        let request = assetRequestID
+        let changed = Set(ids)
+        let targets = Set(loadedAssets.loadedIDs(in: changed))
+            .union(previewItems.map(\.id).filter { changed.contains($0) })
+            .union([previewAsset?.id, comparisonReference?.id, focusedAsset?.id].compactMap { $0 }.filter { changed.contains($0) })
+        guard !targets.isEmpty else { return }
         do {
-            let rows = try await store.assetListItems(ids: ids)
+            let rows = try await store.assetListItems(ids: Array(targets))
+            guard request == assetRequestID else { return }
             let items = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
-            assets = assets.map { items[$0.id] ?? $0 }
+            if loadedAssets.update(rows) { automationSelectionToken = UUID() }
             previewItems = previewItems.map { items[$0.id] ?? $0 }
             if let id = previewAsset?.id { previewAsset = items[id] ?? previewAsset }
             if let id = comparisonReference?.id { comparisonReference = items[id] ?? comparisonReference }
-            if membershipChanged { await reloadAssets() }
+            if let id = focusedAsset?.id { focusedAsset = items[id] }
+            if rows.count != targets.count { await reloadAssets() }
         } catch { errorMessage = "标注已保存，但界面刷新失败：\(error.localizedDescription)" }
     }
-    func refreshAnalysisResults() async {
-        await refreshChangedAssets(ids: Array(Set(assets.map(\.id) + previewItems.map(\.id))), membershipChanged: appliedQuery.collection == .review)
+    func refreshAnalysisResults(ids: [String]) async {
+        guard !ids.isEmpty else { return }
+        await refreshChangedAssets(ids: ids, membershipChanged: appliedQuery.collection == .review || appliedQuery.similarGroupID != nil)
     }
     func resolveColorTargets() async throws -> [AssetListItem] {
         guard let store else { throw ColorEditError("图库未打开") }

@@ -4,7 +4,7 @@ import JingXuCore
 
 extension AppModel {
     func compareSelected() {
-        guard selectedPhotoIDs.count == 2, operationBlockReason(.browse) == nil else { return }
+        guard photoSelection.selectedIDs.count == 2, operationBlockReason(.browse) == nil else { return }
         transitionPreview {
             self.isPreparingSelection = true
             Task {

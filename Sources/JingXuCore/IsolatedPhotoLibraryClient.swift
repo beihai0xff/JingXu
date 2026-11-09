@@ -5,6 +5,16 @@ import UniformTypeIdentifiers
 
 /// A complete in-process test library. It never initializes or calls PhotoKit.
 public actor IsolatedPhotoLibraryClient: PhotoLibraryClient {
+    public enum PreviewReadStage: Sendable { case image, editingInput }
+    public typealias PreviewReadHook = @Sendable (PreviewReadStage, String) async throws -> Void
+    private var previewReadHook: PreviewReadHook?
+    public private(set) var requestedImages: [(id: String, pixelSize: Int)] = []
+    public private(set) var requestedEditingInputs: [String] = []
+    public private(set) var cancelledPreviewReads = 0
+    public private(set) var createdInputCount = 0
+    public private(set) var releasedInputCount = 0
+    public var activeInputCount: Int { tokens.count }
+    public func setPreviewReadHook(_ hook: PreviewReadHook?) { previewReadHook = hook }
     private struct Entry {
         var photo: SystemPhoto
         let original: URL
@@ -96,16 +106,37 @@ public actor IsolatedPhotoLibraryClient: PhotoLibraryClient {
         try check()
         return ids.filter { albumID == nil || collections[albumID!]?.1.contains($0) == true }.compactMap { entries[$0]?.photo }
     }
+    public func matchingPhotoIDs(_ ids: [String], albumID: String?) throws -> Set<String> {
+        try check()
+        return Set(ids.filter { entries[$0] != nil && (albumID == nil || collections[albumID!]?.1.contains($0) == true) })
+    }
     public func image(id: String, pixelSize: Int) async throws -> PreviewImage {
         try check()
+        requestedImages.append((id, pixelSize))
+        do { try await previewReadHook?(.image, id); try Task.checkCancellation() }
+        catch is CancellationError { cancelledPreviewReads += 1; throw CancellationError() }
         guard let entry = entries[id] else { throw ColorEditError("照片不存在") }
-        return try await ImagePreviewLoader().load(url: entry.displayed)
+        if pixelSize == Int.max { return try await ImagePreviewLoader().load(url: entry.displayed) }
+        guard let source = CGImageSourceCreateWithURL(entry.displayed as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: max(1, pixelSize)] as CFDictionary) else { throw ColorEditError("测试预览解码失败") }
+        let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? image.width
+        let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? image.height
+        let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        let native = orientation >= 5 ? CGSize(width: height, height: width) : CGSize(width: width, height: height)
+        try Task.checkCancellation()
+        return PreviewImage(image: image, nativeSize: native, isEmbedded: false, access: nil)
     }
     public func validate(photo: SystemPhoto) throws {
         try check()
         guard entries[photo.id]?.photo == photo else { throw ColorEditError("照片已变化或删除") }
     }
     public func editingInput(photo: SystemPhoto) async throws -> SystemPhotoEditInput {
+        requestedEditingInputs.append(photo.id)
+        do { try await previewReadHook?(.editingInput, photo.id); try Task.checkCancellation() }
+        catch is CancellationError { cancelledPreviewReads += 1; throw CancellationError() }
         try validate(photo: photo)
         guard photo.canEdit, !photo.isLivePhoto, let entry = entries[photo.id] else { throw ColorEditError("不支持静态编辑") }
         let base = entry.editingBase ?? entry.original
@@ -115,9 +146,9 @@ public actor IsolatedPhotoLibraryClient: PhotoLibraryClient {
         let version = digest + ":" + String(decoding: try encoder.encode(entry.adjustments), as: UTF8.self)
         let result = SystemPhotoEditInput(photo: photo, renderInput: input, contentVersion: version,
             adjustments: entry.adjustments, usesRenderedBase: entry.usesRenderedBase)
-        tokens.insert(result.token); return result
+        tokens.insert(result.token); createdInputCount += 1; return result
     }
-    public func releaseEditingInput(token: UUID) { tokens.remove(token) }
+    public func releaseEditingInput(token: UUID) { if tokens.remove(token) != nil { releasedInputCount += 1 } }
     public func original(photo: SystemPhoto) async throws -> ColorRenderInput {
         try validate(photo: photo)
         requestedOriginals.append(photo.id)
@@ -133,13 +164,13 @@ public actor IsolatedPhotoLibraryClient: PhotoLibraryClient {
         guard tokens.contains(input.token), !input.photo.isLivePhoto else { throw ColorEditError("编辑会话已失效") }
         guard var entry = entries[input.photo.id] else { throw ColorEditError("照片不存在") }
         let current = try await editingInput(photo: input.photo)
-        tokens.remove(current.token)
+        releaseEditingInput(token: current.token)
         guard current.contentVersion == input.contentVersion else { throw ColorEditError("照片底图变化") }
         let output = root.appendingPathComponent(UUID().uuidString + ".jpg")
         try FileManager.default.copyItem(at: renderedURL, to: output)
         entry.adjustments = adjustments; entry.displayed = output; entry.photo = changed(entry.photo)
         entries[entry.photo.id] = entry; mutations += 1; handler?(.changed)
-        tokens.remove(input.token); try afterCommit()
+        releaseEditingInput(token: input.token); try afterCommit()
     }
     public func mutate(_ plan: SystemPhotoMutationPlan) throws {
         try check()
