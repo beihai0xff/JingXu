@@ -24,7 +24,8 @@ struct JingXuApp: App {
                         }
                     }.padding(32)
                 } else { ContentView().environmentObject(model) }
-            }.frame(minWidth: 960, minHeight: 640)
+            }.frame(minWidth: 1020, minHeight: 660)
+                .appAppearance(model.appearanceMode)
                 .background(ColorWindowGuard(model: model))
                 .onAppear { applicationDelegate.model = model }
         }

@@ -31,6 +31,7 @@ extension AppModel {
     /// Navigation remains synchronous for browsing, but editing must drain pending writes first.
     func transitionPreview(_ action: @escaping @MainActor () -> Void) {
         guard !isPreviewTransitioning, (!isSavingAnnotation || keywordSaveTask != nil), !automationOwnsOperation else { return }
+        colorEditor?.endComparison()
         if colorEditor == nil && keywordDraft == keywordSaved && keywordSaveTask == nil { action(); return }
         colorEditor?.cancelComposition()
         isPreviewTransitioning = true
@@ -49,6 +50,7 @@ extension AppModel {
         guard previewNavigationEnabled, let store else { return }
         NSApp.keyWindow?.makeFirstResponder(nil)
         let editor = colorEditor
+        editor?.endComparison()
         editor?.cancelComposition()
         isPreviewTransitioning = true
         Task {

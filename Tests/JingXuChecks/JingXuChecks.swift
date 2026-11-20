@@ -41,6 +41,11 @@ private struct TestTrash: TrashService {
 private enum JingXuChecks {
     static func main() async throws {
         setenv("SWIFTNIO_STRICT", "1", 1)
+        if CommandLine.arguments.contains("--studio-ui-checks") {
+            try await StudioWorkbenchChecks.run()
+            print("专业暗房工作台状态、滑块几何、单键路由与画布检查通过")
+            return
+        }
         if CommandLine.arguments.contains("--browsing-profile-fixture") {
             print(try await BrowsingPerformanceProfile.fixture().path)
             return
@@ -246,6 +251,7 @@ private enum JingXuChecks {
             ("MCP 调色、预览、批量、导出、版本冲突与取消", AutomationChecks.run),
             ("MCP HTTP 实连、认证、Origin、Host 与端口冲突", AutomationChecks.networking),
             ("MCP 请求与关闭、重启竞争 100 次", MCPShutdownChecks.run),
+            ("专业暗房工作台状态、滑块几何、单键路由与画布背景", StudioWorkbenchChecks.run),
             ("10 万条目录查询性能", checkLargeCatalog)
         ]
 

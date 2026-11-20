@@ -1,127 +1,193 @@
-import SwiftUI
 import JingXuCore
+import SwiftUI
 
 struct ColorEditPanel: View {
     @ObservedObject var session: ColorEditSession
     let isWorking: Bool
     let isTransitioning: Bool
     let externallyControlled: Bool
+    let histogramIsDragging: Bool
     let copyAdjustments: () -> Void
     let discardStale: () -> Void
+
     @FocusState private var focusedParameter: ColorParameter?
-    @State private var histogramIsDragging = false
+    @State private var editingParameter: ColorParameter?
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Button("撤销") { session.undo() }.disabled(!session.history.canUndo)
-                    Button("重做") { session.redo() }.disabled(!session.history.canRedo)
-                    Spacer()
-                    Button(session.comparing ? "松开恢复成片" : (session.snapshot.usesRenderedBase ? "本次编辑前对比" : "按住对比原图")) {}
-                        .buttonStyle(OriginalComparisonButtonStyle { pressed in
-                            if pressed {
-                                focusedParameter = nil
-                                session.beginComparison()
-                            } else { session.endComparison() }
-                        })
-                        .disabled(!session.usable || isWorking)
-                        .help(session.snapshot.usesRenderedBase ? "按住查看其他应用提供的成片底图；只移除镜序调整，保留之前的编辑。" : "按住查看未调色、未裁剪的原图，松开或移出按钮恢复成片；不会修改调整。")
-                }.disabled(isTransitioning)
+            VStack(alignment: .leading, spacing: 12) {
                 if let error = session.saveError {
-                    Text("保存失败：\(error)").font(.caption).foregroundStyle(.red).textSelection(.enabled)
-                    HStack {
-                        Button("重试保存") { Task { _ = await session.flush() } }
-                        Button("放弃未保存调整") { session.discardDraft() }.disabled(session.isSaving)
-                    }
+                    errorBanner(
+                        title: "保存失败：\(error)",
+                        color: DarkroomPalette.rejectCoral,
+                        primaryTitle: "重试保存",
+                        primaryAction: { Task { _ = await session.flush() } },
+                        secondaryTitle: "放弃未保存调整",
+                        secondaryDisabled: session.isSaving,
+                        secondaryAction: { session.discardDraft() }
+                    )
                 }
+
                 if let error = session.renderError {
-                    Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
-                    HStack {
-                        Button("重试") { session.render(interactive: false) }
-                        Button("放弃旧调整…") { discardStale() }
-                    }
+                    errorBanner(
+                        title: error,
+                        color: DarkroomPalette.warningAmber,
+                        primaryTitle: "重试渲染",
+                        primaryAction: { session.render(interactive: false) },
+                        secondaryTitle: "放弃旧调整…",
+                        secondaryDisabled: false,
+                        secondaryAction: discardStale
+                    )
                 }
-                DisclosureGroup("直方图") {
-                    if let result = session.result {
-                        ColorHistogram(session: session, result: result.histogram,
-                            enabled: session.usable && !isWorking && !isTransitioning && !externallyControlled && !session.isExternallyControlled,
-                            prepare: { histogramIsDragging = true; focusedParameter = nil; session.endGesture() },
-                            finished: { histogramIsDragging = false })
-                    }
-                }
-                HStack {
-                    Text("明暗").font(.headline)
-                    Spacer()
-                    Button("重置") {
+
+                // Group 1: Tone
+                developGroupCard(
+                    title: "明暗影调",
+                    subtitle: nil,
+                    resetTitle: "重置",
+                    resetAction: {
                         var values = session.adjustments
                         for p in ColorParameter.allCases where p.group == .tone { values[p] = 0 }
                         session.apply(values)
-                    }.buttonStyle(.borderless).font(.caption)
-                }.padding(.top, 8)
-                ForEach([ColorParameter.exposure, .contrast, .highlights, .shadows], id: \.self) { parameter($0) }
-                DisclosureGroup("白色与黑色") {
-                    VStack(spacing: 10) { parameter(.whites); parameter(.blacks) }.padding(.top, 10)
+                    }
+                ) {
+                    ForEach([ColorParameter.exposure, .contrast, .highlights, .shadows, .whites, .blacks], id: \.self) { param in
+                        sliderRow(param)
+                    }
                 }
-                Divider()
-                DisclosureGroup("白平衡") {
-                    VStack(spacing: 10) {
-                        HStack {
-                            Text(session.isRAW ? "RAW · 绝对色温" : "普通图片 · 相对调整").font(.caption).foregroundStyle(.secondary)
-                            Spacer(); Button("拍摄时") { session.asShot() }.font(.caption)
-                        }
-                        parameter(.temperature); parameter(.tint)
-                    }.padding(.top, 10)
+
+                // Group 2: White Balance
+                developGroupCard(
+                    title: "白平衡",
+                    subtitle: session.isRAW ? "RAW · 绝对色温" : "普通图片 · 相对调整",
+                    resetTitle: "拍摄时",
+                    resetAction: { session.asShot() }
+                ) {
+                    sliderRow(.temperature)
+                    sliderRow(.tint)
                 }
-                Divider()
-                DisclosureGroup("色彩") {
-                    VStack(spacing: 10) { parameter(.saturation); parameter(.vibrance) }.padding(.top, 10)
+
+                // Group 3: Color
+                developGroupCard(
+                    title: "色彩",
+                    subtitle: nil,
+                    resetTitle: "重置",
+                    resetAction: {
+                        var values = session.adjustments
+                        for p in ColorParameter.allCases where p.group == .color { values[p] = 0 }
+                        session.apply(values)
+                    }
+                ) {
+                    sliderRow(.vibrance)
+                    sliderRow(.saturation)
                 }
-                Divider()
-                HStack {
-                    Button("复制调整") { copyAdjustments() }
+
+                // Bottom actions
+                HStack(spacing: 8) {
+                    Button("复制调整", systemImage: "doc.on.doc") {
+                        copyAdjustments()
+                    }
+                    .disabled(!session.usable)
+
                     Spacer()
-                }.disabled(!session.usable)
-                Button(session.snapshot.isSystemPhoto ? "重置镜序调整" : "恢复原图") { session.resetAll() }.disabled(session.result == nil || isTransitioning)
-                Text(session.snapshot.isSystemPhoto ? "调整自动保存为本机草稿；点击「保存到系统照片」后提交。" : "调整自动保存在图库；导出成片可生成独立图片。").font(.caption2).foregroundStyle(.secondary)
-            }.padding(14)
-        }.background(Color(nsColor: .controlBackgroundColor))
-            .disabled(isWorking || isTransitioning || externallyControlled || session.isExternallyControlled || session.isComposing)
-            .onChange(of: focusedParameter) { previous, _ in if previous != nil && !histogramIsDragging { session.endGesture() } }
-    }
-    private func parameter(_ p: ColorParameter) -> some View {
-        VStack(spacing: 2) {
-            HStack {
-                Text(p.title).font(.callout)
-                Spacer()
-                TextField(p.title, value: Binding(get: { session.displayValue(p) }, set: { session.change(p, value: $0) }),
-                    format: .number.precision(.fractionLength(p == .exposure ? 2 : 0)))
-                    .textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing).frame(width: 68)
-                    .focused($focusedParameter, equals: p).onSubmit { session.endGesture() }
-                Button { session.reset(p) } label: { Image(systemName: "arrow.counterclockwise") }
-                    .buttonStyle(.borderless).help("重置\(p.title)").accessibilityLabel("重置\(p.title)")
+
+                    Button(session.snapshot.isSystemPhoto ? "重置镜序调整" : "恢复原图") {
+                        session.resetAll()
+                    }
+                    .disabled(session.result == nil || isTransitioning)
+                }
+                .controlSize(.small)
+                .padding(.top, 2)
+
+                Text(
+                    session.snapshot.isSystemPhoto
+                        ? "调整自动保存为本机草稿；点击顶栏「保存到系统照片」后提交，原片可随时复原。"
+                        : "调整自动保存在本机图库（原片零修改）；导出成片可生成独立图片。"
+                )
+                .font(.caption2)
+                .foregroundStyle(DarkroomPalette.textMuted)
             }
-            Slider(value: Binding(get: { session.displayValue(p) }, set: { session.change(p, value: $0) }),
-                in: p.range(isRAW: session.isRAW), step: p == .exposure ? 0.01 : 1,
-                onEditingChanged: { editing in if editing { session.beginGesture() } else { session.endGesture() } })
-                .accessibilityLabel(p.title)
-        }.disabled(session.result == nil || isWorking || isTransitioning)
+            .padding(14)
+        }
+        .disabled(isWorking || isTransitioning || externallyControlled || session.isExternallyControlled || session.isComposing)
+        .onChange(of: focusedParameter) { previous, current in
+            if previous != nil && current == nil {
+                editingParameter = nil
+                if !histogramIsDragging { session.endGesture() }
+            }
+        }
     }
 
-}
+    private func sliderRow(_ parameter: ColorParameter) -> some View {
+        DarkroomSlider(
+            session: session,
+            parameter: parameter,
+            focusedParameter: $focusedParameter,
+            editingParameter: $editingParameter
+        )
+        .disabled(session.result == nil || isWorking || isTransitioning)
+    }
 
-/// ButtonStyle follows mouse and keyboard press state, including dragging outside the button.
-private struct OriginalComparisonButtonStyle: ButtonStyle {
-    let pressed: (Bool) -> Void
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.caption)
-            .padding(.horizontal, 8).padding(.vertical, 5)
-            .background(configuration.isPressed ? Color.accentColor.opacity(0.25) : Color.secondary.opacity(0.12),
-                        in: RoundedRectangle(cornerRadius: 5))
-            .contentShape(Rectangle())
-            .onChange(of: configuration.isPressed) { _, value in pressed(value) }
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in pressed(false) }
-            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in pressed(false) }
-            .onDisappear { pressed(false) }
+    private func developGroupCard<Content: View>(
+        title: String,
+        subtitle: String?,
+        resetTitle: String,
+        resetAction: @escaping () -> Void,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(DarkroomPalette.textPrimary)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(DarkroomPalette.textMuted)
+                }
+                Spacer()
+                Button(resetTitle, action: resetAction)
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .foregroundStyle(DarkroomPalette.textSecondary)
+            }
+            content()
+        }
+        .padding(11)
+        .background(DarkroomPalette.canvasDeep.opacity(0.55), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(DarkroomPalette.subtleDivider, lineWidth: 1)
+        )
+    }
+
+    private func errorBanner(
+        title: String,
+        color: Color,
+        primaryTitle: String,
+        primaryAction: @escaping () -> Void,
+        secondaryTitle: String,
+        secondaryDisabled: Bool,
+        secondaryAction: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(color)
+                .textSelection(.enabled)
+            HStack(spacing: 8) {
+                Button(primaryTitle, action: primaryAction)
+                Button(secondaryTitle, action: secondaryAction)
+                    .disabled(secondaryDisabled)
+            }
+            .controlSize(.small)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(color.opacity(0.45), lineWidth: 1)
+        )
     }
 }

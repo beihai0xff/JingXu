@@ -25,7 +25,6 @@ final class SystemPhotosModel: ObservableObject {
     var gridTrimFallbackID: String?
     @Published var gridJumpRevision = 0
     var gridJumpID: String?
-    @Published var isSelecting = false
     @Published var isLoadingMore = false
     @Published var browseError: String?
     private var retryBefore = false
@@ -177,22 +176,103 @@ final class SystemPhotosModel: ObservableObject {
         guard canAct else { return }
         NSApp.keyWindow?.makeFirstResponder(nil)
         if selection.click(photo.id, photoIDs: items.map(\.id), command: command,
-                           shift: shift, checkboxMode: isSelecting, count: count) {
+                           shift: shift, checkboxMode: false, count: count) {
             open(photo, index: offset + (items.firstIndex { $0.id == photo.id } ?? 0))
         }
         focusedPhoto = photo
     }
-    func open(_ photo: SystemPhoto, index: Int) {
-        transition(at: index) { photo }
+    func toggleCheckmark(_ photo: SystemPhoto) {
+        guard canAct else { return }
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        _ = selection.click(photo.id, photoIDs: items.map(\.id), checkboxMode: true)
+        focusedPhoto = photo
     }
-    private func transition(at index: Int, resolve: @escaping @MainActor () async throws -> SystemPhoto) {
+    var primaryTargetPhotoForPreview: SystemPhoto? {
+        if let id = selection.focusID,
+           let photo = items.first(where: { $0.id == id }) ?? (focusedPhoto?.id == id ? focusedPhoto : nil) {
+            return photo
+        }
+        if let firstSelected = items.first(where: { selection.selectedIDs.contains($0.id) }) {
+            return firstSelected
+        }
+        return items.first
+    }
+    func open(_ photo: SystemPhoto, index: Int) {
+        transition(at: index, editing: false) { photo }
+    }
+    func openAndEdit(_ photo: SystemPhoto, index: Int) {
+        guard photo.canEdit else { open(photo, index: index); return }
+        transition(at: index, editing: true) { photo }
+    }
+    func switchStage(to target: StudioStageMode) {
+        let current = StudioStageMode.resolve(hasPreview: preview != nil, isComparing: false, isEditing: editor != nil)
+        guard target != current else { return }
+        switch target {
+        case .grid:
+            if editor != nil {
+                guard canAct else { return }
+                perform {
+                    try await self.previewSession.finishEditing()
+                    self.selection.focusID = self.preview?.id
+                    guard await self.previewSession.close() else { throw ColorEditError("本机草稿尚未保存") }
+                    self.presetPreview = nil; self.conflict = nil
+                    if let id = self.selection.focusID, self.items.contains(where: { $0.id == id }) {
+                        self.gridJumpID = id; self.gridJumpRevision += 1
+                    }
+                }
+            } else {
+                closePreview()
+            }
+        case .loupe:
+            if current == .develop {
+                finishEditing()
+            } else if current == .grid {
+                openPrimaryTarget(editing: false)
+            }
+        case .compare:
+            break
+        case .develop:
+            if current == .loupe {
+                beginEditing()
+            } else if current == .grid {
+                openPrimaryTarget(editing: true)
+            }
+        }
+    }
+    func openPrimaryTarget(editing: Bool) {
+        guard canNavigate, let photo = primaryTargetPhotoForPreview else { return }
+        if !selection.selectedIDs.contains(photo.id) {
+            selection.selectOnly(photo.id)
+            focusedPhoto = photo
+        }
+        if let visiblePos = items.firstIndex(where: { $0.id == photo.id }) {
+            let idx = offset + visiblePos
+            if editing { openAndEdit(photo, index: idx) } else { open(photo, index: idx) }
+            return
+        }
+        let album = albumID
+        let id = photo.id
+        Task {
+            do {
+                guard let index = try await client.index(id: id, albumID: album),
+                      let resolved = try await client.photos(ids: [id], albumID: album).first else {
+                    throw ColorEditError("当前照片已不在此范围，请刷新后重试")
+                }
+                guard albumID == album else { return }
+                if editing { openAndEdit(resolved, index: index) } else { open(resolved, index: index) }
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+    private func transition(at index: Int, editing: Bool = false, resolve: @escaping @MainActor () async throws -> SystemPhoto) {
         guard canNavigate else { return }
+        editor?.endComparison()
         navigation?.cancel(); let generation = UUID(); previewGeneration = generation
         conflict = nil; requestedIndex = index
         navigation = Task {
             defer { if previewGeneration == generation { requestedIndex = nil; navigation = nil; if refreshNeeded { refreshNeeded = false; refresh() } } }
             do {
-                try await previewSession.open(at: index, resolve: resolve)
+                if editing { presets = try await localStore.colorPresets() }
+                try await previewSession.open(at: index, editing: editing, resolve: resolve)
                 guard previewGeneration == generation, !Task.isCancelled else { return }
                 presetPreview = nil
                 let pageOffset = (index / 200) * 200
@@ -204,7 +284,15 @@ final class SystemPhotosModel: ObservableObject {
                     gridJumpID = previewSession.photo?.id; gridJumpRevision += 1
                 }
                 try await reloadAnalysis()
-                status = previewSession.hasDraft ? "本机草稿 · 未保存到系统照片" : "已读取系统照片"
+                if editing, let editor = self.editor {
+                    if case .systemPhoto(let input) = editor.snapshot.origin, input.usesRenderedBase {
+                        status = "以其他应用的当前成片为底图；本次编辑前对比不会撤销其效果"
+                    } else {
+                        status = "调整自动保存为本机草稿；点击「保存到系统照片」后更新照片"
+                    }
+                } else {
+                    status = previewSession.hasDraft ? "本机草稿 · 未保存到系统照片" : "已读取系统照片"
+                }
             } catch is CancellationError {} catch { if previewGeneration == generation { self.error = error.localizedDescription } }
         }
     }
@@ -256,11 +344,12 @@ final class SystemPhotosModel: ObservableObject {
         }
     }
     func leavePreviewLevel() {
+        editor?.endComparison()
         if isNavigating { cancel() }
         else if editor?.isComposing == true { editor?.cancelComposition() }
         else if editor != nil { finishEditing() }
         else if preview != nil { closePreview() }
-        else { selection.clear(); isSelecting = false }
+        else { selection.clear() }
     }
     func moveGridFocus(by step: Int, extending: Bool) {
         guard canAct, !items.isEmpty else { return }
