@@ -25,98 +25,183 @@ struct ColorWorkflowPresentation: ViewModifier {
 private struct ColorConfirmationSheet: View {
     let title: String, summary: String, rows: [String], warnings: [String], confirmTitle: String
     let cancel: () -> Void, confirm: () -> Void
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(title).font(.title2)
-            Text(summary).textSelection(.enabled)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in Text(row).font(.caption).textSelection(.enabled) }
-                    ForEach(Array(warnings.enumerated()), id: \.offset) { _, row in Text("跳过：" + row).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }.frame(height: 250)
-            HStack { Spacer(); Button("取消", action: cancel).keyboardShortcut(.cancelAction); Button(confirmTitle, action: confirm).disabled(rows.isEmpty) }
-        }.padding(24).frame(width: 640)
+        ManifestConfirmationSheet(
+            scopeBadge: "范围：已确认的 \(rows.count) 张所选照片",
+            title: title,
+            safetyNote: summary,
+            metrics: [
+                ManifestMetric(label: "可应用照片", value: "\(rows.count) 张", tone: .accent),
+                ManifestMetric(label: "跳过项目", value: "\(warnings.count) 项", tone: warnings.isEmpty ? .neutral : .warning)
+            ],
+            width: 650,
+            onCancel: cancel,
+            confirmTitle: confirmTitle,
+            confirmDisabled: rows.isEmpty,
+            onConfirm: confirm
+        ) {
+            LazyVStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    Text(row)
+                }
+                ForEach(Array(warnings.enumerated()), id: \.offset) { _, row in
+                    Text("跳过：\(row)")
+                        .foregroundStyle(DarkroomPalette.warningAmber)
+                }
+            }
+        }
     }
 }
 
 private struct ColorExportOptionsSheet: View {
     @EnvironmentObject private var model: AppModel
     @State private var format = ColorExportFormat.jpeg
-    @State private var showsFiles = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("导出成片").font(.title2.weight(.medium))
-            Text("已选 \(model.colorExportDraft.count) 张照片 · 应用已保存的调整").font(.callout).foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                ForEach(Array(model.colorExportDraft.prefix(4))) { item in
-                    PhotoThumbnail(item: item, size: 160, compact: true).frame(width: 76, height: 62).clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-                if model.colorExportDraft.count > 4 { Text("+\(model.colorExportDraft.count - 4)").foregroundStyle(.secondary) }
-            }
-            Picker("文件格式", selection: $format) {
-                ForEach(ColorExportFormat.allCases, id: \.self) { Text($0.title).tag($0) }
-            }.disabled(model.isPreparingColorExport)
-            HStack { Text("尺寸与色彩"); Spacer(); Text("裁剪后原生尺寸 · sRGB").foregroundStyle(.secondary) }.font(.callout)
-            VStack(alignment: .leading, spacing: 8) {
-                Text("保存到").font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Image(systemName: "folder")
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(model.colorExportDirectory?.lastPathComponent ?? "请选择保存位置").font(.callout)
-                        if let directory = model.colorExportDirectory { Text(directory.path).font(.caption).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled) }
+        ManifestConfirmationSheet(
+            scopeBadge: "范围：已确认的 \(model.colorExportDraft.count) 张照片 · 原生尺寸 sRGB",
+            title: "导出调色成片",
+            safetyNote: "输出为应用已保存调色与裁剪的独立图片文件，原片始终保留；已有同名文件和批次内重名均自动跳过不覆盖。",
+            metrics: model.colorExportPlan.map { plan in
+                [
+                    ManifestMetric(label: "可执行导出", value: "\(plan.items.count) 张", tone: .accent),
+                    ManifestMetric(label: "重名／异常跳过", value: "\(plan.skipped.count) 张", tone: plan.skipped.isEmpty ? .neutral : .warning)
+                ]
+            } ?? [],
+            width: 600,
+            manifestMaxHeight: 165,
+            cancelTitle: model.isPreparingColorExport ? "取消准备" : "取消",
+            onCancel: { model.cancelColorExport() },
+            confirmTitle: model.colorExportPlan.map { "导出 \($0.items.count) 张成片" } ?? "导出成片",
+            confirmDisabled: model.colorExportPlan?.items.isEmpty != false || model.isPreparingColorExport,
+            onConfirm: {
+                if let plan = model.colorExportPlan { model.confirmColorExport(plan) }
+            },
+            controls: {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(model.colorExportDraft.prefix(5))) { item in
+                            PhotoThumbnail(item: item, size: 140, compact: true)
+                                .frame(width: 68, height: 54)
+                                .clipShape(RoundedRectangle(cornerRadius: 5))
+                        }
+                        if model.colorExportDraft.count > 5 {
+                            Text("+\(model.colorExportDraft.count - 5)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                    Spacer()
-                    Button(model.colorExportDirectory == nil ? "选择…" : "更改…") { model.chooseColorExportDirectory(format: format) }.disabled(model.isPreparingColorExport)
-                }.padding(12).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 7))
-            }
-            if model.isPreparingColorExport { ProgressView("正在核对照片与目标文件…").controlSize(.small) }
-            if let error = model.colorExportError {
-                Text(error).font(.caption).foregroundStyle(.red)
-                Button("重试核对") { model.prepareColorExport(format: format) }
-            }
-            if let plan = model.colorExportPlan {
-                Divider()
-                Label("将导出 \(plan.items.count) 张 · 跳过 \(plan.skipped.count) 张", systemImage: plan.skipped.isEmpty ? "checkmark.circle" : "exclamationmark.circle")
-                    .font(.callout).foregroundStyle(plan.skipped.isEmpty ? Color.primary : .orange)
-                DisclosureGroup("查看文件清单", isExpanded: $showsFiles) {
-                    ScrollView { LazyVStack(alignment: .leading, spacing: 6) {
-                        ForEach(plan.items) { Text($0.snapshot.asset.fileName + " → " + $0.destination.lastPathComponent).font(.caption) }
-                        ForEach(Array(plan.skipped.enumerated()), id: \.offset) { Text("跳过：" + $0.element).font(.caption).foregroundStyle(.orange) }
-                    }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }.frame(maxHeight: 150)
+
+                    Picker("输出格式", selection: $format) {
+                        ForEach(ColorExportFormat.allCases, id: \.self) { f in
+                            Text(f.title).tag(f)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(model.isPreparingColorExport)
+
+                    HStack {
+                        Image(systemName: "folder")
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(model.colorExportDirectory?.lastPathComponent ?? "请选择导出目标目录")
+                                .font(.callout.weight(.medium))
+                            if let directory = model.colorExportDirectory {
+                                Text(directory.path)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        Spacer()
+                        Button(model.colorExportDirectory == nil ? "选择目录…" : "更改目录…") {
+                            model.chooseColorExportDirectory(format: format)
+                        }
+                        .disabled(model.isPreparingColorExport)
+                    }
+                    .padding(10)
+                    .background(DarkroomPalette.elevatedControl.opacity(0.65), in: RoundedRectangle(cornerRadius: 7))
+
+                    if let error = model.colorExportError {
+                        HStack {
+                            Text(error).font(.caption).foregroundStyle(DarkroomPalette.rejectCoral)
+                            Spacer()
+                            Button("重试核对") { model.prepareColorExport(format: format) }.controlSize(.small)
+                        }
+                    }
+                }
+            },
+            manifestBody: {
+                if let plan = model.colorExportPlan {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(plan.items) { item in
+                            Text("\(item.snapshot.asset.fileName) → \(item.destination.lastPathComponent)")
+                        }
+                        ForEach(Array(plan.skipped.enumerated()), id: \.offset) { _, reason in
+                            Text("跳过：\(reason)")
+                                .foregroundStyle(DarkroomPalette.warningAmber)
+                        }
+                    }
+                } else {
+                    Text(model.isPreparingColorExport ? "正在核对源文件与目标路径…" : "选择导出目录后将在此生成固定导出清单。")
+                        .foregroundStyle(.secondary)
+                }
+            },
+            leadingFooter: {
+                if model.isPreparingColorExport {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("正在预检…").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }
-            Text("输出为独立图片，原片保留；已有同名文件和批次内重名均跳过。").font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Button(model.isPreparingColorExport ? "取消准备" : "取消") { model.cancelColorExport() }.keyboardShortcut(.cancelAction)
-                Spacer()
-                Button(model.colorExportPlan.map { "导出 \($0.items.count) 张" } ?? "导出成片") {
-                    if let plan = model.colorExportPlan { model.confirmColorExport(plan) }
-                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                    .disabled(model.colorExportPlan?.items.isEmpty != false || model.isPreparingColorExport)
-            }
-        }.padding(24).frame(width: 510)
-            .onChange(of: format) { _, _ in model.prepareColorExport(format: format) }
+        )
+        .onChange(of: format) { _, _ in model.prepareColorExport(format: format) }
     }
 }
 
 private struct ColorExportResultSheet: View {
     let report: ColorExportReport
     let close: () -> Void
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(report.cancelled ? "导出已停止" : "导出结果").font(.title2)
-            Text("成功 \(report.written.count) 张 · 跳过 \(report.skipped.count) 张 · 失败 \(report.failed.count) 张")
-            if !report.skipped.isEmpty || !report.failed.isEmpty {
-                ScrollView { LazyVStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array((report.skipped + report.failed).enumerated()), id: \.offset) { Text($0.element).font(.caption).textSelection(.enabled) }
-                } }.frame(maxHeight: 220)
+        ManifestConfirmationSheet(
+            scopeBadge: report.cancelled ? "导出任务已中途停止" : "导出任务已完成",
+            title: report.cancelled ? "成片导出已停止" : "成片导出结果",
+            safetyNote: "已导出的文件已原子落盘，原照片未做任何修改。",
+            metrics: [
+                ManifestMetric(label: "成功导出", value: "\(report.written.count) 张", tone: .accent),
+                ManifestMetric(label: "同名跳过", value: "\(report.skipped.count) 张", tone: report.skipped.isEmpty ? .neutral : .warning),
+                ManifestMetric(label: "失败", value: "\(report.failed.count) 张", tone: report.failed.isEmpty ? .neutral : .destructive)
+            ],
+            width: 580,
+            cancelTitle: nil,
+            onCancel: nil,
+            confirmTitle: "完成",
+            onConfirm: close,
+            controls: { EmptyView() },
+            manifestBody: {
+                if report.skipped.isEmpty && report.failed.isEmpty {
+                    ForEach(report.written, id: \.self) { url in
+                        Text(url.path)
+                    }
+                } else {
+                    ForEach(Array((report.skipped + report.failed).enumerated()), id: \.offset) { _, line in
+                        Text(line).foregroundStyle(DarkroomPalette.warningAmber)
+                    }
+                }
+            },
+            leadingFooter: {
+                if !report.written.isEmpty {
+                    Button("在访达中查看") {
+                        NSWorkspace.shared.activateFileViewerSelecting(report.written)
+                    }
+                }
             }
-            HStack {
-                if !report.written.isEmpty { Button("在访达中查看") { NSWorkspace.shared.activateFileViewerSelecting(report.written) } }
-                Spacer(); Button("完成", action: close).keyboardShortcut(.defaultAction)
-            }
-        }.padding(24).frame(width: 510)
+        )
     }
 }
 

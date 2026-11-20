@@ -12,34 +12,65 @@ struct WorkspaceSwitcher: View {
 
     var body: some View {
         HStack(spacing: 2) {
-            workspace("本地图库", selected: !systemPhotos, action: selectLocal)
-            workspace("系统照片", selected: systemPhotos, action: selectSystem)
+            workspace("本地图库", symbol: "externaldrive", selected: !systemPhotos, action: selectLocal)
+            workspace("系统照片", symbol: "icloud", selected: systemPhotos, action: selectSystem)
         }
         .padding(3)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-        .padding(.horizontal, 12).padding(.vertical, 12)
+        .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 7))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("切换图库")
     }
 
-    private func workspace(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func workspace(_ title: String, symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title).font(.callout).frame(maxWidth: .infinity).padding(.vertical, 5)
-                .background(selected ? Color(nsColor: .controlBackgroundColor) : .clear,
-                            in: RoundedRectangle(cornerRadius: 5))
-        }.buttonStyle(.plain).accessibilityAddTraits(selected ? [.isSelected] : [])
+            HStack(spacing: 5) {
+                Image(systemName: symbol).font(.caption)
+                Text(title).font(.caption.weight(selected ? .semibold : .regular))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+            .background(
+                selected ? Color.accentColor.opacity(0.20) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 5)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(selected ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 }
 
 struct GridViewOptions: View {
     @Binding var size: CGFloat
+    @Binding var aspectMode: GridAspectMode
     @Binding var showsFileNames: Bool
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("照片视图").font(.headline)
-            HStack {
-                Text("照片大小")
-                Slider(value: $size, in: 100...260).frame(width: 130).accessibilityLabel("照片大小")
+            Text("网格视图选项").font(.headline)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("缩略图画幅").font(.caption).foregroundStyle(.secondary)
+                Picker("缩略图画幅", selection: $aspectMode) {
+                    ForEach(GridAspectMode.allCases, id: \.self) { mode in
+                        Label(mode.title, systemImage: mode.symbolName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("网格尺寸").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(Int(size)) pt").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                Slider(value: $size, in: 100...260)
+                    .accessibilityLabel("照片大小")
             }
             Toggle("显示文件名", isOn: $showsFileNames)
         }

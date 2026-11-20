@@ -40,6 +40,8 @@ struct PhotoThumbnail: View {
     @Environment(\.displayScale) private var scale
     let item: AssetListItem
     let size: Int
+    var aspectMode: GridAspectMode = .aspectFit
+    var slotBackground: Color = DarkroomPalette.panelSurface
     var compact = false
     var failureChanged: (Bool) -> Void = { _ in }
     @State private var image: NSImage?
@@ -48,18 +50,41 @@ struct PhotoThumbnail: View {
     @State private var retry = 0
     var body: some View {
         ZStack {
-            Color.black.opacity(0.15)
-            if let image { Image(nsImage: image).resizable().scaledToFit() }
-            else if let failure {
-                VStack(spacing: 5) {
-                    Image(systemName: "photo.badge.exclamationmark").foregroundStyle(.orange)
+            slotBackground
+            if let image {
+                if aspectMode == .squareFill && !compact {
+                    SquareThumbnail(image: image)
+                } else {
+                    FittedThumbnail(image: image)
+                        .padding(aspectMode == .aspectFit && !compact ? 4 : 0)
+                }
+            } else if let failure {
+                VStack(spacing: 4) {
+                    Image(systemName: "photo.badge.exclamationmark")
+                        .foregroundStyle(DarkroomPalette.warningAmber)
                     if !compact {
-                        Text(failure).font(.caption2).lineLimit(3).multilineTextAlignment(.center)
-                        Button("重试") { retry += 1 }.font(.caption)
-                        Button("重新授权…") { model.reauthorizeThumbnailSource(item) }.font(.caption)
+                        Text(item.fileName)
+                            .font(.caption2.weight(.medium))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(failure)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                        HStack(spacing: 6) {
+                            Button("重试") { retry += 1 }.font(.caption2)
+                            Button("重新授权…") { model.reauthorizeThumbnailSource(item) }.font(.caption2)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
                     }
-                }.padding(5).help(failureDetail ?? failure)
-            } else { ProgressView().controlSize(.small) }
+                }
+                .padding(6)
+                .help(failureDetail ?? failure)
+            } else {
+                ProgressView().controlSize(.small)
+            }
         }
         .contextMenu {
             Button("重新载入缩略图") { retry += 1 }

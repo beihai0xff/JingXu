@@ -1,8 +1,30 @@
 # 图库界面与交互重构
 
-本轮依据已评审的原生简洁设计实现，业务范围与原片保护规则保持在现有 Core 协调器内。
+本轮依据 [2026-11-20 专业暗房工作台设计规范](../docs/superpowers/specs/2026-11-20-darkroom-ui-redesign-design.md) 完成统一暗房界面与摄影单键交互重构，业务范围、数据库结构与原片保护规则保持在现有 Core 协调器内。
 
-## 页面与操作
+## 2026-11-20 专业暗房工作台架构
+
+- **统一三栏工作台（`StudioShell`）**：本地图库与系统照片共用单一 `NavigationSplitView` 壳层（左侧导览栏 `StudioSidebar`、中央暗房舞台、右侧 296pt `PhotoInfoInspector` 或 `PhotoEditingSidebar`）。进入调色（`D`）自动收起左侧导览栏，退出调色按 `StudioSidebarMemory` 恢复此前展开偏好。
+- **零色偏暗房主题与画布（`DarkroomTheme` + `PreviewCanvas`）**：默认「暗房深色」，可选「跟随系统（看图与调色保持暗房）」；看图、对比、调色与裁剪画布统一使用 `#141416` 中性暗灰底色，消除看图与评片色偏。
+- **40pt 紧凑顶栏（`StudioToolbar`）**：集中侧栏开关、`[ 网格 G | 单图 ␣ | 对比 C | 调色 D ]` 舞台切换、内联「含子目录」范围胶囊、搜索筛选、双画幅视图选项与右上角任务中心胶囊（`TaskStatusPill`）。
+- **双画幅网格与零跳动悬浮操作坞（`PhotoGridStage` + `FloatingSelectionDock`）**：默认「原画幅完整显示」，支持一键切换「1:1 方格紧凑」；左上角悬停或已选时直接出现勾选圆圈，移除旧式勾选模式切换与顶部挤压工具条，改为底部毛玻璃悬浮胶囊操作坞。
+- **精密调色栏与双极性滑块（`PhotoEditingSidebar` + `DarkroomSlider`）**：顶部常驻 96pt 成片直方图与撤销／重做头；「明暗影调 / 白平衡 / 色彩」平铺展开，采用 4pt 双极性零点双向填充轨道、双击标签或轨道归零、点击右侧等宽数值胶囊精确输入。
+- **单键摄影快捷键与按住 `\` 对比（`StudioKeyRouter` + `LibraryKeyboardHandler`）**：统一路由 `G / Space / E / C / D / I / F / X / Delete / U / 0–5 / Shift+0–5 / Esc`，并监听 `keyDown`、`keyUp` 及窗口／应用失焦事件，确保按住 `\` 原图对比松开即恢复、不卡死。
+- **统一安全清单确认弹窗（`ManifestConfirmationSheet`）**：导入、按日期归档、跨来源移动、废纸篓清理、失效索引清理、导出成片、导出 XMP、加入系统照片与系统照片删除等操作统一展示预检统计卡片、范围路径、逐项跳过原因及不可逆语义横幅。
+- **删除过时界面文件**：直接删除 `FolderSidebar.swift`、`BatchSelectionBar.swift`、`ZoomPreview.swift` 以及旧的 `isBatchSelecting` / `isSelecting` 状态分支。
+
+## 2026-11-20 构建与验证记录
+
+在本机 `Command Line Tools`（Swift 6.4.2）与 `MacOSX26.5.sdk` 下执行统一构建与回归入口：
+
+- `zsh Scripts/build.sh check` 退出码 `0`：30 项发布流水线检查（`Tests/ReleasePipeline`）、全部 arm64 Debug / Release target 构建，以及 Release 版 `JingXuChecks` 全部 **59 项**检查通过（新增 `StudioWorkbenchChecks` 覆盖工作台舞台状态、侧栏记忆折叠、双极性滑块几何、单键快捷键矩阵、`#141416` 暗房画布色值及 2,505 项完整范围与悬停勾选隔离）。100,000 项游标分页 500 页 P95 为 16.9 ms。
+- `git diff --check` 退出码 `0`，无空白或格式问题。
+- 使用 Release 版 `JingXuChecks --workflow-ui-fixtures` 在仓库外临时目录生成 1,006 张合成样本图库，并在 `JINGXU_UI_TEST_ROOT` 隔离环境下启动 Release 版 `JingXuApp`：`StudioShell`、`DarkroomTheme` 与 `CatalogStore` 正常完成初始化且无运行时崩溃或标准错误警告，只读核对隔离 `Catalog.sqlite` 保持 1,006 条 `mediaAssets` 与 1 个 `sourceRoots`，验证后已终止测试进程并清理临时目录与独立 `UserDefaults` 套件。
+- **未验证边界**：当前终端未获 macOS 辅助功能（Accessibility，`osascript -25211`）授权，本轮未通过系统辅助功能自动化逐项点击原生窗口控件；键盘焦点切换、按住 `\` 物理按键交互、快速切图、Sandbox 目录授权、废纸篓与真实 RAW / 真实 PhotoKit 同步仍需在实际桌面界面与专用测试账户中人工复核。未打包覆盖已安装应用，未访问真实图库，未推送发布标签。
+
+---
+
+## 历史记录：v0.9.0 页面与操作重构
 
 - 图库默认两栏：来源侧栏与照片网格。搜索、筛选、视图选项位于顶部；信息与质量详情按需打开。
 - 网格按 200 项连续载入。选择后出现操作条，全选查询完整范围，批量操作冻结明确选择。

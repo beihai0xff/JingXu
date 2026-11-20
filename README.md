@@ -8,7 +8,7 @@
 
 本地处理 · 无需镜序账户 · 非破坏式调色
 
-**[下载 v0.9.3 测试版（Apple Silicon）](https://github.com/beihai0xff/JingXu/releases/download/v0.9.3/JingXu-0.9.3-test.37-macOS-arm64.dmg)** · [所有版本与更新说明](https://github.com/beihai0xff/JingXu/releases)
+**[下载 v0.10.0 测试版（Apple Silicon）](https://github.com/beihai0xff/JingXu/releases/download/v0.10.0/JingXu-0.10.0-test.38-macOS-arm64.dmg)** · [所有版本与更新说明](https://github.com/beihai0xff/JingXu/releases)
 
 [下载安装](#下载安装) · [快速上手](#快速上手) · [界面预览](#界面预览) · [常见问题](#常见问题) · [使用帮助](#使用帮助)
 
@@ -16,11 +16,11 @@
 
 需要 **macOS 14 Sonoma 或更新版本、Apple Silicon（M 系列芯片）Mac**。当前安装包不支持 Intel Mac。
 
-1. [下载 DMG 安装包](https://github.com/beihai0xff/JingXu/releases/download/v0.9.3/JingXu-0.9.3-test.37-macOS-arm64.dmg)。
+1. [下载 DMG 安装包](https://github.com/beihai0xff/JingXu/releases/download/v0.10.0/JingXu-0.10.0-test.38-macOS-arm64.dmg)。
 2. 打开 DMG，将「镜序.app」拖入「应用程序」。
 3. 从「应用程序」打开镜序，添加一个照片文件夹即可开始。
 
-> 当前提供的是未经 Apple 公证的测试版，macOS 可能阻止打开。安装前请阅读 [v0.9.3 发布说明](https://github.com/beihai0xff/JingXu/releases/tag/v0.9.3)；若系统拒绝启动，不要关闭系统安全保护。
+> 当前提供的是未经 Apple 公证的测试版，macOS 可能阻止打开。安装前请阅读 [v0.10.0 发布说明](https://github.com/beihai0xff/JingXu/releases/tag/v0.10.0)；若系统拒绝启动，不要关闭系统安全保护。
 
 <details>
 <summary>使用 Homebrew 安装</summary>
@@ -79,10 +79,13 @@ brew upgrade --cask beihai0xff/jingxu/jingxu
 
 | 常用按键 | 操作 |
 | --- | --- |
+| `G` / `空格`（或 `E`）/ `C` / `D` | 切换网格、单图查看、双图对比与调色舞台 |
 | `0`–`5` | 设置星级，`0` 为取消评分 |
 | `Shift` + `0`–`5` | 评分后前往下一张，适合连续选片 |
-| `Delete` / `⌫` | 标记淘汰；单张选片时前往下一张，**不会直接删除文件** |
+| `X` / `Delete` / `⌫` | 标记淘汰；单张选片时前往下一张，**不会直接删除文件** |
 | `U` | 取消淘汰标记 |
+| `I` / `F` | 开关右侧信息与质量检查器 / 底部胶片栏 |
+| 按住 `\` | 在调色中按住对比原图，松开恢复成片 |
 | `←` / `→` | 在大图中查看上一张／下一张 |
 
 ### 3. 调色与裁剪

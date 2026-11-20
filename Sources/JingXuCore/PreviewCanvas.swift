@@ -42,7 +42,12 @@ public enum PreviewGeometry {
 }
 
 public enum PreviewCanvasRenderer {
-    public static func draw(_ image: CGImage?, in context: CGContext, viewport: CGRect, imageRect: CGRect, background: CGColor = CGColor(gray: 0, alpha: 1)) {
+    public static let darkroomCanvasColor = CGColor(
+        colorSpace: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+        components: [20.0 / 255.0, 20.0 / 255.0, 22.0 / 255.0, 1.0]
+    ) ?? CGColor(gray: 20.0 / 255.0, alpha: 1.0)
+
+    public static func draw(_ image: CGImage?, in context: CGContext, viewport: CGRect, imageRect: CGRect, background: CGColor = darkroomCanvasColor) {
         context.saveGState()
         defer { context.restoreGState() }
         context.clip(to: viewport)
@@ -157,7 +162,7 @@ public final class PreviewCanvasView: NSView {
 
     public override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
-        PreviewCanvasRenderer.draw(image, in: context, viewport: bounds, imageRect: displayedImageRect, background: NSColor.windowBackgroundColor.cgColor)
+        PreviewCanvasRenderer.draw(image, in: context, viewport: bounds, imageRect: displayedImageRect, background: PreviewCanvasRenderer.darkroomCanvasColor)
     }
 
     public override func magnify(with event: NSEvent) {

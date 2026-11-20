@@ -46,7 +46,14 @@ final class AppModel: ObservableObject {
         set { photoSelection.focusID = newValue }
     }
     var selectedPhotoIDs: [String] { photoSelection.selectedIDs.sorted() }
-    @Published var isBatchSelecting = false { didSet { if oldValue != isBatchSelecting { automationSelectionToken = UUID() } } }
+    @Published var appearanceMode: AppAppearanceMode {
+        didSet { if oldValue != appearanceMode { appearanceMode.save(to: browsingDefaults) } }
+    }
+    @Published var gridAspectMode: GridAspectMode {
+        didSet { if oldValue != gridAspectMode { gridAspectMode.save(to: browsingDefaults) } }
+    }
+    @Published var showsInspector = false
+    @Published var showsFilmstrip = true
     var automationSelectionToken = UUID()
     var automationOwnsOperation = false
     var automationDirectoryPanel: NSOpenPanel?
@@ -59,10 +66,23 @@ final class AppModel: ObservableObject {
             return
         }
         let open = photoSelection.click(item.id, photoIDs: loadedAssets.photoIDs,
-                                        command: command, shift: shift, checkboxMode: isBatchSelecting, count: count)
+                                        command: command, shift: shift, checkboxMode: false, count: count)
         focusedAsset = item
         NSApp.keyWindow?.makeFirstResponder(nil)
         if open { openPreview(item) }
+        syncKeywordDraft()
+    }
+
+    func toggleAssetCheckmark(_ item: AssetListItem) {
+        guard item.kind == .photo, canChangeBrowseScope,
+              NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil else { return }
+        if keywordDraft != keywordSaved {
+            transitionPreview { self.toggleAssetCheckmark(item) }
+            return
+        }
+        _ = photoSelection.click(item.id, photoIDs: loadedAssets.photoIDs, checkboxMode: true)
+        focusedAsset = item
+        NSApp.keyWindow?.makeFirstResponder(nil)
         syncKeywordDraft()
     }
 
@@ -88,10 +108,78 @@ final class AppModel: ObservableObject {
         guard canChangeBrowseScope else { return }
         transitionPreview { self.photoSelection.clear(); self.focusedAsset = nil; self.syncKeywordDraft() }
     }
-    func changeCheckboxMode(_ enabled: Bool) {
-        guard canChangeBrowseScope else { return }
-        isBatchSelecting = enabled
 
+    var stageMode: StudioStageMode {
+        if showsSystemPhotos, let photos = systemPhotos {
+            return StudioStageMode.resolve(hasPreview: photos.preview != nil, isComparing: false, isEditing: photos.editor != nil)
+        }
+        return StudioStageMode.resolve(hasPreview: previewAsset != nil, isComparing: comparisonReference != nil, isEditing: colorEditor != nil)
+    }
+
+    var primaryTargetPhotoForPreview: AssetListItem? {
+        if let focus = selectedAsset, focus.kind == .photo { return focus }
+        if let firstSelected = assets.first(where: { $0.kind == .photo && photoSelection.selectedIDs.contains($0.id) }) {
+            return firstSelected
+        }
+        return assets.first(where: { $0.kind == .photo })
+    }
+
+    var canEnterCompareStage: Bool {
+        guard !showsSystemPhotos, operationBlockReason(.browse) == nil else { return false }
+        if photoSelection.selectedIDs.count == 2 { return true }
+        if previewAsset != nil, previewAsset?.similarGroupID != nil { return true }
+        return false
+    }
+
+    func switchStage(to target: StudioStageMode) {
+        if showsSystemPhotos, let photos = systemPhotos {
+            photos.switchStage(to: target)
+            return
+        }
+        guard target != stageMode else { return }
+        switch target {
+        case .grid:
+            closePreview()
+        case .loupe:
+            if stageMode == .develop {
+                finishColorEditing()
+            } else if stageMode == .compare {
+                transitionPreview {
+                    self.comparisonReference = nil
+                    self.clearComparisonPrefetch()
+                }
+            } else if let photo = primaryTargetPhotoForPreview {
+                if !photoSelection.selectedIDs.contains(photo.id) { selectAsset(photo) }
+                openPreview(photo)
+            }
+        case .compare:
+            if photoSelection.selectedIDs.count == 2 {
+                compareSelected()
+            } else if let groupID = (previewAsset ?? selectedAsset)?.similarGroupID {
+                compareSimilarGroup(groupID)
+            }
+        case .develop:
+            if stageMode == .loupe {
+                beginColorEditing()
+            } else if stageMode == .compare {
+                transitionPreview {
+                    self.comparisonReference = nil
+                    self.clearComparisonPrefetch()
+                    self.beginColorEditing()
+                }
+            } else if stageMode == .grid, let photo = primaryTargetPhotoForPreview, canStartColorAction {
+                transitionPreview {
+                    if !self.photoSelection.selectedIDs.contains(photo.id) { self.selectAsset(photo) }
+                    self.presentPreview(photo)
+                    self.beginColorEditing()
+                }
+            }
+        }
+    }
+
+    func endActiveOriginalComparison() {
+        colorEditor?.endComparison()
+        systemPhotos?.editor?.endComparison()
     }
     @Published var isShowingPhotoShare = false
     @Published var shareDraft: [AssetListItem] = []
@@ -224,6 +312,8 @@ final class AppModel: ObservableObject {
             browsingDefaults = UserDefaults(suiteName: "app.jingxu.ui-test.\(id)")!
         } else { browsingDefaults = .standard }
         includeSubdirectories = browsingDefaults.object(forKey: "BrowseIncludesSubdirectories") as? Bool ?? true
+        appearanceMode = AppAppearanceMode.load(from: browsingDefaults)
+        gridAspectMode = GridAspectMode.load(from: browsingDefaults)
         shareObservation = photoShareSession.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         annotationUndoManager.levelsOfUndo = 50
         annotationUndoManager.groupsByEvent = false

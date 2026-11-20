@@ -121,7 +121,18 @@ if [[ "$MODE" == release ]]; then
   xcrun stapler validate "$APP_DIR"
   spctl --assess --type execute --verbose "$APP_DIR"
 fi
-hdiutil create -volname "镜序 ${VERSION}${SUFFIX}" -srcfolder "$STAGING" -format UDZO "${BUILD_TEMP}/image.dmg"
+create_dmg() {
+  local attempt
+  for attempt in 1 2 3; do
+    rm -f "${BUILD_TEMP}/image.dmg"
+    if hdiutil create -volname "镜序 ${VERSION}${SUFFIX}" -srcfolder "$STAGING" -format UDZO "${BUILD_TEMP}/image.dmg"; then
+      return 0
+    fi
+    [[ "$attempt" -lt 3 ]] || return 1
+    sleep 2
+  done
+}
+create_dmg
 if [[ "$MODE" == release ]]; then
   codesign "${SIGN_OPTIONS[@]}" "${BUILD_TEMP}/image.dmg"
   notarize "${BUILD_TEMP}/image.dmg" "${BUILD_TEMP}/dmg-notary.plist"
